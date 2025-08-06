@@ -1,0 +1,36 @@
+# To install:
+# - `pre-commit install`
+# To run:
+# - `pre-commit run --all-files`
+repos:
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v5.0.0
+    hooks:
+      - id: check-added-large-files
+        args: ["--maxkb=61440"]
+      - id: check-case-conflict
+      - id: check-merge-conflict
+      - id: check-yaml
+        args: [--allow-multiple-documents]
+      - id: check-json
+      - id: check-toml
+      - id: requirements-txt-fixer
+      - id: check-ast
+      - id: trailing-whitespace
+      - id: end-of-file-fixer
+
+  # Linting and formatting via Ruff
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    # Ruff version.
+    rev: v0.12.4
+    hooks:
+      # Run the linter.
+      - id: ruff
+        args: [--fix]
+        files: ^wsds/
+        exclude: \.ipynb$ # Excluding notebooks for now.
+
+      # Run the formatter.
+      - id: ruff-format
+        files: ^wsds/
+        exclude: \.ipynb$ # Excluding notebooks for now.

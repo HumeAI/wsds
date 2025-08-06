@@ -1,0 +1,4 @@
+numpy
+pyarrow
+torch
+torchaudio

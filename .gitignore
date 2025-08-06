@@ -1,0 +1,34 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+
+# Virtual environments
+env/
+venv/
+.venv/
+
+# Distribution / packaging
+build/
+dist/
+*.egg-info/
+
+# Test and coverage reports
+.pytest_cache/
+
+# Ruff cache
+.ruff_cache/
+
+# Jupyter Notebook checkpoints
+.ipynb_checkpoints
+
+# Environment variables
+.env
+
+# VS Code settings
+.vscode/
+
+# Temporary files
+*.tmp
+*.log
+
+
