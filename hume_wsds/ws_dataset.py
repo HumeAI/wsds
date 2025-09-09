@@ -20,6 +20,13 @@ class WSDataset:
         self._open_shards = {}
         self._linked_datasets = {}
 
+        self.computed_columns = {}
+
+    def add_computed(self, name, **link):
+        subdir = name+'.wsds-computed'
+        self.computed_columns[subdir] = link
+        self.fields[name] = (subdir, name)
+
     def get_key(self, shard_name, offset):
         file_name, start_offset = self.index.query(
             """
@@ -37,12 +44,12 @@ class WSDataset:
             self._linked_datasets[dataset_dir] = WSDataset(dataset_dir)
         return self._linked_datasets[dataset_dir]
 
-    def get_linked_shard(self, subdir, shard_name):
-        link = json.loads(Path(subdir).read_text())
-
-        loader_mod, loader = link['loader']
-        loader_module = importlib.import_module(loader_mod)
-        loader_class = getattr(loader_module, loader)
+    def get_linked_shard(self, link, shard_name):
+        loader_class = link['loader']
+        if isinstance(loader_class, list):
+            loader_mod, loader = loader_class
+            loader_module = importlib.import_module(loader_mod)
+            loader_class = getattr(loader_module, loader)
 
         return loader_class.from_link(link, self.get_linked_dataset(f"{self.dir}/{link['dataset_dir']}"), self, shard_name)
 
@@ -52,8 +59,10 @@ class WSDataset:
         shard = self._open_shards.get(dir, None)
         if shard is not None and shard.shard_name == shard_name: return shard
 
-        if subdir.endswith(".wsds-link"): # not a directory, but a JSON file
-            shard = self.get_linked_shard(dir, shard_name)
+        if subdir in self.computed_columns:
+            shard = self.get_linked_shard(self.computed_columns[subdir], shard_name)
+        elif subdir.endswith(".wsds-link"): # not a directory, but a JSON file
+            shard = self.get_linked_shard(json.loads(Path(dir).read_text()), shard_name)
         else:
             shard = WSShard(f"{dir}/{shard_name}.wsds", shard_name=shard_name)
 
