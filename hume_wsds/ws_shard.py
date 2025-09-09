@@ -65,6 +65,9 @@ class WSSourceAudioShard:
     def from_link(cls, link, source_dataset, derived_dataset, shard_name):
         return cls(shard_name, source_dataset, derived_dataset, link["vad_column"])
 
+    def get_timestamps(self, segment_offset):
+        return self._source_sample[self.vad_column][segment_offset]
+
     def get_sample(self, _column, offset):
         file_name, segment_offset = self.derived_dataset.parse_key(
             self.derived_dataset.get_key(self.shard_name, offset)
@@ -77,5 +80,5 @@ class WSSourceAudioShard:
             self._source_reader = AudioReader(self._source_sample["mp3"]) # FIXME: unhardcode mp3
             self._source_file_name = file_name
 
-        tstart, tend = self._source_sample[self.vad_column][segment_offset]
+        tstart, tend = self.get_timestamps(segment_offset)
         return WSAudio(self._source_reader, tstart, tend)
