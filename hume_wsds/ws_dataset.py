@@ -1,9 +1,11 @@
+import importlib
+import json
 import random
 from pathlib import Path
 
 from hume_wsds.utils import list_all_columns, make_key, parse_key
 from hume_wsds.ws_index import WSIndex
-from hume_wsds.ws_sample import WSSample, WSSourceShard
+from hume_wsds.ws_sample import WSSample
 from hume_wsds.ws_shard import WSShard
 
 
@@ -30,24 +32,31 @@ class WSDataset:
         ).fetchone()
         return make_key(file_name, offset - start_offset)
 
+    def get_linked_dataset(self, dataset_dir):
+        if dataset_dir not in self._linked_datasets:
+            self._linked_datasets[dataset_dir] = WSDataset(dataset_dir)
+        return self._linked_datasets[dataset_dir]
+
+    def get_linked_shard(self, subdir, shard_name):
+        link = json.loads(Path(subdir).read_text())
+
+        loader_mod, loader = link['loader']
+        loader_module = importlib.import_module(loader_mod)
+        loader_class = getattr(loader_module, loader)
+
+        return loader_class.from_link(link, self.get_linked_dataset(f"{self.dir}/{link['dataset_dir']}"), self, shard_name)
+
     def get_shard(self, subdir, shard_name):
         dir = f"{self.dir}/{subdir}"
+
         shard = self._open_shards.get(dir, None)
-        if shard is None or shard.shard_name != shard_name:
-            if subdir.endswith(".wsds-link"):
-                # json.loads(Path(dir).read_text())
-                link = dict(
-                    dataset_dir=f"{self.dir}/../source/", relation="mvad_source"
-                )
-                if link["dataset_dir"] not in self._linked_datasets:
-                    self._linked_datasets[link["dataset_dir"]] = WSDataset(
-                        link["dataset_dir"]
-                    )
-                shard = WSSourceShard(
-                    shard_name, self._linked_datasets[link["dataset_dir"]], self
-                )
-            else:
-                shard = WSShard(f"{dir}/{shard_name}.wsds", shard_name=shard_name)
+        if shard is not None and shard.shard_name == shard_name: return shard
+
+        if subdir.endswith(".wsds-link"): # not a directory, but a JSON file
+            shard = self.get_linked_shard(dir, shard_name)
+        else:
+            shard = WSShard(f"{dir}/{shard_name}.wsds", shard_name=shard_name)
+
         self._open_shards[dir] = shard
         return shard
 

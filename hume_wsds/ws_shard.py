@@ -1,9 +1,12 @@
+from dataclasses import dataclass
 import io
 import pickle
 
 import numpy as np
 import pyarrow as pa
 
+from hume_wsds.ws_sample import WSSample
+from hume_wsds.ws_audio import AudioReader, WSAudio
 
 class WSShard:
     def __init__(self, fname, shard_name=None):
@@ -45,3 +48,34 @@ class WSShard:
         if self._data:
             r += f" # cached_region = [{self._start, self._end}]"
         return r
+
+@dataclass(slots=True)
+class WSSourceAudioShard:
+    shard_name: str
+    source_dataset: "WSDataset"
+    derived_dataset: "WSDataset"
+    vad_column: str
+
+    # cache
+    _source_file_name: str = None
+    _source_sample: WSSample = None
+    _source_reader: AudioReader = None
+
+    @classmethod
+    def from_link(cls, link, source_dataset, derived_dataset, shard_name):
+        return cls(shard_name, source_dataset, derived_dataset, link["vad_column"])
+
+    def get_sample(self, _column, offset):
+        file_name, segment_offset = self.derived_dataset.parse_key(
+            self.derived_dataset.get_key(self.shard_name, offset)
+        )
+
+        if self._source_file_name != file_name:
+            self._source_sample = WSSample(
+                self.source_dataset, *self.source_dataset.get_position(file_name)
+            )
+            self._source_reader = AudioReader(self._source_sample["mp3"]) # FIXME: unhardcode mp3
+            self._source_file_name = file_name
+
+        tstart, tend = self._source_sample[self.vad_column][segment_offset]
+        return WSAudio(self._source_reader, tstart, tend)

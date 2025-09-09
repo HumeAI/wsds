@@ -1,12 +1,8 @@
 from dataclasses import dataclass
 
-from hume_wsds.ws_audio import AudioReader, WSAudio
-from hume_wsds.ws_dataset import WSDataset
-
-
 @dataclass(frozen=True, slots=True)
 class WSSample:
-    dataset: WSDataset
+    dataset: "WSDataset"
     shard_name: str
     offset: int
 
@@ -37,25 +33,3 @@ class WSSample:
             r += f"  {k} = {v},\n"
         r += "})\n"
         return r
-
-
-@dataclass(frozen=True, slots=True)
-class WSSourceShard:
-    shard_name: str
-    source_dataset: "WSDataset"
-    derived_dataset: "WSDataset"
-
-    def get_sample(self, column, offset):
-        # FIXME: using the global parse_key here confuses marimo compiler in strange ways
-        file_name, segment_offset = self.derived_dataset.parse_key(
-            self.derived_dataset.get_key(self.shard_name, offset)
-        )
-        print(file_name, segment_offset)
-        source_sample = WSSample(
-            self.source_dataset, *self.source_dataset.get_position(file_name)
-        )
-        # print(_, offset, self.derived_dataset.get_key(self.shard_name, offset))
-        # print(file_name, source_sample['raw.vad.npy'].shape)
-        tstart, tend = source_sample["raw.vad.npy"][segment_offset]
-
-        return WSAudio(AudioReader(source_sample["mp3"]), tstart, tend)
