@@ -98,11 +98,11 @@ class WSDataset:
         return shard_name, file_offset + offset
 
     def random_position(self):
-        shard_name, offset = self.index.query(
-            "SELECT s.shard, offset FROM files AS f, shards AS s WHERE f.rowid = ? AND s.shard_id == f.shard_id",
-            random.randrange(self.index.n_files),
+        shard_name, n_samples = self.index.query(
+            "SELECT s.shard, s.n_samples FROM shards AS s WHERE s.rowid = ?",
+            random.randrange(self.index.n_shards),
         ).fetchone()
-        return shard_name, offset
+        return shard_name, random.randrange(n_samples)
 
     def __iter__(self, max_per_shard=None):
         while True:
