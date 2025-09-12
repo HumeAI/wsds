@@ -2,3 +2,4 @@ numpy
 pyarrow
 torch
 torchaudio
+fire

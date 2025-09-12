@@ -4,6 +4,9 @@ version = "0.1.0"
 requires-python = ">=3.10"
 dynamic = ["dependencies"]
 
+[project.scripts]
+wsds = "hume_wsds.__main__:main"
+
 [tool.hatch.metadata]
 allow-direct-references = true
 
