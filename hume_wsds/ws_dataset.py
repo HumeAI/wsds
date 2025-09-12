@@ -99,9 +99,11 @@ class WSDataset:
         return shard_name, file_offset + offset
 
     def random_position(self):
+        # FIXME: randomize the global sample index once (this has a bias towards smaller shards)
+        # we'll need to modify the index to store the cumulative number of samples in each shard
         shard_name, n_samples = self.index.query(
             "SELECT s.shard, s.n_samples FROM shards AS s WHERE s.rowid = ?",
-            random.randrange(self.index.n_shards),
+            random.randrange(self.index.n_shards) + 1, # sqlite starts indexing at 1
         ).fetchone()
         return shard_name, random.randrange(n_samples)
 
