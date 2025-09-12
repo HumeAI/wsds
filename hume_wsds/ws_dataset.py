@@ -62,7 +62,8 @@ class WSDataset:
         if subdir in self.computed_columns:
             shard = self.get_linked_shard(self.computed_columns[subdir], shard_name)
         elif subdir.endswith(".wsds-link"): # not a directory, but a JSON file
-            shard = self.get_linked_shard(json.loads(Path(dir).read_text()), shard_name)
+            self.computed_columns[subdir] = json.loads(Path(dir).read_text())
+            shard = self.get_linked_shard(self.computed_columns[subdir], shard_name)
         else:
             shard = WSShard(f"{dir}/{shard_name}.wsds", shard_name=shard_name)
 
