@@ -61,7 +61,7 @@ def list_all_shards(dataset: str):
     for subdir, files in shards.items():
         extras = files - common_shards
         if extras:
-            extras = '\n'.join([f'- {shard}' for shard in extras])
+            extras = '\n'.join(extras)
             raise ValueError(f"Path {subdir} has files not present in all shards:\n{extras}")
     return [x.replace('.wsds', '') for x in common_shards]
 

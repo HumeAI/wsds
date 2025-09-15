@@ -128,6 +128,11 @@ def dump_index(source_dataset:Path):
         pass
 
 @command
+def validate_shards(dataset):
+    from .utils import list_all_shards
+    list_all_shards(dataset)
+
+@command
 def init(
     new_dataset:Path,
     source_dataset:Path | None = None,
