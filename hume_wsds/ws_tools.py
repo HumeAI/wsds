@@ -22,21 +22,32 @@ def command(name_or_fun):
 
 @command('list')
 def _list(input_shard:str):
-    """Lists keys in a wsds shard."""
-    reader = pa.RecordBatchFileReader(pa.memory_map(input_shard))
-    for i in range(reader.num_record_batches):
-        for key in reader.get_batch(i)['__key__']:
-            print(key)
-
+    """Lists keys in a wsds dataset or shard."""
+    if (Path(input_shard) / 'index.sqlite3').exists():
+        # FIXME: implement keys
+        pass
+    else:
+        reader = pa.RecordBatchFileReader(pa.memory_map(input_shard))
+        try:
+            for i in range(reader.num_record_batches):
+                for key in reader.get_batch(i)['__key__']:
+                    print(key)
+        except BrokenPipeError:
+            pass
 
 
 @command
-def inspect(input_shard:str):
-    """Displays metadata and schema of a wsds shard."""
-    reader = pa.RecordBatchFileReader(pa.memory_map(input_shard))
-    print(f"Batches: {reader.num_record_batches}")
-    print(f"Rows: {int(reader.schema.metadata[b'batch_size']) * reader.num_record_batches}")
-    print(f"Schema:\n{reader.schema}")
+def inspect(input_path:str):
+    """Displays metadata and schema of a wsds dataset or shard."""
+    if (Path(input_path) / 'index.sqlite3').exists():
+        from . import WSDataset
+        ds = WSDataset(input_path)
+        print(ds)
+    else:
+        reader = pa.RecordBatchFileReader(pa.memory_map(input_path))
+        print(f"Batches: {reader.num_record_batches}")
+        print(f"Rows: {int(reader.schema.metadata[b'batch_size']) * reader.num_record_batches}")
+        print(f"Schema:\n{reader.schema}")
 
 
 
