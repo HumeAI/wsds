@@ -3,7 +3,7 @@ import json
 import random
 from pathlib import Path
 
-from hume_wsds.utils import list_all_columns, make_key, parse_key
+from hume_wsds.utils import list_all_columns, list_all_shards, make_key, parse_key
 from hume_wsds.ws_index import WSIndex
 from hume_wsds.ws_sample import WSSample
 from hume_wsds.ws_shard import WSShard
@@ -15,8 +15,12 @@ class WSDataset:
 
     def __init__(self, dir, segmented=None):
         self.dir = dir
-        self.index = WSIndex(f"{self.dir}/index.sqlite3")
-        self.fields = list_all_columns(self.dir, next(self.index.shards()))
+        index_file = f"{self.dir}/index.sqlite3"
+        if Path(index_file).exists():
+            self.index = WSIndex(index_file)
+        else:
+            self.index = None
+        self.fields = list_all_columns(self.dir, next(self.index.shards()) if self.index else None)
         self.segmented = (
             (Path(self.dir) / "segmented").exists() if segmented is None else segmented
         )
@@ -24,6 +28,12 @@ class WSDataset:
         self._linked_datasets = {}
 
         self.computed_columns = {}
+
+    def get_shard_list(self):
+        if self.index:
+            return list(self.index.shards())
+        else:
+            return list_all_shards(self.dir)
 
     def add_computed(self, name, **link):
         subdir = name+'.wsds-computed'
@@ -81,12 +91,13 @@ class WSDataset:
         return self.get_shard(subdir, shard_name).get_sample(column, offset)
 
     def sequential_from(self, shard_name, start, end=None):
-        if end is None:
+        if end is None and self.index:
             end = self.index.query(
                 "SELECT n_samples FROM shards WHERE shard = ?", shard_name
             ).fetchone()[0]
         i = start
-        while i < end:
+        # without an index, we still return the sample but you'll get an error on first field access
+        while i < end if end is not None else True:
             yield WSSample(self, shard_name, i)
             i += 1
 

@@ -31,7 +31,7 @@ class WSShard:
 
         j = offset % self.batch_size
         if j >= len(self._data):
-            return
+            raise IndexError(f"{offset} is out of range for shard {self.fname}")
         data = self._data[column][j]
         # FIXME: implement proper encoders and decoders
         if column.endswith("npy"):

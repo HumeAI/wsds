@@ -47,6 +47,23 @@ def list_all_columns(ds_path, shard_name=None):
                     cols[col] = (p.name, col)
     return dict(sorted(cols.items()))
 
+def list_all_shards(dataset: str):
+    shards = {}
+    for subdir in Path(dataset).iterdir():
+        if not subdir.is_dir():
+            continue
+        shards[subdir] = {file.name for file in subdir.iterdir() if file.suffix == '.wsds'}
+        if not shards[subdir]:
+            print(f"error: empty folder {subdir}")
+            del shards[subdir]
+
+    common_shards = set.intersection(*shards.values())
+    for subdir, files in shards.items():
+        extras = files - common_shards
+        if extras:
+            extras = '\n'.join([f'- {shard}' for shard in extras])
+            raise ValueError(f"Path {subdir} has files not present in all shards:\n{extras}")
+    return [x.replace('.wsds', '') for x in common_shards]
 
 def make_key(src_file: str, segment_id: int):
     """Make a composite string key from source file name and sequential segment id.
