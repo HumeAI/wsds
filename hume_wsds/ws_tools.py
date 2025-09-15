@@ -4,15 +4,24 @@ from pathlib import Path
 
 import pyarrow as pa
 
-__all__ = []
-def command(f):
-    __all__.append(f.__name__)
-    return f
+commands = {}
+def command(name_or_fun):
+    name = None
+
+    def decorator(f):
+        commands[name or f.__name__] = f
+        return f
+
+    if isinstance(name_or_fun, str):
+        name = name_or_fun
+        return decorator
+    else:
+        return decorator(name_or_fun)
 
 
 
-@command
-def list(input_shard:str):
+@command('list')
+def _list(input_shard:str):
     """Lists keys in a wsds shard."""
     reader = pa.RecordBatchFileReader(pa.memory_map(input_shard))
     for i in range(reader.num_record_batches):

@@ -1,9 +1,9 @@
 import fire
 
-from . import ws_tools
+from .ws_tools import commands
 
 def main():
-    fire.Fire({k:getattr(ws_tools, k) for k in ws_tools.__all__}, name="wsds")
+    fire.Fire(commands, name="wsds")
 
 if __name__ == '__main__':
     main()
