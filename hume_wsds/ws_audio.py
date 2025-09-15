@@ -26,22 +26,6 @@ def load_segment(src, start, end, sample_rate=None):
     return AudioReader(src).read_segment(start, end, sample_rate=sample_rate)
 
 
-@dataclass(frozen=True, slots=True)
-class LazyArrowBinary:
-    """A lazy reference to a binary sample inside a shard (like an audio file)."""
-
-    shard: str
-    column: str
-    offset: int
-
-    def as_buffer(self):
-        reader = pa.RecordBatchFileReader(pa.memory_map(self.shard))
-        bs = int(reader.schema.metadata[b"batch_size"])
-        b = reader.get_batch(self.offset // bs)
-        src = b["mp3"][self.offset % bs]
-        return src.as_buffer()
-
-
 @dataclass(slots=True)
 class AudioReader:
     """A lazy seeking-capable audio reader for random-access to recordings stored in WSDS shards."""
