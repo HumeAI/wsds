@@ -4,48 +4,6 @@ import sqlite3
 import tarfile
 from pathlib import Path
 
-
-def list_keys_tarfile(input_shard):
-    last_key = None
-    if input_shard.endswith("gz"):
-        o = gzip.open
-    else:
-        o = open
-    with o(input_shard, "rb") as f:
-        for name in tarfile.TarFile(fileobj=f).getnames():
-            path, name = name.rsplit("/", 1)
-            key = name.split(".", 1)[0]
-            if key != last_key:
-                yield f"{path}/{key}"
-            last_key = key
-
-
-def shard_base_name(input_shard):
-    name = input_shard.rsplit("/", 1)[1]
-    if name.endswith(".gz"):
-        return name.rsplit(".", 3)[0]
-    else:
-        return name.rsplit(".", 2)[0]
-
-
-# TODO:
-# - add a function to generate based on mvad shards instead of downstream shards
-def extract_index(input_shard, segmented=False):
-    last_key = None
-    index = []
-    for i, key in enumerate(list_keys_tarfile(input_shard)):
-        if segmented:
-            key = key.rsplit("_", 1)[0]
-        if key != last_key:
-            index.append((key, i))
-        last_key = key
-    return {
-        "shard_name": shard_base_name(input_shard),
-        "index": index,
-        "n_samples": i + 1,
-    }
-
-
 # TODO:
 # - add comulative segment duration to the index
 # - add support for dataset splits (split on file-level or segment-level?)
