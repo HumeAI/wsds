@@ -52,7 +52,7 @@ def inspect(input_path:str):
 
 
 @command
-def from_webdataset(
+def shard_from_webdataset(
     input_shard:str,          # input shard URL/path
     output_shard:str,         # output shard URL/path
     batch_size:int=16,        # batch size
