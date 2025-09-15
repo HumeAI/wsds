@@ -1,11 +1,9 @@
+from __future__ import annotations
+
 import io
 import typing
 from dataclasses import dataclass
-
 import pyarrow as pa
-import torch
-import torchaudio
-
 
 def to_filelike(src):
     """Coerces files, byte-strings and PyArrow binary buffers into file-like objects."""
@@ -58,12 +56,16 @@ class AudioReader:
 
     # we materialize the reader on first use
     def get_reader(self, sample_rate=None):
+        # import here to avoid pulling in the heavy torch dependency unless we really need it
+        import torchaudio
+
         if self.sample_rate is not None:
             assert not sample_rate or sample_rate == self.sample_rate, (
                 "please use a consistent sample rate"
             )
 
         if self.reader is None:
+            # FIXME: move to AudioDecoder from torchcodec
             reader = torchaudio.io.StreamReader(src=to_filelike(self.src))
             info = reader.get_src_stream_info(0)
 
