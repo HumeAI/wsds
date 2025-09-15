@@ -131,6 +131,9 @@ class WSIndex:
     def n_samples(self):
         return self.conn.execute("SELECT SUM(n_samples) FROM shards;").fetchone()[0]
 
+    def shards(self):
+        return (shard for shard, in self.conn.execute("SELECT shard FROM shards;"))
+
     def query(self, query, *args):
         return self.conn.execute(query, args)
 

@@ -12,8 +12,8 @@ from hume_wsds.ws_shard import WSShard
 class WSDataset:
     def __init__(self, dir, segmented=None):
         self.dir = dir
-        self.fields = list_all_columns(self.dir)
         self.index = WSIndex(f"{self.dir}/index.sqlite3")
+        self.fields = list_all_columns(self.dir, next(self.index.shards()))
         self.segmented = (
             (Path(self.dir) / "segmented").exists() if segmented is None else segmented
         )

@@ -13,7 +13,11 @@ def find_first_shard(path):
     return next(Path(path).iterdir(), None)
 
 
-def list_all_columns(ds_path):
+def list_all_columns(ds_path, shard_name=None):
+    """Given a dataset path, return a list of all columns.
+
+    If you also give a shard name it greatly speeds it up
+    on network-filesystems where listing folder contents is slow."""
     dupes = {}
     cols = {}
     for p in Path(ds_path).iterdir():
@@ -23,10 +27,11 @@ def list_all_columns(ds_path):
             continue
         if not p.is_dir():
             continue
-        # FIXME: this is quite expensive (adds up to 100ms on youtube-cc)
-        # we should get one shard name from the sqlite index instead
-        fname = next(p.iterdir(), None)
-        if fname:
+        if shard_name is None:
+            fname = find_first_shard(p)
+        else:
+            fname = (p / shard_name).with_suffix(".wsds")
+        if fname and fname.exists():
             for col in get_columns(fname):
                 if col == "__key__":
                     continue
