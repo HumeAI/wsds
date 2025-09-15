@@ -77,7 +77,7 @@ class WSSourceAudioShard:
             self._source_sample = WSSample(
                 self.source_dataset, *self.source_dataset.get_position(file_name)
             )
-            self._source_reader = AudioReader(self._source_sample["mp3"]) # FIXME: unhardcode mp3
+            self._source_reader = AudioReader(self._source_sample.get_audio())
             self._source_file_name = file_name
 
         tstart, tend = self.get_timestamps(segment_offset)

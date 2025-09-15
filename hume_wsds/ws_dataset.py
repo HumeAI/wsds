@@ -10,6 +10,9 @@ from hume_wsds.ws_shard import WSShard
 
 
 class WSDataset:
+    # FIXME: this should be overridable with metadata in index.sqlite3
+    _audio_file_keys = ["flac", "mp3", "sox", "wav", "m4a", "ogg", "wma", "opus"]
+
     def __init__(self, dir, segmented=None):
         self.dir = dir
         self.index = WSIndex(f"{self.dir}/index.sqlite3")

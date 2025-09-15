@@ -9,6 +9,11 @@ class WSSample:
     def get_key(self):
         return self.dataset.get_key(self.shard_name, self.offset)
 
+    def get_audio(self, audio_columnts=None):
+        for col in self.dataset._audio_file_keys:
+            if col in self: return self[col]
+        raise KeyError(f"No audio column (tried {self.dataset._audio_file_keys}) found among: {self.keys()}")
+
     def keys(self):
         return self.dataset.fields.keys()
 
@@ -20,6 +25,9 @@ class WSSample:
 
     def __getitem__(self, field):
         return self.dataset.get_sample(self.shard_name, field, self.offset)
+
+    def __contains__(self, field):
+        return field in self.dataset.fields.keys()
 
     def __repr__(self):
         r = f"WSSample({repr(self.dataset)}, shard_name={repr(self.shard_name)}, offset={repr(self.offset)}, fields={'{'}\n"

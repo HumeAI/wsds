@@ -5,7 +5,6 @@ import tarfile
 from pathlib import Path
 
 # TODO:
-# - add comulative segment duration to the index
 # - add support for dataset splits (split on file-level or segment-level?)
 class WSDSIndexWriter:
     def __init__(self, fname):
