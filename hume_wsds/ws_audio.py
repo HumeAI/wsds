@@ -5,13 +5,13 @@ import typing
 from dataclasses import dataclass
 import pyarrow as pa
 
-def to_filelike(src):
+def to_filelike(src: typing.Any) -> typing.BinaryIO:
     """Coerces files, byte-strings and PyArrow binary buffers into file-like objects."""
     if hasattr(src, "read"):  # an open file
         return src
     # if not an open file then we assume some kind of binary data in memory
     if hasattr(src, "as_buffer"):  # PyArrow binary data
-        src = src.as_buffer()
+        return pa.BufferReader(src.as_buffer())
     return io.BytesIO(src)
 
 
