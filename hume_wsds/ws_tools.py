@@ -82,6 +82,8 @@ def shard_from_webdataset(
                     v = json.loads(v)
                     k = k[:-len('.json')]
                     v = cast_types_for_storage(v, float_cast='float16', int_cast='int32')
+                if out_dir == 'dtok_v2_ml_50hz_32x16384_graphemes_key16k' and k == 'dtok_level_1.npy':
+                    k = 'dtok_level_1_16k.npy'
                 # if k.endswith('.vad.npy'):
                 #     v = list(np.load(io.BytesIO(v)))
                 #     k = k[:-len('.npy')]
