@@ -8,10 +8,12 @@ import pyarrow as pa
 from hume_wsds.ws_sample import WSSample
 from hume_wsds.ws_audio import AudioReader, WSAudio
 
+
 class WSShard:
     def __init__(self, fname, shard_name=None):
         self.shard_name = shard_name
         self.fname = fname
+
         self.reader = pa.RecordBatchFileReader(pa.memory_map(fname))
         self.batch_size = int(self.reader.schema.metadata[b"batch_size"])
 

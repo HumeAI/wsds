@@ -15,7 +15,6 @@ class WSDSIndexWriter:
     def __enter__(self):
         self.fname.unlink(missing_ok=True)
         self.conn = sqlite3.connect(self.fname)
-        print("opening", self.fname)
 
         self.conn.execute("""
         CREATE TABLE files (
@@ -83,9 +82,7 @@ class WSDSIndexWriter:
         self.global_offset += s["n_samples"]
 
     def __exit__(self, exc_type, exc_value, traceback):
-        print("exiting:", exc_type, exc_value, traceback)
         if exc_type is None:
-            print("closing", self.fname)
             self.conn.commit()
             self.conn.close()
 
@@ -95,11 +92,12 @@ class WSIndex:
         self.fname = fname
         if not Path(fname).exists():
             raise ValueError(f"WSIndex not found: {fname}")
+        # immutable=1,ro=True greatly speeds up all queries when the database is on a remote/cluster file system
         self.conn = sqlite3.connect(f"file:{fname}?immutable=1,ro=True", uri=True)
 
     @functools.cached_property
     def n_shards(self):
-        return self.conn.execute("SELECT COUNT(n_samples) FROM shards;").fetchone()[0]
+        return self.conn.execute("SELECT COUNT(*) FROM shards;").fetchone()[0]
 
     @functools.cached_property
     def n_files(self):
