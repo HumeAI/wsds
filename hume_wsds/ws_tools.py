@@ -102,3 +102,101 @@ def drop_keys(dict, *keys):
     """Remove specified keys from the given dictionary."""
     for key in keys:
         if key in dict: del dict[key]
+
+@command
+def dump_index(source_dataset:Path):
+    """Dump the index of the given dataset in a readable format."""
+    from . import WSDataset
+
+    ds = WSDataset(source_dataset)
+
+    try:
+        for sample in ds.index.query("SELECT name,s.shard,offset FROM files AS f, shards AS s WHERE s.shard_id == f.shard_id ORDER BY name,s.shard,offset;"):
+            print(*sample)
+    except BrokenPipeError:
+        pass
+
+@command
+def init(
+    new_dataset:Path,
+    source_dataset:Path | None = None,
+    vad_column:str | None = None,
+    num_workers:int = 32,
+):
+    """Initialize a new dataset, from scratch or from a segmentation of an existing one."""
+    from . import WSDataset
+    from fastprogress import progress_bar
+    from .ws_index import WSDSIndexWriter
+    from . import AtomicFile
+    import multiprocessing
+
+    new_dataset = Path(new_dataset)
+
+    if source_dataset is not None:
+        assert vad_column is not None, "vad_column must be specified when initializing from a source dataset"
+    else:
+        source_dataset = new_dataset
+
+    ds = WSDataset(source_dataset)
+    shard_extractor = functools.partial(extract_index_for_shard, source_dataset, vad_column=vad_column)
+    all_shards = ds.get_shard_list()
+
+    with AtomicFile(new_dataset / 'index.sqlite3') as fname:
+        with WSDSIndexWriter(fname) as index:
+            with multiprocessing.Pool(num_workers) as p:
+                for r in progress_bar(p.imap_unordered(shard_extractor, all_shards), total=len(all_shards)):
+                    try:
+                        index.append(r)
+                    except:
+                        print("Failed to append records to index:", r)
+                        raise
+
+            index.append_metadata({
+                'segmented': True if vad_column else False
+            })
+
+
+def extract_index_for_shard(dataset, shard, vad_column=None):
+    from . import WSDataset
+    from torchcodec.decoders import AudioDecoder
+    from .ws_audio import to_filelike
+
+    ds = WSDataset(dataset)
+    index = []
+    i = 0
+    for s in ds.sequential_from(shard, 0):
+        try:
+            key = str(s['__key__'])
+        except IndexError:
+            # this can only happen if we don't have an index yet and we got a sample that's out of bounds
+            # because of lazyness the error in WSSample only happens on first access
+            break
+
+        if not vad_column:
+            n = 1
+            speech_duration = -1
+        else:
+            vad = s[vad_column]
+            n = len(vad)
+            speech_duration = 0
+            if vad.size > 0:
+                speech_duration = float((vad[:,-1] - vad[:,-2]).sum()) # tend - tstart
+
+        try:
+            # FIXME: move this to ws_audio and add to autodecoders?
+            decoder = AudioDecoder(to_filelike(s.get_audio()))
+            audio_duration = decoder.metadata.duration_seconds_from_header
+        except Exception as e:
+            print("Audio loading error:", e)
+            print("         for sample:", s)
+            raise
+
+        if n > 0: # in derived datasets, skip files with no vad segments (they won't have samples and will never appear as keys)
+            index.append((key, i, audio_duration, speech_duration))
+
+        i += n
+    return {
+        'shard_name': shard,
+        'index': index,
+        'n_samples': i,
+    }

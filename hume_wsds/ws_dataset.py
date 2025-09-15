@@ -129,5 +129,27 @@ class WSDataset:
             end = start + max_per_shard if max_per_shard else None
             yield from self.sequential_from(shard_name, start, end)
 
+    def __str__(self):
+        out = ""
+        out += repr(self) + "\n"
+        out += f"   Audio duration: {format_duration(self.index.audio_duration)}\n"
+        if self.segmented:
+            out += f"  Speech duration: {format_duration(self.index.speech_duration)}\n"
+        out += f" Number of shards: {self.index.n_shards}\n"
+        out += f"Number of samples: {format(self.index.n_samples, ',d').replace(',', ' ')}\n"
+        return out
+
     def __repr__(self):
         return f"WSDataset({repr(self.dir)}, segmented={self.segmented})"
+
+def format_duration(duration):
+    """Formats a duration in seconds as a string."""
+    hours = duration // 3600
+    if hours > 1000:
+        return f"{hours/1000:.2f} k hours"
+    else:
+        return f"{hours:.2f} hours"
+
+def thousand_separator(num):
+    """Formats a number with a thousand separator."""
+    return f"{num:,}"

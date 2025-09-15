@@ -24,7 +24,7 @@ class WSShard:
         if self._data is None or offset < self._start or offset >= self._end:
             i = offset // self.batch_size
             if i >= self.reader.num_record_batches:
-                return
+                raise IndexError(f"{offset} is out of range for shard {self.fname}")
             self._data = self.reader.get_batch(i)
             self._start = i * self.batch_size
             self._end = self._start + self.batch_size
