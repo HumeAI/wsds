@@ -18,12 +18,11 @@ class WSDataset:
         index_file = f"{self.dir}/index.sqlite3"
         if Path(index_file).exists():
             self.index = WSIndex(index_file)
+            self.segmented = self.index.metadata.get('segmented', False)
         else:
             self.index = None
+            self.segmented = False
         self.fields = list_all_columns(self.dir, next(self.index.shards()) if self.index else None)
-        self.segmented = (
-            (Path(self.dir) / "segmented").exists() if segmented is None else segmented
-        )
         self._open_shards = {}
         self._linked_datasets = {}
 

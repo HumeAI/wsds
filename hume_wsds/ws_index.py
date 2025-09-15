@@ -1,5 +1,6 @@
 import functools
 import gzip
+import json
 import sqlite3
 import tarfile
 from pathlib import Path
@@ -36,8 +37,18 @@ class WSDSIndexWriter:
         self.conn.execute("""
         CREATE UNIQUE INDEX shard_name ON shards (shard);
         """)
+        self.conn.execute("""
+        CREATE TABLE metadata (
+            value TEXT NOT NULL
+        );""")
 
         return self
+
+    def append_metadata(self, metadata):
+        self.conn.execute(
+            "INSERT INTO metadata (value) VALUES (?);",
+            (json.dumps(metadata),),
+        )
 
     def append(self, s):
         shard_id = self.conn.execute(
@@ -90,6 +101,17 @@ class WSIndex:
 
     def shards(self):
         return (shard for shard, in self.conn.execute("SELECT shard FROM shards;"))
+
+    @functools.cached_property
+    def metadata(self):
+        metadata = {}
+        try:
+            for metadata_chunk, in self.conn.execute("SELECT value FROM metadata;"):
+                metadata.update(json.loads(metadata_chunk))
+        except sqlite3.OperationalError as err:
+            if err.args[0] != "no such table: metadata":
+                raise
+        return metadata
 
     def query(self, query, *args):
         return self.conn.execute(query, args)
