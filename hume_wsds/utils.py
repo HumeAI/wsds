@@ -1,8 +1,6 @@
 from pathlib import Path
-
-import numpy as np
 import pyarrow as pa
-
+import numpy as np
 
 def get_columns(fname):
     if isinstance(fname, Path):
@@ -66,26 +64,29 @@ def parse_key(key: str):
     src_file, segment_id = key.rsplit("_", 1)
     return src_file, int(segment_id)
 
+def cast_types_for_storage(obj, float_cast='float32', int_cast='int32', debug=False):
+    """Cast nested JSON-like objects to more resctrictive float and integer types.
 
-def cast_types_for_storage(obj, float_cast=np.float32, int_cast=np.int64):
-    if type(obj) is float:
-        return float_cast(obj)
-    elif type(obj) is int:
-        return int_cast(obj)
-    elif type(obj) is dict:
-        return {
-            k: cast_types_for_storage(v, float_cast=float_cast, int_cast=int_cast)
-            for k, v in obj.items()
-        }
-    elif type(obj) is list:
-        return [
-            cast_types_for_storage(v, float_cast=float_cast, int_cast=int_cast)
-            for v in obj
-        ]
-    else:
-        print("unknown type:", type(obj), obj, type(obj) is float, float)
-        return obj
+    By default PyArrow would cast to float64 and int64, which are not optimal for storage.
+    This function casts all numbers to float32/int32 by default.
+    """
+    if isinstance(float_cast, str): float_cast = getattr(np, float_cast)
+    if isinstance(int_cast, str): int_cast = getattr(np, int_cast)
 
+    def _cast(obj):
+        if type(obj) is float:
+            return float_cast(obj)
+        elif type(obj) is int:
+            return int_cast(obj)
+        elif type(obj) is dict:
+            return {k: _cast(v) for k, v in obj.items()}
+        elif type(obj) is list:
+            return [_cast(v) for v in obj]
+        else:
+            if debug: print('unknown type:', type(obj), obj, type(obj) is float, float)
+            return obj
+
+    return _cast(obj)
 
 def parse_key_two_parts(key: str):
     """Parse a composite string key into the source file name, segmentation kind and sequential segment id.

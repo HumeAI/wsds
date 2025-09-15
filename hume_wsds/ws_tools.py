@@ -1,10 +1,8 @@
-from pathlib import Path
+import functools
 import json
+from pathlib import Path
 
 import pyarrow as pa
-import numpy as np
-
-from hume_wsds import WSSink
 
 __all__ = []
 def command(f):
@@ -46,6 +44,8 @@ def from_webdataset(
 
     Tries to automatically determine good defaults for compression and batch size."""
     import webdataset as wds
+    from hume_wsds import WSSink
+    from hume_wsds.utils import cast_types_for_storage
 
     ds = wds.WebDataset([input_shard], shardshuffle=False)
 
@@ -60,7 +60,7 @@ def from_webdataset(
                 if k.endswith('.json'):
                     v = json.loads(v)
                     k = k[:-len('.json')]
-                    v = cast_types_for_storage(v, float_cast=np.float16, int_cast=np.int32)
+                    v = cast_types_for_storage(v, float_cast='float16', int_cast='int32')
                 # if k.endswith('.vad.npy'):
                 #     v = list(np.load(io.BytesIO(v)))
                 #     k = k[:-len('.npy')]
@@ -93,21 +93,3 @@ def drop_keys(dict, *keys):
     """Remove specified keys from the given dictionary."""
     for key in keys:
         if key in dict: del dict[key]
-
-def cast_types_for_storage(obj, float_cast=np.float32, int_cast=np.int32, debug=False):
-    """Cast nested JSON-like objects to more resctrictive float and integer types.
-
-    By default PyArrow would cast to float64 and int64, which are not optimal for storage.
-    This function casts all numbers to float32/int32 by default.
-    """
-    if type(obj) is float:
-        return float_cast(obj)
-    elif type(obj) is int:
-        return int_cast(obj)
-    elif type(obj) is dict:
-        return {k:cast_types_for_storage(v, float_cast=float_cast, int_cast=int_cast) for k,v in obj.items()}
-    elif type(obj) is list:
-        return [cast_types_for_storage(v, float_cast=float_cast, int_cast=int_cast) for v in obj]
-    else:
-        if debug: print('unknown type:', type(obj), obj, type(obj) == float, float)
-        return obj
