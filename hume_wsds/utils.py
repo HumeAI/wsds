@@ -33,7 +33,7 @@ def list_all_columns(ds_path, shard_name=None):
             fname = (p / shard_name).with_suffix(".wsds")
         if fname and fname.exists():
             for col in get_columns(fname):
-                if col == "__key__":
+                if col == "__key__" and '__key__' in cols:
                     continue
                 # seems like we should fix this during the original conversion
                 if col in cols or col in dupes:
