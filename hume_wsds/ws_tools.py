@@ -1,6 +1,7 @@
 import functools
 import json
 from pathlib import Path
+import os
 
 import pyarrow as pa
 
@@ -171,6 +172,14 @@ def init(
                 'segmented': True if vad_column else False
             })
 
+        if vad_column:
+            with AtomicFile(new_dataset / 'audio.wsds-link') as fname:
+                with open(fname, 'w') as f:
+                    f.write(json.dumps({
+                        "dataset_dir": os.path.relpath(source_dataset, new_dataset),
+                        "loader": ["hume_wsds.ws_shard", "WSSourceAudioShard"],
+                        "vad_column": vad_column,
+                    }))
 
 def extract_index_for_shard(dataset, shard, vad_column=None):
     from . import WSDataset
