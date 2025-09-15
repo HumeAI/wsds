@@ -40,7 +40,10 @@ class WSDataset:
             shard_name,
             offset,
         ).fetchone()
-        return make_key(file_name, offset - start_offset)
+        if self.segmented:
+            return make_key(file_name, offset - start_offset)
+        else:
+            return file_name
 
     def get_linked_dataset(self, dataset_dir):
         if dataset_dir not in self._linked_datasets:
