@@ -48,6 +48,7 @@ def list_all_columns(ds_path, shard_name=None):
     return dict(sorted(cols.items()))
 
 def list_all_shards(dataset: str):
+    from collections import Counter
     shards = {}
     for subdir in Path(dataset).iterdir():
         if not subdir.is_dir():
@@ -57,12 +58,19 @@ def list_all_shards(dataset: str):
             print(f"error: empty folder {subdir}")
             del shards[subdir]
 
-    common_shards = set.intersection(*shards.values())
+    common_shards = {v for l in shards.values() for v in l}
+
+    errors = False
     for subdir, files in shards.items():
-        extras = files - common_shards
-        if extras:
-            extras = '\n'.join(extras)
-            raise ValueError(f"Path {subdir} has files not present in all shards:\n{extras}")
+        missing = common_shards - files
+        if missing:
+            missing = '\n'.join(missing)
+            print(f"\nPath {subdir} is missing shards:\n{missing}")
+            errors = True
+
+    if errors:
+        print(f"\nFound {len(common_shards)} common shards.")
+
     return [x.replace('.wsds', '') for x in common_shards]
 
 def make_key(src_file: str, segment_id: int):
