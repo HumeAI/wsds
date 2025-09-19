@@ -2,7 +2,9 @@ import functools
 import json
 from pathlib import Path
 import os
+import io
 
+import numpy as np
 import pyarrow as pa
 
 commands = {}
@@ -67,6 +69,7 @@ def shard_from_webdataset(
     import webdataset as wds
     from hume_wsds import WSSink
     from hume_wsds.utils import cast_types_for_storage
+    from hume_wsds.constants import ShardMapping
 
     ds = wds.WebDataset([input_shard], shardshuffle=False)
 
@@ -77,18 +80,62 @@ def shard_from_webdataset(
     def process(stream):
         for s in stream:
             new_s = {}
-            for k,v in s.items():
-                if k.endswith('.json'):
+            for k, v in s.items():
+                if k.endswith(".json"):
                     v = json.loads(v)
-                    k = k[:-len('.json')]
-                    v = cast_types_for_storage(v, float_cast='float16', int_cast='int32')
-                if out_dir == 'dtok_v2_ml_50hz_32x16384_graphemes_key16k' and k == 'dtok_level_1.npy':
-                    k = 'dtok_level_1_16k.npy'
-                # if k.endswith('.vad.npy'):
-                #     v = list(np.load(io.BytesIO(v)))
-                #     k = k[:-len('.npy')]
+                    k = k[:-len(".json")]
+                    try:
+                        v = cast_types_for_storage(v, float_cast='float16', int_cast='int32')
+                    except Exception:
+                        pass  
+    
+                if k == "brouhaha_mean":
+                    if isinstance(v, dict):
+                        if "mean_c50" in v:
+                            new_s["c50"] = float(v["mean_c50"])
+                        if "mean_snr" in v:
+                            new_s["snr"] = float(v["mean_snr"])
+                    continue
+    
+                def to_npy_bytes(array):
+                    buf = io.BytesIO()
+                    np.save(buf, array, allow_pickle=False)
+                    return buf.getvalue()
+
+                # for diarized pipeline
+                if k == "vad_silero_diarized_continuous":
+                    vad_array = []
+                    pause_dur_list = []
+                    pause_energy_list = []
+                    speaker_list = []
+    
+                    for item in v:
+                        try:
+                            start, end, speaker, pause_dur, pause_energy = item
+                            vad_array.append([start, end])
+                            pause_dur_list.append(pause_dur)
+                            pause_energy_list.append(pause_energy)
+                            speaker_list.append(speaker)
+                        except Exception as e:
+                            print(f"[Warning] Skipping invalid diarization entry: {e}")
+                            continue
+    
+                    new_s["diarized.vad.npy"] = to_npy_bytes(np.array(vad_array, dtype=np.float32))
+                    new_s["diarized.pause_dur.npy"] = to_npy_bytes(np.array(pause_dur_list, dtype=np.float32))
+                    new_s["diarized.pause_energy.npy"] = to_npy_bytes(np.array(pause_energy_list, dtype=np.float32))
+                    new_s["diarized.speaker.npy"] = to_npy_bytes(np.array(speaker_list))  # strings are fine
+                    continue
                 new_s[k] = v
-            yield new_s
+    
+            renamed = {}
+            for k, v in new_s.items():
+                for target_key, (expected_dir, expected_name) in ShardMapping.items():
+                    if out_dir == expected_dir and k == expected_name:
+                        k = target_key
+                        break
+                renamed[k] = v
+    
+            yield renamed
 
     ds = ds.compose(process)
     # update the data format

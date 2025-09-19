@@ -1,0 +1,18 @@
+flags:
+  convert_audio: true
+  convert_mvad: true
+  convert_artifacts: true
+  create_index: true
+  mvad_dir_name: "vad_silero_diarized_continuous"
+
+paths:
+  audio_base: /mnt/weka/data2/yt_data/hq_anneal/wyndlabs_1M/processed-v5-pipeline-diarized-continuous-it/source_separation/
+  input_base: /mnt/weka/data2/yt_data/hq_anneal/wyndlabs_1M/processed-v5-pipeline-diarized-continuous-it/
+  output_base: /mnt/weka/data-wsds/wyndlabs_1M-it/
+
+segmentation_type: v5-diarized_continuous 
+
+subdirs:
+  - acoustic_scores_continuous
+  - transcription_wslang_continuous
+  - pquality_scores_continuous

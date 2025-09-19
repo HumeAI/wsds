@@ -1,0 +1,20 @@
+flags:
+  convert_audio: false
+  convert_mvad: false
+  convert_artifacts: true
+  create_index: true
+
+paths:
+  audio_base: /mnt/weka/data2/multimodal/specific/voxceleb/raw/audio
+  input_base: /mnt/weka/data2/multimodal/specific/voxceleb/processed-v3-pipeline-vad_ws/staging      
+  output_base: /mnt/weka/data-wsds/voxceleb
+
+segmentation_type: v3-vad_ws  
+
+subdirs:
+  - acoustic_scores_raw
+  - transcription_wslang_raw
+  - transcription_wslang_turbo_raw
+  - pquality_wmusic_scores_raw
+  - dtok_v2_ml_25hz_32x16384_graphemes_v2_encoder
+  - dtok_v2_ml_50hz_32x16384_graphemes_key16k

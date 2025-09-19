@@ -3,3 +3,5 @@ pyarrow
 torch
 torchaudio
 fire
+fastprogress
+torchcodec
