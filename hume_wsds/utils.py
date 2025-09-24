@@ -47,31 +47,45 @@ def list_all_columns(ds_path, shard_name=None):
                     cols[col] = (p.name, col)
     return dict(sorted(cols.items()))
 
-def list_all_shards(dataset: str):
-    from collections import Counter
+def list_all_shards(dataset: str, verbose: bool = False):
     shards = {}
     for subdir in Path(dataset).iterdir():
         if not subdir.is_dir():
             continue
-        shards[subdir] = {file.name for file in subdir.iterdir() if file.suffix == '.wsds'}
+        shards[subdir] = {file.name for file in subdir.iterdir() if file.suffix == ".wsds"}
         if not shards[subdir]:
             print(f"error: empty folder {subdir}")
             del shards[subdir]
 
     common_shards = {v for l in shards.values() for v in l}
+    num_common = len(common_shards)
 
     errors = False
     for subdir, files in shards.items():
         missing = common_shards - files
-        if missing:
-            missing = '\n'.join(missing)
-            print(f"\nPath {subdir} is missing shards:\n{missing}")
+        n_missing = len(missing)
+        if n_missing == 0:
+            status = f"[COMPLETE]"
+        else:
+            status = f"[MISSING {n_missing}]"
+
+        print(f"Path {subdir} has {len(files)}/{num_common} shards {status}")
+
+        if n_missing > 0 and verbose:
+            for m in sorted(missing):
+                print(f"    {m}")
             errors = True
 
     if errors:
-        print(f"\nFound {len(common_shards)} common shards.")
+        print(f"\nFound {num_common} common shards across all dirs.")
 
-    return [x.replace('.wsds', '') for x in common_shards]
+    # count len audio 
+    audio_dir = Path(dataset) / "../source/audio"
+    if audio_dir.exists():
+        audio_shards = [f for f in audio_dir.iterdir() if f.suffix == ".wsds"]
+        print(f"\nAudio dir {audio_dir.resolve()} has {len(audio_shards)} shards.")
+
+    return [x.replace(".wsds", "") for x in common_shards]
 
 def make_key(src_file: str, segment_id: int):
     """Make a composite string key from source file name and sequential segment id.

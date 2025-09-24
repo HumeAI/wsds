@@ -126,7 +126,14 @@ def shard_from_webdataset(
                     new_s["diarized.speaker.npy"] = to_npy_bytes(np.array(speaker_list))  # strings are fine
                     continue
                 new_s[k] = v
-    
+
+                if k.endswith(".tmp"):
+                    continue
+                    
+                if k.endswith(".m4a"):
+                    new_s["audio.m4a"] = v
+                    continue
+            
             renamed = {}
             for k, v in new_s.items():
                 for target_key, (expected_dir, expected_name) in ShardMapping.items():
@@ -178,9 +185,9 @@ def dump_index(source_dataset:Path):
         pass
 
 @command
-def validate_shards(dataset):
+def validate_shards(dataset, verbose=False):
     from .utils import list_all_shards
-    list_all_shards(dataset)
+    list_all_shards(dataset, verbose)
 
 @command
 def init(
