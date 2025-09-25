@@ -23,16 +23,24 @@ class WSDataset:
             self.index = None
             self.segmented = False
         self.fields = list_all_columns(self.dir, next(self.index.shards()) if self.index else None)
+        self.computed_columns = {}
+
         self._open_shards = {}
         self._linked_datasets = {}
 
-        self.computed_columns = {}
+        self._register_wsds_links()
 
     def get_shard_list(self):
         if self.index:
             return list(self.index.shards())
         else:
             return list_all_shards(self.dir)
+
+    def _register_wsds_links(self):
+        for subdir, _ in self.fields.values():
+            if subdir.endswith('.wsds-link'):
+                spec = json.loads(Path(f"{self.dir}/{subdir}").read_text())
+                self.computed_columns[subdir] = spec
 
     def add_computed(self, name, **link):
         subdir = name+'.wsds-computed'
@@ -75,9 +83,6 @@ class WSDataset:
         if shard is not None and shard.shard_name == shard_name: return shard
 
         if subdir in self.computed_columns:
-            shard = self.get_linked_shard(self.computed_columns[subdir], shard_name)
-        elif subdir.endswith(".wsds-link"): # not a directory, but a JSON file
-            self.computed_columns[subdir] = json.loads(Path(dir).read_text())
             shard = self.get_linked_shard(self.computed_columns[subdir], shard_name)
         else:
             shard = WSShard(f"{dir}/{shard_name}.wsds", shard_name=shard_name)
