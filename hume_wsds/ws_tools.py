@@ -7,6 +7,12 @@ import io
 import numpy as np
 import pyarrow as pa
 
+
+import tarfile
+from collections import defaultdict
+from hume_wsds import WSSink
+import json
+
 commands = {}
 def command(name_or_fun):
     name = None
@@ -61,7 +67,9 @@ def shard_from_webdataset(
     batch_size:int=16,        # batch size
     compression:str='zstd',
     min_batch_size_bytes=1024*1024,
-    no_keys:bool=False
+    no_keys:bool=False,
+    requires_sorting:bool=False,
+    yt_data_specific:bool=False,
 ):
     """Converts a WebDataset shard into wsds format.
 
@@ -71,11 +79,32 @@ def shard_from_webdataset(
     from hume_wsds.utils import cast_types_for_storage
     from hume_wsds.constants import ShardMapping
 
-    ds = wds.WebDataset([input_shard], shardshuffle=False)
 
     out_dir = Path(output_shard).parents[0].name
-
     if out_dir == 'audio': compression = 'no-compression'
+    
+    if out_dir == 'audio' and requires_sorting: 
+        def list_keys_tarfile(input_shard):
+            if input_shard.endswith("gz"):
+                o = gzip.open
+            else:
+                o = open
+            all_samples = defaultdict(dict)
+            f = o(input_shard, 'rb')
+            tar = tarfile.TarFile(fileobj=f)
+            for member in tar.getmembers():
+                path, name = member.name.rsplit('/', 1)
+                name = name.replace('_comments', '.comments')
+                key, field = name.split('.', 1)
+                all_samples[f'{path}/{key}'][field] = member
+            return tar, all_samples
+        
+        tar, samples = list_keys_tarfile(input_shard)
+    else:  
+        ds = wds.WebDataset([input_shard], shardshuffle=False)
+    
+    
+
 
     def process(stream):
         for s in stream:
@@ -126,13 +155,6 @@ def shard_from_webdataset(
                     new_s["diarized.speaker.npy"] = to_npy_bytes(np.array(speaker_list))  # strings are fine
                     continue
                 new_s[k] = v
-
-                if k.endswith(".tmp"):
-                    continue
-                    
-                if k.endswith(".m4a"):
-                    new_s["audio.m4a"] = v
-                    continue
             
             renamed = {}
             for k, v in new_s.items():
@@ -144,28 +166,59 @@ def shard_from_webdataset(
     
             yield renamed
 
-    ds = ds.compose(process)
-    # update the data format
-    # if 'snr-c50' in output_shard:
-    #     def fix_c50(stream):
-    #         for s in stream:
-    #             if 'snr_c50.npy' in s:
-    #                 s['snr'], s['c50'] = s['snr_c50.npy']
-    #                 del s['snr_c50.npy']
-    #             yield s
-    #     ds = ds.decode().compose(
-    #         fix_c50,
-    #     )
 
     if compression == 'no-compression': compression = None
 
-    with WSSink(output_shard, batch_size=batch_size, compression=compression,
-                min_batch_size_bytes=min_batch_size_bytes) as sink:
-        for x in ds:
-            drop_keys(x, '__url__', '__local_path__')
-            if no_keys: del x['__key__']
-            sink.write(dict(sorted(x.items())))
+    if out_dir == 'audio' and yt_data_specific:
+    
+        AUDIO_KEYS = ["m4a", "mp3", "wav", "flac", "ogg", "opus"]
+    
+        with WSSink(output_shard) as sink:
+            for key in sorted(samples.keys()):
+                s = {"__key__": key}
+                sample = samples[key]
+    
+                # requires audio - there should always be audio an if not then downstream artifacts will not exist for that key 
+                audio_found = False
+                for ak in AUDIO_KEYS:
+                    if ak in sample:
+                        s[ak] = tar.extractfile(sample[ak]).read()
+                        audio_found = True
+                        break
+                if not audio_found:
+                    print(f"[Warning] No audio found for {key}")
+                    continue
 
+                # for empty 
+                def get_or_empty(field):
+                    if field in sample:
+                        return tar.extractfile(sample[field]).read().decode("utf-8", errors="ignore")
+                    return ""   #
+    
+                s["info.json"] = get_or_empty("info.json")
+                s["description"] = get_or_empty("description")
+                s["comments.json"] = get_or_empty("comments.json")
+    
+                # combine existing vtts 
+                vtts = {
+                    k: tar.extractfile(v).read().decode("utf-8")
+                    for k, v in sample.items() if k.endswith(".vtt")
+                }
+                s["vtt"] = json.dumps(vtts) if vtts else "{}"
+    
+                sink.write(s)
+    else: 
+        ds = ds.compose(process)
+        
+        with WSSink(output_shard, batch_size=batch_size, compression=compression,
+                    min_batch_size_bytes=min_batch_size_bytes) as sink:
+            for x in ds:
+                drop_keys(x, '__url__', '__local_path__')
+                if no_keys: del x['__key__']
+                sink.write(dict(sorted(x.items())))
+
+
+    
 def drop_keys(dict, *keys):
     """Remove specified keys from the given dictionary."""
     for key in keys:
