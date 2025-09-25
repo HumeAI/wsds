@@ -31,6 +31,92 @@ class WSDataset:
 
         self._register_wsds_links()
 
+    #
+    # SQL support, using Polars
+    #
+    def _sql(self, *queries):
+        try:
+            import polars as pl
+        except ImportError:
+            raise ImportError("Polars is required for SQL queries")
+        subdirs = set()
+        exprs = []
+        for query in queries:
+            expr = pl.sql_expr(query)
+            for col in expr.meta.root_names():
+                if col == '__key__':
+                    # __key__ exists in all shards
+                    continue
+                subdir, field = self.fields[col]
+                assert col == field, "renamed fields are not supported in SQL queries yet"
+                subdirs.add(subdir)
+            exprs.append(expr)
+        row_merge = []
+        missing = defaultdict(list)
+        for shard in self.get_shard_list():
+            col_merge = []
+            for subdir in subdirs:
+                try:
+                    df = pl.scan_ipc(self.get_shard(subdir, shard).fname)
+                    if len(col_merge) > 0: df = df.drop('__key__') # ensure only one __key__ column
+                    col_merge.append(df)
+                except FileNotFoundError:
+                    missing[subdir].append(shard)
+                    # if any of the subdirs are missing this shard, skip it completely
+                    col_merge = []
+                    break
+            if col_merge:
+                row_merge.append(pl.concat(col_merge, how = 'horizontal'))
+        if missing:
+            print("WARNING: You are missing shards for some of the columns:")
+            for subdir, shards in missing.items():
+                print(f"{subdir}: {shards}")
+            if not row_merge:
+                raise FileNotFoundError(f"No usable shards found (columns: {', '.join(subdirs)}) for dataset in: {self.dir}")
+        return exprs, pl.concat(row_merge)
+
+    def sql(self, *queries):
+        exprs, df = self._sql(*queries)
+        return df.select(exprs).collect()
+
+    def sql_filter(self, query):
+        exprs, df = self._sql(query)
+        return df.filter(exprs[0]).select('__key__').collect()['__key__']
+
+    def filtered(self,
+            query,
+            infinite:bool = False, # keep yielding samples indefinitely (restarting from the beginning)
+            shuffle:bool = True, # shuffle the sample order (otherwise it will return them as they appear in the dataset)
+            N:int = None, # optional maximum number of samples to yield (otherwise it will yield all matching samples)
+            seed:int = None, # optional random seed used shuffling
+        ):
+        """Given an boolean SQL expression, returns an iterator which yields random samples
+        that match the query.
+
+        Examples:
+        >>> dataset.filtered('pq < 3', N=10) # ten low-quality samples
+        >>> dataset.filtered('pq > 3 AND CAST(txt AS string) ILIKE '%hello%' AND pq < 3', infinite=True)
+        >>> dataset.filtered('CAST(`transcription_wslang_raw.txt` AS string) ILIKE "%between New Orleans and St. Louis%"')
+        """
+        import polars as pl
+        i = 0
+        keys = self.sql_filter(query)
+        while True:
+            if N is None:
+                keys = keys.sample(frac=1, shuffle=shuffle, seed=seed)
+            else:
+                keys = keys.sample(n=pl.all().len().clip(0, N), shuffle=shuffle, seed=seed)
+            for key in keys:
+                yield self[key]
+                i += 1
+                if N is not None and i >= N:
+                    return
+            if not infinite:
+                break
+
+    #
+    # Helper and internal API
+    #
     def get_shard_list(self):
         if self.index:
             return list(self.index.shards())
