@@ -139,6 +139,16 @@ class WSDataset:
         ).fetchone()
         return WSSample(self, shard_name, random.randrange(n_samples))
 
+    def random_samples(self, N:int = 1):
+        """Yields N random samples."""
+        for _ in range(N):
+            yield self.random_sample()
+
+    def random_chunks(self, max_N:int):
+        """Like `__iter__`, but jumps to a random position after yielding `max_N` samples."""
+        while True:
+            yield from self.sequential_from(self.random_sample(), end = start + max_N)
+
     def __iter__(self):
         """Starts at a random position in the dataset and yields samples sequentially.
         Once it reaches the end of a shard it will jump to a new random position.
