@@ -14,7 +14,7 @@ class WSDataset:
     # FIXME: this should be overridable with metadata in index.sqlite3
     _audio_file_keys = ["flac", "mp3", "sox", "wav", "m4a", "ogg", "wma", "opus"]
 
-    def __init__(self, dir, segmented=None):
+    def __init__(self, dir):
         self.dir = dir
         index_file = f"{self.dir}/index.sqlite3"
         if Path(index_file).exists():

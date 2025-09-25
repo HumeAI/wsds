@@ -45,15 +45,24 @@ class WSSample:
     def __contains__(self, field):
         return field in self.overrides or field in self.dataset.fields.keys()
 
-    def __repr__(self):
-        r = f"WSSample({repr(self.dataset)}, shard_name={repr(self.shard_name)}, offset={repr(self.offset)}, fields={'{'}\n"
-        for k, v in self.items():
-            if hasattr(v, "shape"):
-                v = f"array(size={repr(v.shape)}, dtype={v.dtype})"
+    def __repr_field__(self, field):
+        k, v = field, self[field]
+        if hasattr(v, "shape"):
+            if v.shape:
+                trunc_repr = ' '.join(repr(v).split(' ')[:10])
+                v = f"{trunc_repr}…, shape={repr(v.shape)}, dtype={v.dtype})"
             else:
                 v = repr(v)
-                if len(v) > 1000:
-                    v = v[:1000] + "…"
-            r += f"  {k} = {v},\n"
+        else:
+            v = repr(v)
+            if len(v) > 1000:
+                v = v[:1000] + "…"
+        return v
+
+
+    def __repr__(self):
+        r = f"WSSample({repr(self.dataset)}, shard_name={repr(self.shard_name)}, offset={repr(self.offset)}, fields={'{'}\n"
+        for k in self.keys():
+            r += f"  {k} = {self.__repr_field__(k)},\n"
         r += "})\n"
         return r
