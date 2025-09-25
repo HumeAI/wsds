@@ -1,6 +1,7 @@
 import importlib
 import json
 import random
+import sys
 from pathlib import Path
 
 from hume_wsds.utils import list_all_columns, list_all_shards, make_key, parse_key
@@ -94,16 +95,20 @@ class WSDataset:
         subdir, column = self.fields[field]
         return self.get_shard(subdir, shard_name).get_sample(column, offset)
 
-    def sequential_from(self, shard_name, start, end=None):
-        if end is None and self.index:
-            end = self.index.query(
-                "SELECT n_samples FROM shards WHERE shard = ?", shard_name
-            ).fetchone()[0]
-        i = start
+    def sequential_from(self, sample, max_N = None):
+        """Yields samples sequentially from the given `sample`, stopping after `max_N` samples."""
+        shard_name, i = sample.shard_name, sample.offset
+        max_N = min(max_N or sys.maxsize, self._shard_n_samples(shard_name)
         # without an index, we still return the sample but you'll get an error on first field access
-        while i < end if end is not None else True:
+        while i < max_N:
             yield WSSample(self, shard_name, i)
             i += 1
+
+    def _shard_n_samples(self, shard_name:str) -> int:
+        if not self.index: return sys.maxsize
+        return self.index.query(
+            "SELECT n_samples FROM shards WHERE shard = ?", shard_name
+        ).fetchone()[0]
 
     def parse_key(self, key):
         if self.segmented:
@@ -111,28 +116,35 @@ class WSDataset:
         else:
             return key, 0
 
-    def get_position(self, key):
+    def __getitem__(self, key:str):
+        """Returns a sample with the given key."""
+        # FIXME: push `parse_key` to the index class
         file_name, offset = self.parse_key(key)
-        shard_name, file_offset = self.index.query(
+        r = self.index.query(
             "SELECT s.shard, offset FROM files AS f, shards AS s WHERE f.name = ? AND s.shard_id == f.shard_id",
             file_name,
         ).fetchone()
-        return shard_name, file_offset + offset
+        if not r: return None
+        shard_name, file_offset = r
+        return WSSample(self, shard_name, file_offset + offset)
 
-    def random_position(self):
+    def random_sample(self):
+        """Returns one random sample."""
+        assert self.index is not None, "Random access is only supported for indexed datasets"
         # FIXME: randomize the global sample index once (this has a bias towards smaller shards)
         # we'll need to modify the index to store the cumulative number of samples in each shard
         shard_name, n_samples = self.index.query(
             "SELECT s.shard, s.n_samples FROM shards AS s WHERE s.rowid = ?",
             random.randrange(self.index.n_shards) + 1, # sqlite starts indexing at 1
         ).fetchone()
-        return shard_name, random.randrange(n_samples)
+        return WSSample(self, shard_name, random.randrange(n_samples))
 
-    def __iter__(self, max_per_shard=None):
+    def __iter__(self):
+        """Starts at a random position in the dataset and yields samples sequentially.
+        Once it reaches the end of a shard it will jump to a new random position.
+        """
         while True:
-            shard_name, start = self.random_position()
-            end = start + max_per_shard if max_per_shard else None
-            yield from self.sequential_from(shard_name, start, end)
+            yield from self.sequential_from(self.random_sample())
 
     def __str__(self):
         out = ""
