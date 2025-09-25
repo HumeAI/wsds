@@ -10,10 +10,11 @@ class WSSample:
     def get_key(self):
         return self.dataset.get_key(self.shard_name, self.offset)
 
-    def get_audio(self, audio_columnts=None):
-        for col in self.dataset._audio_file_keys:
-            if col in self: return self[col]
-        raise KeyError(f"No audio column (tried {self.dataset._audio_file_keys}) found among: {self.keys()}")
+    def get_audio(self, audio_columns=None):
+        r = self.get_one_of(audio_columns or self.dataset._audio_file_keys)
+        if not r:
+            raise KeyError(f"No audio column (tried {self.dataset._audio_file_keys}) found among: {self.keys()}")
+        return r
 
     def keys(self):
         return self.dataset.fields.keys()
@@ -31,6 +32,12 @@ class WSSample:
 
     def __setitem__(self, field, value):
         self.overrides[field] = value
+
+    def get_one_of(self, *fields, default=None):
+        for field in fields:
+            if field in self:
+                return self[field]
+        return default
 
     def get(self, field:str, default=None):
         return self[field] if field in self else default
