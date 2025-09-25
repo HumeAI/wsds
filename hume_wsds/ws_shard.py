@@ -41,9 +41,10 @@ class WSShard:
         elif column.endswith("pyd"):
             return pickle.load(io.BytesIO(data.as_buffer()))
         elif column.endswith("txt"):
-            return bytes(data.as_buffer()).decode("utf-8")
+            return data.as_buffer().to_pybytes().decode("utf-8")
         else:
-            return data
+            # FIXME: we need to handle audio decoding here to avoid copying the entire audio buffer
+            return data.as_py(maps_as_pydicts='strict')
 
     def __repr__(self):
         r = f"WSShard({repr(self.fname)})"
