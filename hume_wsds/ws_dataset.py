@@ -77,7 +77,7 @@ class WSDataset:
     def sequential_from(self, sample, max_N = None):
         """Yields samples sequentially from the given `sample`, stopping after `max_N` samples."""
         shard_name, i = sample.shard_name, sample.offset
-        max_N = min(max_N or sys.maxsize, self._shard_n_samples(shard_name)
+        max_N = min(max_N or sys.maxsize, self._shard_n_samples(shard_name))
         # without an index, we still return the sample but you'll get an error on first field access
         while i < max_N:
             yield WSSample(self, shard_name, i)
