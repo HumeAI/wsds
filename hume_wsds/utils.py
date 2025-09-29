@@ -33,9 +33,11 @@ def list_all_columns(ds_path, shard_name=None):
             fname = find_first_shard(p)
         else:
             fname = (p / shard_name).with_suffix(".wsds")
+        key_col = []
         if fname and fname.exists():
             for col in get_columns(fname):
-                if col == "__key__" and "__key__" in cols:
+                if col == "__key__":
+                    key_col.append((fname.stat().st_size, p.name, col))
                     continue
                 # seems like we should fix this during the original conversion
                 if col in cols or col in dupes:
@@ -47,6 +49,9 @@ def list_all_columns(ds_path, shard_name=None):
                     cols[f"{p.name}.{col}"] = (p.name, col)
                 else:
                     cols[col] = (p.name, col)
+        # use the smallest shards for __key__ (should be the fastest)
+        if len(key_col) > 0:
+            cols['__key__'] = sorted(key_col)[0][1:]
     return dict(sorted(cols.items()))
 
 
