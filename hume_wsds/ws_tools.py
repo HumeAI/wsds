@@ -51,15 +51,32 @@ def _list(input_shard: str):
             pass
 
 
+def inspect_dataset(input_path, verbose=True):
+    """Displays metadata and schema of a wsds dataset."""
+    from . import WSDataset
+    ds = WSDataset(input_path)
+    print(ds)
+    if verbose:
+        print("One sample:")
+        for x in ds:
+            print(x)
+            break
+
+
 @command
 def inspect(input_path: str):
     """Displays metadata and schema of a wsds dataset or shard."""
-    if (Path(input_path) / "index.sqlite3").exists():
-        from . import WSDataset
-
-        ds = WSDataset(input_path)
-        print(ds)
-    else:
+    if Path(input_path).is_dir():
+        if (Path(input_path) / 'index.sqlite3').exists():
+            inspect_dataset(input_path)
+        else:
+            segmentations = [x for x in Path(input_path).iterdir() if (x/'index.sqlite3').exists()]
+            if segmentations:
+                print(f"Found {len(segmentations)} segmentations:")
+                print()
+            for file in segmentations:
+                inspect_dataset(str(file), verbose=False)
+    elif input_path.endswith('.wsds'):
         reader = pa.RecordBatchFileReader(pa.memory_map(input_path))
         print(f"Batches: {reader.num_record_batches}")
         print(f"Rows: {int(reader.schema.metadata[b'batch_size']) * reader.num_record_batches}")
