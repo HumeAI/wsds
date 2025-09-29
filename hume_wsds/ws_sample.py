@@ -46,17 +46,20 @@ class WSSample:
         return field in self.overrides or field in self.dataset.fields.keys()
 
     def __repr_field__(self, field):
-        k, v = field, self[field]
-        if hasattr(v, "shape"):
-            if v.shape:
-                trunc_repr = ' '.join(repr(v).split(' ')[:10])
-                v = f"{trunc_repr}…, shape={repr(v.shape)}, dtype={v.dtype})"
+        try:
+            k, v = field, self[field]
+            if hasattr(v, "shape"):
+                if v.shape:
+                    trunc_repr = ' '.join(repr(v).split(' ')[:10])
+                    v = f"{trunc_repr}…, shape={repr(v.shape)}, dtype={v.dtype})"
+                else:
+                    v = repr(v)
             else:
                 v = repr(v)
-        else:
-            v = repr(v)
-            if len(v) > 1000:
-                v = v[:1000] + "…"
+                if len(v) > 1000:
+                    v = v[:1000] + "…"
+        except FileNotFoundError:
+            k, v = field, f'<missing shard: {self.dataset.fields[field][1]}/{self.shard_name}>'
         return v
 
 

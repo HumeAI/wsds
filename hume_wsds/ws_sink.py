@@ -46,7 +46,7 @@ class WSBatchedSink:
     def write_batch(self, b, flush=False):
         import pyarrow
 
-        record = pyarrow.RecordBatch.from_pylist(b)
+        record = pyarrow.RecordBatch.from_pylist(b, self._sink_schema if self._sink else None)
         if self._sink is None:
             if not flush and self.min_batch_size_bytes:
                 if record.nbytes < self.min_batch_size_bytes and self.batch_size < 16384:
