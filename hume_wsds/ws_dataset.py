@@ -165,6 +165,7 @@ class WSDataset:
 
         i = 0
         keys = self.sql_filter(query)
+        self.last_query_n_samples = len(keys)
         while True:
             if N is None:
                 keys = keys.sample(frac=1, shuffle=shuffle, seed=seed)
