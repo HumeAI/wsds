@@ -10,10 +10,8 @@ import pyarrow
 
 
 def indented(prefix, obj):
-    prefix = prefix + ": "
-    lines = str(obj).split("\n")
-    return "\n".join(p + ln for p, ln in zip([prefix] + [" " * len(prefix)] * (len(lines) - 1), lines))
-
+    lines = str(obj).split('\n')
+    return "\n".join(p + ln for p,ln in zip([prefix] + [" "*len(prefix)] * (len(lines)-1), lines))
 
 @dataclass(frozen=True)
 class SampleFormatChanged(BaseException):
@@ -21,12 +19,9 @@ class SampleFormatChanged(BaseException):
     new_schema: pyarrow.Schema
 
     def __str__(self):
-        return (
-            f"The dataset format changed:\n\n"
-            f"{indented('  OLD', self.old_schema)}\n\n"
-            f"{indented('  NEW', self.new_schema)}"
-        )
-
+        return (f'The dataset format changed:\n\n'
+                f'{indented("  OLD: ", self.old_schema)}\n\n'
+                f'{indented("  NEW: ", self.new_schema)}')
 
 class WSBatchedSink:
     def __init__(
