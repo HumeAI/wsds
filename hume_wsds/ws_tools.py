@@ -285,8 +285,29 @@ def dump_index(source_dataset: Path):
 @command
 def validate_shards(dataset, verbose=False):
     from .utils import list_all_shards
+    from .ws_sink import indented
+    shards = list_all_shards(dataset, verbose)
+    print()
+    for subdir in Path(dataset).iterdir():
+        if not subdir.is_dir(): continue
+        schemas = {shard:get_shard_schema((subdir/shard).with_suffix('.wsds')) for shard in shards}
+        unique = set(s for s in schemas.values() if s)
+        if len(unique) > 1:
+            print(f"Found schema conflicts for {subdir}:\n")
+            for schema in unique:
+                matching_shards = [shard for shard, shard_schema in schemas.items() if schema == shard_schema]
+                prefix = f"  in {len(matching_shards)} shards: "
+                print(indented(prefix, schema))
+                if verbose:
+                    for shard in matching_shards:
+                        print(indented(" "*len(prefix), shard))
+                    print()
 
-    list_all_shards(dataset, verbose)
+def get_shard_schema(fname):
+    fname = Path(fname)
+    if not fname.exists():
+        return None
+    return repr(pa.RecordBatchFileReader(pa.memory_map(str(fname))).schema).split('-- schema metadata --')[0]
 
 
 @command
