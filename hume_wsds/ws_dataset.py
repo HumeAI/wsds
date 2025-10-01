@@ -1,8 +1,8 @@
-from collections import defaultdict
 import importlib
 import json
 import random
 import sys
+from collections import defaultdict
 from pathlib import Path
 
 from hume_wsds.utils import list_all_columns, list_all_shards, make_key, parse_key
@@ -20,7 +20,7 @@ class WSDataset:
         index_file = f"{self.dir}/index.sqlite3"
         if Path(index_file).exists():
             self.index = WSIndex(index_file)
-            self.segmented = self.index.metadata.get('segmented', False)
+            self.segmented = self.index.metadata.get("segmented", False)
         else:
             self.index = None
             self.segmented = False
@@ -42,7 +42,7 @@ class WSDataset:
         # we'll need to modify the index to store the cumulative number of samples in each shard
         shard_name, n_samples = self.index.query(
             "SELECT s.shard, s.n_samples FROM shards AS s WHERE s.rowid = ?",
-            random.randrange(self.index.n_shards) + 1, # sqlite starts indexing at 1
+            random.randrange(self.index.n_shards) + 1,  # sqlite starts indexing at 1
         ).fetchone()
         return WSSample(self, shard_name, random.randrange(n_samples))
 
@@ -53,17 +53,17 @@ class WSDataset:
         while True:
             yield from self.sequential_from(self.random_sample())
 
-    def random_samples(self, N:int = 1):
+    def random_samples(self, N: int = 1):
         """Yields N random samples."""
         for _ in range(N):
             yield self.random_sample()
 
-    def random_chunks(self, max_N:int):
+    def random_chunks(self, max_N: int):
         """Like `__iter__`, but jumps to a random position after yielding `max_N` samples."""
         while True:
-            yield from self.sequential_from(self.random_sample(), end = start + max_N)
+            yield from self.sequential_from(self.random_sample(), max_N=max_N)
 
-    def __getitem__(self, key:str):
+    def __getitem__(self, key: str):
         """Returns a sample with the given key."""
         # FIXME: push `parse_key` to the index class
         file_name, offset = self.parse_key(key)
@@ -71,11 +71,12 @@ class WSDataset:
             "SELECT s.shard, offset FROM files AS f, shards AS s WHERE f.name = ? AND s.shard_id == f.shard_id",
             file_name,
         ).fetchone()
-        if not r: return None
+        if not r:
+            return None
         shard_name, file_offset = r
         return WSSample(self, shard_name, file_offset + offset)
 
-    def sequential_from(self, sample, max_N = None):
+    def sequential_from(self, sample, max_N=None):
         """Yields samples sequentially from the given `sample`, stopping after `max_N` samples."""
         shard_name, i = sample.shard_name, sample.offset
         max_N = min(max_N or sys.maxsize, self._shard_n_samples(shard_name))
@@ -84,11 +85,10 @@ class WSDataset:
             yield WSSample(self, shard_name, i)
             i += 1
 
-    def _shard_n_samples(self, shard_name:str) -> int:
-        if not self.index: return sys.maxsize
-        return self.index.query(
-            "SELECT n_samples FROM shards WHERE shard = ?", shard_name
-        ).fetchone()[0]
+    def _shard_n_samples(self, shard_name: str) -> int:
+        if not self.index:
+            return sys.maxsize
+        return self.index.query("SELECT n_samples FROM shards WHERE shard = ?", shard_name).fetchone()[0]
 
     #
     # SQL support, using Polars
@@ -103,7 +103,7 @@ class WSDataset:
         for query in queries:
             expr = pl.sql_expr(query)
             for col in expr.meta.root_names():
-                if col == '__key__':
+                if col == "__key__":
                     # __key__ exists in all shards
                     continue
                 subdir, field = self.fields[col]
@@ -117,7 +117,8 @@ class WSDataset:
             for subdir in subdirs:
                 try:
                     df = pl.scan_ipc(self.get_shard(subdir, shard).fname)
-                    if len(col_merge) > 0: df = df.drop('__key__') # ensure only one __key__ column
+                    if len(col_merge) > 0:
+                        df = df.drop("__key__")  # ensure only one __key__ column
                     col_merge.append(df)
                 except FileNotFoundError:
                     missing[subdir].append(shard)
@@ -125,13 +126,15 @@ class WSDataset:
                     col_merge = []
                     break
             if col_merge:
-                row_merge.append(pl.concat(col_merge, how = 'horizontal'))
+                row_merge.append(pl.concat(col_merge, how="horizontal"))
         if missing:
             print("WARNING: You are missing shards for some of the columns:")
             for subdir, shards in missing.items():
                 print(f"{subdir}: {shards}")
             if not row_merge:
-                raise FileNotFoundError(f"No usable shards found (columns: {', '.join(subdirs)}) for dataset in: {self.dir}")
+                raise FileNotFoundError(
+                    f"No usable shards found (columns: {', '.join(subdirs)}) for dataset in: {self.dir}"
+                )
         return exprs, pl.concat(row_merge)
 
     def sql(self, *queries):
@@ -140,15 +143,16 @@ class WSDataset:
 
     def sql_filter(self, query):
         exprs, df = self._sql(query)
-        return df.filter(exprs[0]).select('__key__').collect()['__key__']
+        return df.filter(exprs[0]).select("__key__").collect()["__key__"]
 
-    def filtered(self,
-            query,
-            infinite:bool = False, # keep yielding samples indefinitely (restarting from the beginning)
-            shuffle:bool = True, # shuffle the sample order (otherwise it will return them as they appear in the dataset)
-            N:int = None, # optional maximum number of samples to yield (otherwise it will yield all matching samples)
-            seed:int = None, # optional random seed used shuffling
-        ):
+    def filtered(
+        self,
+        query,
+        infinite: bool = False,  # keep yielding samples indefinitely (restarting from the beginning)
+        shuffle: bool = True,  # shuffle the sample order (otherwise it will return them as they appear in the dataset)
+        N: int = None,  # optional maximum number of samples to yield (otherwise it will yield all matching samples)
+        seed: int = None,  # optional random seed used shuffling
+    ):
         """Given an boolean SQL expression, returns an iterator which yields random samples
         that match the query.
 
@@ -158,6 +162,7 @@ class WSDataset:
         >>> dataset.filtered('CAST(`transcription_wslang_raw.txt` AS string) ILIKE "%between New Orleans and St. Louis%"')
         """
         import polars as pl
+
         i = 0
         keys = self.sql_filter(query)
         while True:
@@ -184,12 +189,12 @@ class WSDataset:
 
     def _register_wsds_links(self):
         for subdir, _ in self.fields.values():
-            if subdir.endswith('.wsds-link'):
+            if subdir.endswith(".wsds-link"):
                 spec = json.loads(Path(f"{self.dir}/{subdir}").read_text())
                 self.computed_columns[subdir] = spec
 
     def add_computed(self, name, **link):
-        subdir = name+'.wsds-computed'
+        subdir = name + ".wsds-computed"
         self.computed_columns[subdir] = link
         self.fields[name] = (subdir, name)
 
@@ -214,19 +219,22 @@ class WSDataset:
         return self._linked_datasets[dataset_dir]
 
     def get_linked_shard(self, link, shard_name):
-        loader_class = link['loader']
+        loader_class = link["loader"]
         if isinstance(loader_class, list):
             loader_mod, loader = loader_class
             loader_module = importlib.import_module(loader_mod)
             loader_class = getattr(loader_module, loader)
 
-        return loader_class.from_link(link, self.get_linked_dataset(f"{self.dir}/{link['dataset_dir']}"), self, shard_name)
+        return loader_class.from_link(
+            link, self.get_linked_dataset(f"{self.dir}/{link['dataset_dir']}"), self, shard_name
+        )
 
     def get_shard(self, subdir, shard_name):
         dir = f"{self.dir}/{subdir}"
 
         shard = self._open_shards.get(dir, None)
-        if shard is not None and shard.shard_name == shard_name: return shard
+        if shard is not None and shard.shard_name == shard_name:
+            return shard
 
         if subdir in self.computed_columns:
             shard = self.get_linked_shard(self.computed_columns[subdir], shard_name)
@@ -259,13 +267,15 @@ class WSDataset:
     def __repr__(self):
         return f"WSDataset({repr(self.dir)}, segmented={self.segmented})"
 
+
 def format_duration(duration):
     """Formats a duration in seconds as a string."""
     hours = duration // 3600
     if hours > 1000:
-        return f"{hours/1000:.2f} k hours"
+        return f"{hours / 1000:.2f} k hours"
     else:
         return f"{hours:.2f} hours"
+
 
 def thousand_separator(num):
     """Formats a number with a thousand separator."""

@@ -1,9 +1,8 @@
 import functools
-import gzip
 import json
 import sqlite3
-import tarfile
 from pathlib import Path
+
 
 # TODO:
 # - add support for dataset splits (split on file-level or segment-level?)
@@ -116,13 +115,13 @@ class WSIndex:
         return self.conn.execute("SELECT SUM(speech_duration) FROM files;").fetchone()[0]
 
     def shards(self):
-        return (shard for shard, in self.conn.execute("SELECT shard FROM shards;"))
+        return (shard for (shard,) in self.conn.execute("SELECT shard FROM shards;"))
 
     @functools.cached_property
     def metadata(self):
         metadata = {}
         try:
-            for metadata_chunk, in self.conn.execute("SELECT value FROM metadata;"):
+            for (metadata_chunk,) in self.conn.execute("SELECT value FROM metadata;"):
                 metadata.update(json.loads(metadata_chunk))
         except sqlite3.OperationalError as err:
             if err.args[0] != "no such table: metadata":

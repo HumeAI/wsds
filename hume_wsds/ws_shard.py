@@ -1,12 +1,12 @@
-from dataclasses import dataclass
 import io
 import pickle
+from dataclasses import dataclass
 
 import numpy as np
 import pyarrow as pa
 
-from hume_wsds.ws_sample import WSSample
 from hume_wsds.ws_audio import AudioReader, WSAudio
+from hume_wsds.ws_sample import WSSample
 
 
 class WSShard:
@@ -44,7 +44,7 @@ class WSShard:
             return data.as_buffer().to_pybytes().decode("utf-8")
         else:
             # FIXME: we need to handle audio decoding here to avoid copying the entire audio buffer
-            return data.as_py(maps_as_pydicts='strict')
+            return data.as_py(maps_as_pydicts="strict")
 
     def __repr__(self):
         r = f"WSShard({repr(self.fname)})"
@@ -52,11 +52,12 @@ class WSShard:
             r += f" # cached_region = [{self._start, self._end}]"
         return r
 
+
 @dataclass(slots=True)
 class WSSourceAudioShard:
     shard_name: str
-    source_dataset: "WSDataset"
-    derived_dataset: "WSDataset"
+    source_dataset: "WSDataset"  # noqa: F821
+    derived_dataset: "WSDataset"  # noqa: F821
     vad_column: str
 
     # cache

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-CFG="${1:-config.yaml}"  
+CFG="${1:-config.yaml}"
 
 to_bool() {
   [[ "${1:-}" == "true" ]] && echo "true" || echo "false"

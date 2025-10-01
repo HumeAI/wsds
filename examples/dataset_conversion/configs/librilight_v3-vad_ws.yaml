@@ -9,7 +9,7 @@ paths:
   input_base: /mnt/weka/dat.a2/multimodal/core/librilight/processed-v3-pipeline-vad_ws/staging
   output_base: /mnt/weka/data-wsds/librilight
 
-segmentation_type: v3-vad_ws 
+segmentation_type: v3-vad_ws
 
 subdirs:
   - acoustic_scores_raw

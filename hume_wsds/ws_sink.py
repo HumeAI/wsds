@@ -1,14 +1,19 @@
 from __future__ import annotations
 
-import random, os
-from pathlib import Path
+import os
+import random
 from contextlib import contextmanager
 from dataclasses import dataclass
+from pathlib import Path
+
+import pyarrow
+
 
 def indented(prefix, obj):
-    prefix = prefix + ': '
-    lines = str(obj).split('\n')
-    return "\n".join(p + ln for p,ln in zip([prefix] + [" "*len(prefix)] * (len(lines)-1), lines))
+    prefix = prefix + ": "
+    lines = str(obj).split("\n")
+    return "\n".join(p + ln for p, ln in zip([prefix] + [" " * len(prefix)] * (len(lines) - 1), lines))
+
 
 @dataclass(frozen=True)
 class SampleFormatChanged(BaseException):
@@ -16,18 +21,22 @@ class SampleFormatChanged(BaseException):
     new_schema: pyarrow.Schema
 
     def __str__(self):
-        return (f'The dataset format changed:\n\n'
-                f'{indented("  OLD", self.old_schema)}\n\n'
-                f'{indented("  NEW", self.new_schema)}')
+        return (
+            f"The dataset format changed:\n\n"
+            f"{indented('  OLD', self.old_schema)}\n\n"
+            f"{indented('  NEW', self.new_schema)}"
+        )
+
 
 class WSBatchedSink:
-    def __init__(self,
-                 fname, # final output file name, intermediate output goes into a temporary file
-                 batch_size=16,
-                 min_batch_size_bytes=False,
-                 compression='zstd',
-                 throwaway=False, # discard the temp file, useful for testing and benchmarking
-                ):
+    def __init__(
+        self,
+        fname,  # final output file name, intermediate output goes into a temporary file
+        batch_size=16,
+        min_batch_size_bytes=False,
+        compression="zstd",
+        throwaway=False,  # discard the temp file, useful for testing and benchmarking
+    ):
         self.fname = fname
         self.batch_size = batch_size
         self.min_batch_size_bytes = min_batch_size_bytes
@@ -52,10 +61,10 @@ class WSBatchedSink:
                 if record.nbytes < self.min_batch_size_bytes and self.batch_size < 16384:
                     self.batch_size *= 2
                     return
-            schema = record.schema.with_metadata({'batch_size': str(len(b))})
+            schema = record.schema.with_metadata({"batch_size": str(len(b))})
             self._sink = pyarrow.RecordBatchFileWriter(
-                self.fname, schema,
-                options=pyarrow.ipc.IpcWriteOptions(compression=self.compression))
+                self.fname, schema, options=pyarrow.ipc.IpcWriteOptions(compression=self.compression)
+            )
             self._sink_schema = schema
         if record.schema != self._sink_schema:
             raise SampleFormatChanged(self._sink_schema, record.schema)
@@ -63,7 +72,8 @@ class WSBatchedSink:
         self._buffer.clear()
 
     def close(self):
-        if self._buffer: self.write_batch(self._buffer, flush=True) # flush the last batch
+        if self._buffer:
+            self.write_batch(self._buffer, flush=True)  # flush the last batch
         assert self._sink is not None, "closing a WSSink that was never written to"
         self._sink.close()
 
@@ -75,6 +85,7 @@ class WSBatchedSink:
         if exc_type is None:
             self.close()
 
+
 class AtomicFile:
     def __init__(self, fname, ephemeral=False):
         self.fname = Path(fname)
@@ -82,7 +93,7 @@ class AtomicFile:
 
     def __enter__(self):
         self.fname.parent.mkdir(exist_ok=True, parents=True)
-        self._tmp_name = str(self.fname) + ('.%010x' % random.getrandbits(40))
+        self._tmp_name = str(self.fname) + (".%010x" % random.getrandbits(40))
         return self._tmp_name
 
     def __exit__(self, exc_type, exc_value, traceback):
@@ -93,13 +104,14 @@ class AtomicFile:
             if Path(self._tmp_name).exists():
                 os.remove(self._tmp_name)
 
+
 @contextmanager
 def WSSink(
-    fname:str, # final output file name, intermediate output goes into a temporary file
-    batch_size:int=16,
-    compression:str='zstd',
-    min_batch_size_bytes:int | None=None,
-    ephemeral:bool=False, # discard the temp file, useful for testing and benchmarking
+    fname: str,  # final output file name, intermediate output goes into a temporary file
+    batch_size: int = 16,
+    compression: str = "zstd",
+    min_batch_size_bytes: int | None = None,
+    ephemeral: bool = False,  # discard the temp file, useful for testing and benchmarking
 ):
     with AtomicFile(fname, ephemeral) as fname:
         with WSBatchedSink(fname, batch_size, min_batch_size_bytes, compression) as sink:

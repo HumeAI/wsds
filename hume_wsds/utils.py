@@ -1,6 +1,8 @@
 from pathlib import Path
-import pyarrow as pa
+
 import numpy as np
+import pyarrow as pa
+
 
 def get_columns(fname):
     if isinstance(fname, Path):
@@ -33,7 +35,7 @@ def list_all_columns(ds_path, shard_name=None):
             fname = (p / shard_name).with_suffix(".wsds")
         if fname and fname.exists():
             for col in get_columns(fname):
-                if col == "__key__" and '__key__' in cols:
+                if col == "__key__" and "__key__" in cols:
                     continue
                 # seems like we should fix this during the original conversion
                 if col in cols or col in dupes:
@@ -47,6 +49,7 @@ def list_all_columns(ds_path, shard_name=None):
                     cols[col] = (p.name, col)
     return dict(sorted(cols.items()))
 
+
 def list_all_shards(dataset: str, verbose: bool = False):
     shards = {}
     for subdir in Path(dataset).iterdir():
@@ -57,7 +60,7 @@ def list_all_shards(dataset: str, verbose: bool = False):
             print(f"error: empty folder {subdir}")
             del shards[subdir]
 
-    common_shards = {v for l in shards.values() for v in l}
+    common_shards = {v for shard_values in shards.values() for v in shard_values}
     num_common = len(common_shards)
 
     errors = False
@@ -65,7 +68,7 @@ def list_all_shards(dataset: str, verbose: bool = False):
         missing = common_shards - files
         n_missing = len(missing)
         if n_missing == 0:
-            status = f"[COMPLETE]"
+            status = "[COMPLETE]"
         else:
             status = f"[MISSING {n_missing}]"
 
@@ -79,13 +82,14 @@ def list_all_shards(dataset: str, verbose: bool = False):
     if errors:
         print(f"\nFound {num_common} common shards across all dirs.")
 
-    # count len audio 
+    # count len audio
     audio_dir = Path(dataset) / "../source/audio"
     if audio_dir.exists():
         audio_shards = [f for f in audio_dir.iterdir() if f.suffix == ".wsds"]
         print(f"\nAudio dir {audio_dir.resolve()} has {len(audio_shards)} shards.")
 
     return [x.replace(".wsds", "") for x in common_shards]
+
 
 def make_key(src_file: str, segment_id: int):
     """Make a composite string key from source file name and sequential segment id.
@@ -108,14 +112,17 @@ def parse_key(key: str):
     src_file, segment_id = key.rsplit("_", 1)
     return src_file, int(segment_id)
 
-def cast_types_for_storage(obj, float_cast='float32', int_cast='int32', debug=False):
+
+def cast_types_for_storage(obj, float_cast="float32", int_cast="int32", debug=False):
     """Cast nested JSON-like objects to more resctrictive float and integer types.
 
     By default PyArrow would cast to float64 and int64, which are not optimal for storage.
     This function casts all numbers to float32/int32 by default.
     """
-    if isinstance(float_cast, str): float_cast = getattr(np, float_cast)
-    if isinstance(int_cast, str): int_cast = getattr(np, int_cast)
+    if isinstance(float_cast, str):
+        float_cast = getattr(np, float_cast)
+    if isinstance(int_cast, str):
+        int_cast = getattr(np, int_cast)
 
     def _cast(obj):
         if type(obj) is float:
@@ -127,10 +134,12 @@ def cast_types_for_storage(obj, float_cast='float32', int_cast='int32', debug=Fa
         elif type(obj) is list:
             return [_cast(v) for v in obj]
         else:
-            if debug: print('unknown type:', type(obj), obj, type(obj) is float, float)
+            if debug:
+                print("unknown type:", type(obj), obj, type(obj) is float, float)
             return obj
 
     return _cast(obj)
+
 
 def parse_key_two_parts(key: str):
     """Parse a composite string key into the source file name, segmentation kind and sequential segment id.

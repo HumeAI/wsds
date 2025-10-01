@@ -27,10 +27,10 @@ repos:
       # Run the linter.
       - id: ruff
         args: [--fix]
-        files: ^wsds/
+        files: ^hume_wsds/
         exclude: \.ipynb$ # Excluding notebooks for now.
 
       # Run the formatter.
       - id: ruff-format
-        files: ^wsds/
+        files: ^hume_wsds/
         exclude: \.ipynb$ # Excluding notebooks for now.

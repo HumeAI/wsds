@@ -1,19 +1,20 @@
 import functools
-import json
-from pathlib import Path
-import os
+import gzip
 import io
+import json
+import os
+import tarfile
+from collections import defaultdict
+from pathlib import Path
 
 import numpy as np
 import pyarrow as pa
 
-
-import tarfile
-from collections import defaultdict
 from hume_wsds import WSSink
-import json
 
 commands = {}
+
+
 def command(name_or_fun):
     name = None
 
@@ -28,28 +29,28 @@ def command(name_or_fun):
         return decorator(name_or_fun)
 
 
-
-@command('list')
-def _list(input_shard:str):
+@command("list")
+def _list(input_shard: str):
     """Lists keys in a wsds dataset or shard."""
-    if (Path(input_shard) / 'index.sqlite3').exists():
+    if (Path(input_shard) / "index.sqlite3").exists():
         # FIXME: implement keys
         pass
     else:
         reader = pa.RecordBatchFileReader(pa.memory_map(input_shard))
         try:
             for i in range(reader.num_record_batches):
-                for key in reader.get_batch(i)['__key__']:
+                for key in reader.get_batch(i)["__key__"]:
                     print(key)
         except BrokenPipeError:
             pass
 
 
 @command
-def inspect(input_path:str):
+def inspect(input_path: str):
     """Displays metadata and schema of a wsds dataset or shard."""
-    if (Path(input_path) / 'index.sqlite3').exists():
+    if (Path(input_path) / "index.sqlite3").exists():
         from . import WSDataset
+
         ds = WSDataset(input_path)
         print(ds)
     else:
@@ -59,52 +60,49 @@ def inspect(input_path:str):
         print(f"Schema:\n{reader.schema}")
 
 
-
 @command
 def shard_from_webdataset(
-    input_shard:str,          # input shard URL/path
-    output_shard:str,         # output shard URL/path
-    batch_size:int=16,        # batch size
-    compression:str='zstd',
-    min_batch_size_bytes=1024*1024,
-    no_keys:bool=False,
-    requires_sorting:bool=False,
-    yt_data_specific:bool=False,
+    input_shard: str,  # input shard URL/path
+    output_shard: str,  # output shard URL/path
+    batch_size: int = 16,  # batch size
+    compression: str = "zstd",
+    min_batch_size_bytes=1024 * 1024,
+    no_keys: bool = False,
+    requires_sorting: bool = False,
+    yt_data_specific: bool = False,
 ):
     """Converts a WebDataset shard into wsds format.
 
     Tries to automatically determine good defaults for compression and batch size."""
     import webdataset as wds
-    from hume_wsds import WSSink
-    from hume_wsds.utils import cast_types_for_storage
-    from hume_wsds.constants import ShardMapping
 
+    from hume_wsds.constants import ShardMapping
+    from hume_wsds.utils import cast_types_for_storage
 
     out_dir = Path(output_shard).parents[0].name
-    if out_dir == 'audio': compression = 'no-compression'
-    
-    if out_dir == 'audio' and requires_sorting: 
+    if out_dir == "audio":
+        compression = "no-compression"
+
+    if out_dir == "audio" and requires_sorting:
+
         def list_keys_tarfile(input_shard):
             if input_shard.endswith("gz"):
                 o = gzip.open
             else:
                 o = open
             all_samples = defaultdict(dict)
-            f = o(input_shard, 'rb')
+            f = o(input_shard, "rb")
             tar = tarfile.TarFile(fileobj=f)
             for member in tar.getmembers():
-                path, name = member.name.rsplit('/', 1)
-                name = name.replace('_comments', '.comments')
-                key, field = name.split('.', 1)
-                all_samples[f'{path}/{key}'][field] = member
+                path, name = member.name.rsplit("/", 1)
+                name = name.replace("_comments", ".comments")
+                key, field = name.split(".", 1)
+                all_samples[f"{path}/{key}"][field] = member
             return tar, all_samples
-        
-        tar, samples = list_keys_tarfile(input_shard)
-    else:  
-        ds = wds.WebDataset([input_shard], shardshuffle=False)
-    
-    
 
+        tar, samples = list_keys_tarfile(input_shard)
+    else:
+        ds = wds.WebDataset([input_shard], shardshuffle=False)
 
     def process(stream):
         for s in stream:
@@ -112,12 +110,12 @@ def shard_from_webdataset(
             for k, v in s.items():
                 if k.endswith(".json"):
                     v = json.loads(v)
-                    k = k[:-len(".json")]
+                    k = k[: -len(".json")]
                     try:
-                        v = cast_types_for_storage(v, float_cast='float16', int_cast='int32')
+                        v = cast_types_for_storage(v, float_cast="float16", int_cast="int32")
                     except Exception:
-                        pass  
-    
+                        pass
+
                 if k == "brouhaha_mean":
                     if isinstance(v, dict):
                         if "mean_c50" in v:
@@ -125,7 +123,7 @@ def shard_from_webdataset(
                         if "mean_snr" in v:
                             new_s["snr"] = float(v["mean_snr"])
                     continue
-    
+
                 def to_npy_bytes(array):
                     buf = io.BytesIO()
                     np.save(buf, array, allow_pickle=False)
@@ -137,7 +135,7 @@ def shard_from_webdataset(
                     pause_dur_list = []
                     pause_energy_list = []
                     speaker_list = []
-    
+
                     for item in v:
                         try:
                             start, end, speaker, pause_dur, pause_energy = item
@@ -148,37 +146,35 @@ def shard_from_webdataset(
                         except Exception as e:
                             print(f"[Warning] Skipping invalid diarization entry: {e}")
                             continue
-    
+
                     new_s["diarized.vad.npy"] = to_npy_bytes(np.array(vad_array, dtype=np.float32))
                     new_s["diarized.pause_dur.npy"] = to_npy_bytes(np.array(pause_dur_list, dtype=np.float32))
                     new_s["diarized.pause_energy.npy"] = to_npy_bytes(np.array(pause_energy_list, dtype=np.float32))
                     new_s["diarized.speaker.npy"] = to_npy_bytes(np.array(speaker_list))  # strings are fine
                     continue
                 new_s[k] = v
-            
+
             renamed = {}
             for k, v in new_s.items():
-                for target_key, (expected_dir, expected_name) in ShardMapping.items():
-                    if out_dir == expected_dir and k == expected_name:
-                        k = target_key
-                        break
-                renamed[k] = v
-    
+                # Find (out_dir, k) in ShardMapping
+                # otherwise use the original key k as default
+                target_key = ShardMapping.get((out_dir, k), k)
+                renamed[target_key] = v
+
             yield renamed
 
+    if compression == "no-compression":
+        compression = None
 
-    if compression == 'no-compression': compression = None
-
-    if out_dir == 'audio' and yt_data_specific:
-    
+    if out_dir == "audio" and yt_data_specific:
         AUDIO_KEYS = ["m4a", "mp3", "wav", "flac", "ogg", "opus"]
-    
+
         with WSSink(output_shard) as sink:
             for key in sorted(samples.keys()):
                 s = {"__key__": key}
                 sample = samples[key]
-    
-                # requires audio - there should always be audio an if not then downstream artifacts will not exist for that key 
+
+                # requires audio - there should always be audio an if not then downstream artifacts will not exist for that key
                 audio_found = False
                 for ak in AUDIO_KEYS:
                     if ak in sample:
@@ -189,72 +185,78 @@ def shard_from_webdataset(
                     print(f"[Warning] No audio found for {key}")
                     continue
 
-                # for empty 
+                # for empty
                 def get_or_empty(field):
                     if field in sample:
                         return tar.extractfile(sample[field]).read().decode("utf-8", errors="ignore")
-                    return ""   #
-    
+                    return ""  #
+
                 s["info.json"] = get_or_empty("info.json")
                 s["description"] = get_or_empty("description")
                 s["comments.json"] = get_or_empty("comments.json")
-    
-                # combine existing vtts 
-                vtts = {
-                    k: tar.extractfile(v).read().decode("utf-8")
-                    for k, v in sample.items() if k.endswith(".vtt")
-                }
+
+                # combine existing vtts
+                vtts = {k: tar.extractfile(v).read().decode("utf-8") for k, v in sample.items() if k.endswith(".vtt")}
                 s["vtt"] = json.dumps(vtts) if vtts else "{}"
-    
+
                 sink.write(s)
-    else: 
+    else:
         ds = ds.compose(process)
-        
-        with WSSink(output_shard, batch_size=batch_size, compression=compression,
-                    min_batch_size_bytes=min_batch_size_bytes) as sink:
+
+        with WSSink(
+            output_shard, batch_size=batch_size, compression=compression, min_batch_size_bytes=min_batch_size_bytes
+        ) as sink:
             for x in ds:
-                drop_keys(x, '__url__', '__local_path__')
-                if no_keys: del x['__key__']
+                drop_keys(x, "__url__", "__local_path__")
+                if no_keys:
+                    del x["__key__"]
                 sink.write(dict(sorted(x.items())))
 
 
-    
 def drop_keys(dict, *keys):
     """Remove specified keys from the given dictionary."""
     for key in keys:
-        if key in dict: del dict[key]
+        if key in dict:
+            del dict[key]
+
 
 @command
-def dump_index(source_dataset:Path):
+def dump_index(source_dataset: Path):
     """Dump the index of the given dataset in a readable format."""
     from . import WSDataset
 
     ds = WSDataset(source_dataset)
 
     try:
-        for sample in ds.index.query("SELECT name,s.shard,offset FROM files AS f, shards AS s WHERE s.shard_id == f.shard_id ORDER BY name,s.shard,offset;"):
+        for sample in ds.index.query(
+            "SELECT name,s.shard,offset FROM files AS f, shards AS s WHERE s.shard_id == f.shard_id ORDER BY name,s.shard,offset;"
+        ):
             print(*sample)
     except BrokenPipeError:
         pass
 
+
 @command
 def validate_shards(dataset, verbose=False):
     from .utils import list_all_shards
+
     list_all_shards(dataset, verbose)
+
 
 @command
 def init(
-    new_dataset:Path,
-    source_dataset:Path | None = None,
-    vad_column:str | None = None,
-    num_workers:int = 32,
+    new_dataset: Path,
+    source_dataset: Path | None = None,
+    vad_column: str | None = None,
+    num_workers: int = 32,
 ):
     """Initialize a new dataset, from scratch or from a segmentation of an existing one."""
-    from . import WSDataset
-    from fastprogress import progress_bar
-    from .ws_index import WSDSIndexWriter
-    from . import AtomicFile
     import multiprocessing
+
+    from fastprogress import progress_bar
+
+    from . import AtomicFile, WSDataset
+    from .ws_index import WSDSIndexWriter
 
     new_dataset = Path(new_dataset)
 
@@ -267,7 +269,7 @@ def init(
     shard_extractor = functools.partial(extract_index_for_shard, source_dataset, vad_column=vad_column)
     all_shards = ds.get_shard_list()
 
-    with AtomicFile(new_dataset / 'index.sqlite3') as fname:
+    with AtomicFile(new_dataset / "index.sqlite3") as fname:
         with WSDSIndexWriter(fname) as index:
             with multiprocessing.Pool(num_workers) as p:
                 for r in progress_bar(p.imap_unordered(shard_extractor, all_shards), total=len(all_shards)):
@@ -277,22 +279,26 @@ def init(
                         print("Failed to append records to index:", r)
                         raise
 
-            index.append_metadata({
-                'segmented': True if vad_column else False
-            })
+            index.append_metadata({"segmented": True if vad_column else False})
 
         if vad_column:
-            with AtomicFile(new_dataset / 'audio.wsds-link') as fname:
-                with open(fname, 'w') as f:
-                    f.write(json.dumps({
-                        "dataset_dir": os.path.relpath(source_dataset, new_dataset),
-                        "loader": ["hume_wsds.ws_shard", "WSSourceAudioShard"],
-                        "vad_column": vad_column,
-                    }))
+            with AtomicFile(new_dataset / "audio.wsds-link") as fname:
+                with open(fname, "w") as f:
+                    f.write(
+                        json.dumps(
+                            {
+                                "dataset_dir": os.path.relpath(source_dataset, new_dataset),
+                                "loader": ["hume_wsds.ws_shard", "WSSourceAudioShard"],
+                                "vad_column": vad_column,
+                            }
+                        )
+                    )
+
 
 def extract_index_for_shard(dataset, shard, vad_column=None):
-    from . import WSDataset
     from torchcodec.decoders import AudioDecoder
+
+    from . import WSDataset
     from .ws_audio import to_filelike
 
     ds = WSDataset(dataset)
@@ -300,7 +306,7 @@ def extract_index_for_shard(dataset, shard, vad_column=None):
     i = 0
     for s in ds.sequential_from(shard, 0):
         try:
-            key = str(s['__key__'])
+            key = str(s["__key__"])
         except IndexError:
             # this can only happen if we don't have an index yet and we got a sample that's out of bounds
             # because of lazyness the error in WSSample only happens on first access
@@ -314,7 +320,7 @@ def extract_index_for_shard(dataset, shard, vad_column=None):
             n = len(vad)
             speech_duration = 0
             if vad.size > 0:
-                speech_duration = float((vad[:,-1] - vad[:,-2]).sum()) # tend - tstart
+                speech_duration = float((vad[:, -1] - vad[:, -2]).sum())  # tend - tstart
 
         try:
             # FIXME: move this to ws_audio and add to autodecoders?
@@ -325,12 +331,14 @@ def extract_index_for_shard(dataset, shard, vad_column=None):
             print("         for sample:", s)
             raise
 
-        if n > 0: # in derived datasets, skip files with no vad segments (they won't have samples and will never appear as keys)
+        if (
+            n > 0
+        ):  # in derived datasets, skip files with no vad segments (they won't have samples and will never appear as keys)
             index.append((key, i, audio_duration, speech_duration))
 
         i += n
     return {
-        'shard_name': shard,
-        'index': index,
-        'n_samples': i,
+        "shard_name": shard,
+        "index": index,
+        "n_samples": i,
     }

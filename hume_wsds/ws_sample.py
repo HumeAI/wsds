@@ -1,8 +1,9 @@
 from dataclasses import dataclass, field
 
+
 @dataclass(frozen=True, slots=True)
 class WSSample:
-    dataset: "WSDataset"
+    dataset: "WSDataset"  # noqa: F821
     shard_name: str
     offset: int
     overrides: dict = field(default_factory=dict)
@@ -34,12 +35,12 @@ class WSSample:
         self.overrides[field] = value
 
     def get_one_of(self, *fields, default=None):
-        for field in fields:
-            if field in self:
-                return self[field]
+        for f in fields:
+            if f in self:
+                return self[f]
         return default
 
-    def get(self, field:str, default=None):
+    def get(self, field: str, default=None):
         return self[field] if field in self else default
 
     def __contains__(self, field):
@@ -47,10 +48,10 @@ class WSSample:
 
     def __repr_field__(self, field):
         try:
-            k, v = field, self[field]
+            _, v = field, self[field]
             if hasattr(v, "shape"):
                 if v.shape:
-                    trunc_repr = ' '.join(repr(v).split(' ')[:10])
+                    trunc_repr = " ".join(repr(v).split(" ")[:10])
                     v = f"{trunc_repr}…, shape={repr(v.shape)}, dtype={v.dtype})"
                 else:
                     v = repr(v)
@@ -59,9 +60,8 @@ class WSSample:
                 if len(v) > 1000:
                     v = v[:1000] + "…"
         except FileNotFoundError:
-            k, v = field, f'<missing shard: {self.dataset.fields[field][1]}/{self.shard_name}>'
+            _, v = field, f"<missing shard: {self.dataset.fields[field][1]}/{self.shard_name}>"
         return v
-
 
     def __repr__(self):
         r = f"WSSample({repr(self.dataset)}, shard_name={repr(self.shard_name)}, offset={repr(self.offset)}, fields={'{'}\n"

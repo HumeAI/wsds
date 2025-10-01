@@ -3,7 +3,9 @@ from __future__ import annotations
 import io
 import typing
 from dataclasses import dataclass
+
 import pyarrow as pa
+
 
 def to_filelike(src: typing.Any) -> typing.BinaryIO:
     """Coerces files, byte-strings and PyArrow binary buffers into file-like objects."""
@@ -31,7 +33,7 @@ class AudioReader:
     """A lazy seeking-capable audio reader for random-access to recordings stored in WSDS shards."""
 
     src: typing.Any
-    reader: torchaudio.io.StreamReader | None = None
+    reader: "torchaudio.io.StreamReader" | None = None  # noqa: F821
     sample_rate: int | None = None
     skip_samples: int = 0
 
@@ -44,9 +46,7 @@ class AudioReader:
         import torchaudio
 
         if self.sample_rate is not None:
-            assert not sample_rate or sample_rate == self.sample_rate, (
-                "please use a consistent sample rate"
-            )
+            assert not sample_rate or sample_rate == self.sample_rate, "please use a consistent sample rate"
 
         if self.reader is None:
             # FIXME: move to AudioDecoder from torchcodec
@@ -62,9 +62,7 @@ class AudioReader:
 
             # fetch 32 seconds because we likely need 30s at maximum but the seeking may be imprecise (and we seek 1s early)
             # FIXME: check if we can get away with some better settings here (-1, maybe 10s + concatenate the chunks in a loop)
-            reader.add_basic_audio_stream(
-                frames_per_chunk=int(32 * sample_rate), sample_rate=sample_rate
-            )
+            reader.add_basic_audio_stream(frames_per_chunk=int(32 * sample_rate), sample_rate=sample_rate)
 
             self.reader = reader
             self.sample_rate = sample_rate
@@ -78,11 +76,7 @@ class AudioReader:
         reader.fill_buffer()
         (chunk,) = reader.pop_chunks()
         # tight crop (seems accurate down to 1 sample in my tests)
-        prefix = (
-            int((start - chunk.pts) * sample_rate) + self.skip_samples
-            if start > 0
-            else 0
-        )
+        prefix = int((start - chunk.pts) * sample_rate) + self.skip_samples if start > 0 else 0
         assert prefix >= 0
         samples = chunk[prefix : prefix + int((end - start) * sample_rate)].mT
         # clear out any remaining data
@@ -105,6 +99,8 @@ class WSAudio:
         samples = self.audio_reader.read_segment(self.tstart, self.tend, sample_rate)
         sample_rate = samples.sample_rate
         if pad_to_seconds is not None:
+            import torch
+
             padding = int(pad_to_seconds * sample_rate - samples.shape[-1])
             samples = torch.nn.functional.pad(samples, (0, padding))
             samples.sample_rate = sample_rate

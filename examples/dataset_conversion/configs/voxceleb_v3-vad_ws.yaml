@@ -6,10 +6,10 @@ flags:
 
 paths:
   audio_base: /mnt/weka/data2/multimodal/specific/voxceleb/raw/audio
-  input_base: /mnt/weka/data2/multimodal/specific/voxceleb/processed-v3-pipeline-vad_ws/staging      
+  input_base: /mnt/weka/data2/multimodal/specific/voxceleb/processed-v3-pipeline-vad_ws/staging
   output_base: /mnt/weka/data-wsds/voxceleb
 
-segmentation_type: v3-vad_ws  
+segmentation_type: v3-vad_ws
 
 subdirs:
   - acoustic_scores_raw

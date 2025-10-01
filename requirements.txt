@@ -1,8 +1,8 @@
+fastprogress
+fire
 numpy
+polars
 pyarrow
 torch
 torchaudio
-fire
-fastprogress
 torchcodec
-polars
