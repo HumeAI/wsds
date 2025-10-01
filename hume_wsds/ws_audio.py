@@ -105,3 +105,13 @@ class WSAudio:
             samples = torch.nn.functional.pad(samples, (0, padding))
             samples.sample_rate = sample_rate
         return samples
+
+    def _display_(self):
+        import marimo
+        samples = self.load()
+        return marimo.audio(samples.numpy(), rate=samples.sample_rate)
+
+    def _ipython_display_(self):
+        from IPython.display import display, Audio
+        samples = self.load()
+        display(Audio(samples.numpy(), rate=samples.sample_rate))
