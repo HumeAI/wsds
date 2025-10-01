@@ -1,6 +1,7 @@
 import io
 import pickle
 from dataclasses import dataclass
+import re
 
 import numpy as np
 import pyarrow as pa
@@ -84,3 +85,33 @@ class WSSourceAudioShard:
 
         tstart, tend = self.get_timestamps(segment_offset)
         return WSAudio(self._source_reader, tstart, tend)
+
+class WSYoutubeVideoShard(WSSourceAudioShard):
+    re_pattern : re.Pattern[str]
+
+    @classmethod
+    def from_link(cls, link, source_dataset, derived_dataset, shard_name):
+        self = super().from_link(link, source_dataset, derived_dataset, shard_name)
+        self.re_pattern = re.compile(link['youtube_id_regexp'])
+        return self
+
+    def get_sample(self, _column, offset):
+        sample = super().get_sample(_column, offset)
+        match = self.re_pattern.search(self._source_file_name)
+        if not match:
+            raise ValueError(f'No Youtube ID found in file name: {self._source_file_name} (using pattern: {self.re_pattern.pattern})')
+        return WSYouTubeVideo(match[1], sample.tstart)
+
+@dataclass
+class WSYouTubeVideo:
+    id : str
+    tstart : float
+
+    def get_url(self):
+        return f'https://www.youtube.com/embed/{self.id}?start={int(self.tstart)}'
+
+    def _repr_html_(self):
+        return f'<iframe width="560" height="315" src="{self.get_url()}" title="YouTube video player" frameborder="0" allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share" referrerpolicy="strict-origin-when-cross-origin" allowfullscreen></iframe>'
+
+    def __repr__(self):
+        return f'WSYouTubeVideo(video_url="{self.get_url()}")'
