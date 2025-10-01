@@ -11,7 +11,8 @@ from hume_wsds.ws_sample import WSSample
 
 
 class WSShard:
-    def __init__(self, fname, shard_name=None):
+    def __init__(self, dataset, fname, shard_name=None):
+        self.dataset = dataset
         self.shard_name = shard_name
         self.fname = fname
 
@@ -43,6 +44,8 @@ class WSShard:
             return pickle.load(io.BytesIO(data.as_buffer()))
         elif column.endswith("txt"):
             return data.as_buffer().to_pybytes().decode("utf-8")
+        elif column in self.dataset._audio_file_keys:
+            return AudioReader(data)
         else:
             # FIXME: we need to handle audio decoding here to avoid copying the entire audio buffer
             return data.as_py(maps_as_pydicts="strict")
@@ -80,7 +83,7 @@ class WSSourceAudioShard:
 
         if self._source_file_name != file_name:
             self._source_sample = self.source_dataset[file_name]
-            self._source_reader = AudioReader(self._source_sample.get_audio())
+            self._source_reader = self._source_sample.get_audio()
             self._source_file_name = file_name
 
         tstart, tend = self.get_timestamps(segment_offset)

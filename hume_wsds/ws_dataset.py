@@ -240,7 +240,7 @@ class WSDataset:
         if subdir in self.computed_columns:
             shard = self.get_linked_shard(self.computed_columns[subdir], shard_name)
         else:
-            shard = WSShard(f"{dir}/{shard_name}.wsds", shard_name=shard_name)
+            shard = WSShard(self, f"{dir}/{shard_name}.wsds", shard_name=shard_name)
 
         self._open_shards[dir] = shard
         return shard
