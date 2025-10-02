@@ -1,0 +1,23 @@
+flags:
+  convert_audio: true
+  convert_mvad: true
+  convert_artifacts: true
+  create_index: true
+  
+  audio_requires_sorting: true
+
+paths:
+  audio_base: /mnt/weka/data2/multimodal/core/spotify2/raw/audio/
+  input_base: /mnt/weka/data2/multimodal/core/spotify2/processed-v3-pipeline-vad_ws/staging/
+  output_base: /mnt/weka/data-wsds/spotify2-test/
+
+segmentation_type: v3-vad_ws 
+
+subdirs:
+  - acoustic_scores_raw
+  - transcription_wslang_raw
+  # - transcription_wslang_turbo_raw
+  # - transcription_parakeet-tdt-0-6b-v3_raw
+  # - pquality_wmusic_scores_raw
+  # - dtok_v2_ml_25hz_32x16384_graphemes_v2_encoder
+  # - dtok_v2_ml_50hz_32x16384_graphemes_key16k
