@@ -11,9 +11,6 @@ class WSSample:
     offset: int
     overrides: dict = field(default_factory=dict)
 
-    def get_key(self):
-        return self.dataset.get_key(self.shard_name, self.offset)
-
     def get_audio(self, audio_columns=None):
         r = self.get_one_of(*(audio_columns or self.dataset._audio_file_keys))
         if not r:

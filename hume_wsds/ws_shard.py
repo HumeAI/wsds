@@ -96,7 +96,7 @@ class WSSourceAudioShard(WSShardInterface):
 
     def get_sample(self, _column, offset):
         file_name, segment_offset = self.derived_dataset.parse_key(
-            self.derived_dataset.get_key(self.shard_name, offset)
+            WSSample(self.derived_dataset, self.shard_name, offset)['__key__']
         )
 
         if self._source_file_name != file_name:

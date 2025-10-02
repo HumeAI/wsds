@@ -270,21 +270,6 @@ class WSDataset:
         self.computed_columns[subdir] = link
         self.fields[name] = (subdir, name)
 
-    def get_key(self, shard_name, offset):
-        file_name, start_offset = self.index.query(
-            """
-        SELECT f.name, f.offset FROM files AS f, shards AS s
-        WHERE s.shard = ? AND f.offset <= ? AND s.shard_id == f.shard_id
-        ORDER BY f.offset DESC
-        LIMIT 1""",
-            shard_name,
-            offset,
-        ).fetchone()
-        if self.segmented:
-            return make_key(file_name, offset - start_offset)
-        else:
-            return file_name
-
     def get_linked_dataset(self, dataset_dir):
         if dataset_dir not in self._linked_datasets:
             self._linked_datasets[dataset_dir] = WSDataset(dataset_dir)
