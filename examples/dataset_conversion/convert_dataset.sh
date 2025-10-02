@@ -13,6 +13,8 @@ CONVERT_ARTIFACTS=$(to_bool "$(yq -r '.flags.convert_artifacts' "$CFG")")
 CREATE_INDEX=$(to_bool "$(yq -r '.flags.create_index' "$CFG")")
 
 YT_DATA_SPECIFIC=$(to_bool "$(yq -r '.flags.yt_data_specific' "$CFG")")
+REQUIRES_SORTING=$(to_bool "$(yq -r '.flags.audio_requires_sorting' "$CFG")")
+
 
 MVAD_DIR_NAME=$(yq -r '.flags.mvad_dir_name // "mvad"' "$CFG")
 
@@ -42,12 +44,18 @@ if [[ "$YT_DATA_SPECIFIC" == "true" ]]; then
   COMMON_ARGS+=(--yt_data_specific)
 fi
 
+if [[ "$REQUIRES_SORTING" == "true" ]]; then
+  COMMON_ARGS+=(--audio_requires_sorting)
+fi
+
+
+
 ### audio ###
 if [[ "$CONVERT_AUDIO" == "true" ]]; then
   echo -e "${BLU}${BOLD}=== Converting audio ===${RST}"
 
   mapfile -t AUDIO_TARS < <(
-    for f in "$AUDIO_BASE"/*.tar; do
+    for f in "$AUDIO_BASE"/1_Dad-000000*; do
       base=$(basename "${f}")
       out="$OUTPUT_BASE/source/audio/${base%.tar*}.wsds"
       [[ -f "$out" ]] || echo "$f"
@@ -81,7 +89,7 @@ if [[ "$CONVERT_MVAD" == "true" ]]; then
   echo -e "${BLU}${BOLD}=== Converting $MVAD_DIR ===${RST}"
 
   mapfile -t MVAD_TARS < <(
-    for f in "$INPUT_BASE/$MVAD_DIR_NAME"/*.tar.gz; do
+    for f in "$INPUT_BASE/$MVAD_DIR_NAME"/1_Dad-000000*; do
         base=$(basename "${f}")
         # remove trailing .tar.gz or .tar
         base_noext="${base%.tar.gz}"
@@ -116,7 +124,7 @@ if [[ "$CONVERT_ARTIFACTS" == "true" ]]; then
     echo -e "${BLU}${BOLD}=== Converting $sub ===${RST}"
 
     mapfile -t ART_TARS < <(
-      for f in "$in_dir"/*.tar.gz; do
+      for f in "$in_dir"/1_Dad-000000*; do
         base=$(basename "${f}")
         base_root="${base%%.*}"   # keep only before the first dot
         out="$out_dir/${base_root}.wsds"
