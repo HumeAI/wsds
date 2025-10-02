@@ -76,6 +76,7 @@ def shard_from_webdataset(
     no_keys: bool = False,
     yt_data_specific: bool = False,
     audio_requires_sorting: bool = False,
+    mixed_audio: bool = False,
 ):
     """Converts a WebDataset shard into wsds format.
 
@@ -137,7 +138,10 @@ def shard_from_webdataset(
             
                 for ak in AUDIO_KEYS:
                     if ak in fields:
-                        new_s['audio'] = tar.extractfile(fields[ak]).read()
+                        if mixed_audio: 
+                            new_s['audio'] = tar.extractfile(fields[ak]).read()
+                        else: 
+                            new_s[ak] = tar.extractfile(fields[ak]).read()
                 
                 if yt_data_specific: 
                     for meta in ["info.json", "description", "comments.json"]:
