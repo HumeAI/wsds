@@ -115,7 +115,7 @@ class WSIndex:
         return self.conn.execute("SELECT SUM(speech_duration) FROM files;").fetchone()[0]
 
     def shards(self):
-        return (shard for (shard,) in self.conn.execute("SELECT shard FROM shards;"))
+        return (shard for (shard,) in self.conn.execute("SELECT shard FROM shards ORDER BY rowid;"))
 
     @functools.cached_property
     def metadata(self):
