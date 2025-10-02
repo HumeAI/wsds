@@ -3,14 +3,20 @@ import gzip
 import io
 import json
 import os
+
 import tarfile
 from collections import defaultdict
 from pathlib import Path
 
 import numpy as np
 import pyarrow as pa
+from pathlib import Path
+from collections import defaultdict
+import webdataset as wds
 
-from hume_wsds import WSSink
+from hume_wsds import WSSink, WSSample
+
+
 
 commands = {}
 
@@ -62,97 +68,147 @@ def inspect(input_path: str):
 
 @command
 def shard_from_webdataset(
-    input_shard: str,  # input shard URL/path
-    output_shard: str,  # output shard URL/path
-    batch_size: int = 16,  # batch size
-    compression: str = "zstd",
-    min_batch_size_bytes=1024 * 1024,
+    input_shard: str,          # input shard URL/path
+    output_shard: str,         # output shard URL/path
+    batch_size: int = 16,      # batch size
+    compression: str = 'zstd',
+    min_batch_size_bytes: int = 1024*1024,
     no_keys: bool = False,
-    requires_sorting: bool = False,
     yt_data_specific: bool = False,
 ):
     """Converts a WebDataset shard into wsds format.
 
-    Tries to automatically determine good defaults for compression and batch size."""
+    Supports yt_data_specific mode with optional sorting.
+    """
+    import io, json, tarfile, gzip
+    import numpy as np
     import webdataset as wds
-
-    from hume_wsds.constants import ShardMapping
+    from pathlib import Path
+    from collections import defaultdict
+    from hume_wsds import WSSink
     from hume_wsds.utils import cast_types_for_storage
+    from hume_wsds.constants import ShardMapping
 
     out_dir = Path(output_shard).parents[0].name
-    if out_dir == "audio":
-        compression = "no-compression"
+    if out_dir == 'audio':
+        compression = 'no-compression'
 
-    if out_dir == "audio" and requires_sorting:
+    AUDIO_KEYS = ["m4a", "mp3", "wav", "flac", "ogg", "opus"]
 
+    def process(stream):
+        # yt audio data requiring sorting
         def list_keys_tarfile(input_shard):
             if input_shard.endswith("gz"):
                 o = gzip.open
             else:
                 o = open
+        
             all_samples = defaultdict(dict)
-            f = o(input_shard, "rb")
+            audio_entries = [] 
+        
+            f = o(input_shard, 'rb')
             tar = tarfile.TarFile(fileobj=f)
+        
             for member in tar.getmembers():
-                path, name = member.name.rsplit("/", 1)
-                name = name.replace("_comments", ".comments")
-                key, field = name.split(".", 1)
-                all_samples[f"{path}/{key}"][field] = member
-            return tar, all_samples
+                path, name = member.name.rsplit('/', 1)
+                name = name.replace('_comments', '.comments')
+                key, field = name.split('.', 1)
+                sample_key = f'{path}/{key}'
+        
+                all_samples[sample_key][field] = member
+        
+                if field in AUDIO_KEYS:
+                    audio_entries.append(sample_key)
+        
+            return tar, all_samples, audio_entries
+            
+        if out_dir == 'audio' and yt_data_specific:
 
-        tar, samples = list_keys_tarfile(input_shard)
-    else:
-        ds = wds.WebDataset([input_shard], shardshuffle=False)
-
-    def process(stream):
-        for s in stream:
-            new_s = {}
-            for k, v in s.items():
-                if k.endswith(".json"):
-                    v = json.loads(v)
-                    k = k[: -len(".json")]
-                    try:
-                        v = cast_types_for_storage(v, float_cast="float16", int_cast="int32")
-                    except Exception:
-                        pass
-
-                if k == "brouhaha_mean":
-                    if isinstance(v, dict):
-                        if "mean_c50" in v:
-                            new_s["c50"] = float(v["mean_c50"])
-                        if "mean_snr" in v:
-                            new_s["snr"] = float(v["mean_snr"])
-                    continue
-
-                def to_npy_bytes(array):
-                    buf = io.BytesIO()
-                    np.save(buf, array, allow_pickle=False)
-                    return buf.getvalue()
-
-                # for diarized pipeline
-                if k == "vad_silero_diarized_continuous":
-                    vad_array = []
-                    pause_dur_list = []
-                    pause_energy_list = []
-                    speaker_list = []
-
-                    for item in v:
+            tar, samples, audio_entries = list_keys_tarfile(input_shard)
+            
+            for sample_key in audio_entries:
+                fields = samples[sample_key]
+                new_s = {}
+            
+                for ak in AUDIO_KEYS:
+                    if ak in fields:
+                        new_s[ak] = tar.extractfile(fields[ak]).read()
+            
+                for meta in ["info.json", "description", "comments.json"]:
+                    if meta in fields:
                         try:
-                            start, end, speaker, pause_dur, pause_energy = item
-                            vad_array.append([start, end])
-                            pause_dur_list.append(pause_dur)
-                            pause_energy_list.append(pause_energy)
-                            speaker_list.append(speaker)
-                        except Exception as e:
-                            print(f"[Warning] Skipping invalid diarization entry: {e}")
+                            new_s[meta] = tar.extractfile(fields[meta]).read().decode("utf-8", errors="ignore")
+                        except Exception:
+                            new_s[meta] = ""
+            
+                vtts = {}
+                for k, v in fields.items():
+                    if k.endswith(".vtt"):
+                        try:
+                            vtts[k] = tar.extractfile(v).read().decode("utf-8", errors="ignore")
+                        except Exception:
                             continue
+                new_s["vtt"] = json.dumps(vtts) if vtts else "{}"
+            
+                yield new_s
 
-                    new_s["diarized.vad.npy"] = to_npy_bytes(np.array(vad_array, dtype=np.float32))
-                    new_s["diarized.pause_dur.npy"] = to_npy_bytes(np.array(pause_dur_list, dtype=np.float32))
-                    new_s["diarized.pause_energy.npy"] = to_npy_bytes(np.array(pause_energy_list, dtype=np.float32))
-                    new_s["diarized.speaker.npy"] = to_npy_bytes(np.array(speaker_list))  # strings are fine
-                    continue
-                new_s[k] = v
+        # regular processing
+        else:
+            for s in stream:
+
+                new_s = {}
+
+                def get_or_empty(field, as_text=True):
+                    if field in s:
+                        val = s[field]
+                        if isinstance(val, bytes):
+                            return val.decode("utf-8", errors="ignore") if as_text else val
+                        return val
+                    return "" if as_text else b""
+
+                # process fields
+                for k, v in s.items():
+                    if k.endswith(".json"):
+                        try:
+                            v = json.loads(v)
+                            k = k[:-len(".json")]
+                            v = cast_types_for_storage(v, float_cast="float16", int_cast="int32")
+                        except Exception:
+                            pass
+
+                    if k == "brouhaha_mean":
+                        if isinstance(v, dict):
+                            if "mean_c50" in v:
+                                new_s["c50"] = float(v["mean_c50"])
+                            if "mean_snr" in v:
+                                new_s["snr"] = float(v["mean_snr"])
+                        continue
+
+                    if k == "vad_silero_diarized_continuous":
+                        def to_npy_bytes(array):
+                            buf = io.BytesIO()
+                            np.save(buf, array, allow_pickle=False)
+                            return buf.getvalue()
+
+                        vad_array, pause_dur, pause_energy, speakers = [], [], [], []
+                        for item in v:
+                            try:
+                                start, end, spk, dur, energy = item
+                                vad_array.append([start, end])
+                                pause_dur.append(dur)
+                                pause_energy.append(energy)
+                                speakers.append(spk)
+                            except Exception as e:
+                                print(f"[Warning] Skipping diarization entry: {e}")
+                                continue
+
+                        new_s["diarized.vad.npy"] = to_npy_bytes(np.array(vad_array, dtype=np.float32))
+                        new_s["diarized.pause_dur.npy"] = to_npy_bytes(np.array(pause_dur, dtype=np.float32))
+                        new_s["diarized.pause_energy.npy"] = to_npy_bytes(np.array(pause_energy, dtype=np.float32))
+                        new_s["diarized.speaker.npy"] = to_npy_bytes(np.array(speakers))
+                        continue
+
+                    new_s[k] = v
 
             renamed = {}
             for k, v in new_s.items():
@@ -163,56 +219,29 @@ def shard_from_webdataset(
 
             yield renamed
 
-    if compression == "no-compression":
+    if compression == 'no-compression':
         compression = None
 
-    if out_dir == "audio" and yt_data_specific:
-        AUDIO_KEYS = ["m4a", "mp3", "wav", "flac", "ogg", "opus"]
-
-        with WSSink(output_shard) as sink:
-            for key in sorted(samples.keys()):
-                s = {"__key__": key}
-                sample = samples[key]
-
-                # requires audio - there should always be audio an if not then downstream artifacts will not exist for that key
-                audio_found = False
-                for ak in AUDIO_KEYS:
-                    if ak in sample:
-                        s[ak] = tar.extractfile(sample[ak]).read()
-                        audio_found = True
-                        break
-                if not audio_found:
-                    print(f"[Warning] No audio found for {key}")
-                    continue
-
-                # for empty
-                def get_or_empty(field):
-                    if field in sample:
-                        return tar.extractfile(sample[field]).read().decode("utf-8", errors="ignore")
-                    return ""  #
-
-                s["info.json"] = get_or_empty("info.json")
-                s["description"] = get_or_empty("description")
-                s["comments.json"] = get_or_empty("comments.json")
-
-                # combine existing vtts
-                vtts = {k: tar.extractfile(v).read().decode("utf-8") for k, v in sample.items() if k.endswith(".vtt")}
-                s["vtt"] = json.dumps(vtts) if vtts else "{}"
-
-                sink.write(s)
+    if out_dir == 'audio' and yt_data_specific:
+        iterator = process(None)
     else:
-        ds = ds.compose(process)
+        ds = wds.WebDataset([input_shard], shardshuffle=False).compose(process)
+        iterator = iter(ds)
 
-        with WSSink(
-            output_shard, batch_size=batch_size, compression=compression, min_batch_size_bytes=min_batch_size_bytes
-        ) as sink:
-            for x in ds:
-                drop_keys(x, "__url__", "__local_path__")
-                if no_keys:
-                    del x["__key__"]
-                sink.write(dict(sorted(x.items())))
-
-
+    with WSSink(
+        output_shard,
+        batch_size=batch_size,
+        compression=compression,
+        min_batch_size_bytes=min_batch_size_bytes,
+    ) as sink:
+        for i, x in enumerate(iterator):
+            drop_keys(x, '__url__', '__local_path__')
+            if no_keys and '__key__' in x:
+                del x['__key__']
+            sink.write(dict(sorted(x.items())))
+         
+            
+@command
 def drop_keys(dict, *keys):
     """Remove specified keys from the given dictionary."""
     for key in keys:
@@ -300,11 +329,16 @@ def extract_index_for_shard(dataset, shard, vad_column=None):
 
     from . import WSDataset
     from .ws_audio import to_filelike
-
     ds = WSDataset(dataset)
     index = []
     i = 0
-    for s in ds.sequential_from(shard, 0):
+
+    # instead of passing `shard` directly, wrap it
+    # WSSample(ds, shard_name, offset=0)
+    sample = WSSample(ds, shard, 0)
+
+    for s in ds.sequential_from(sample, 0):
+
         try:
             key = str(s["__key__"])
         except IndexError:

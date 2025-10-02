@@ -57,7 +57,8 @@ ShardMapping = {
         "dtok_v2_ml_50hz_32x16384_graphemes_key16k",
         "source_start_end_time.npy",
     ): "dtok_v2_ml_50hz_32x16384_graphemes_key16k.source_start_end_time.npy",
-    # transcripts
+
+  # transcripts
     ("transcription_parakeet-ctc-1-1b_raw", "nemo_transcription.txt"): "nemo_transcription.txt",
     ("transcription_ws_raw", "txt"): "transcription_ws_raw.txt",
     ("transcription_wslang_raw", "txt"): "transcription_wslang_raw.txt",
