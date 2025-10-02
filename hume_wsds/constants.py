@@ -63,6 +63,9 @@ ShardMapping = {
     ("transcription_ws_raw", "txt"): "transcription_ws_raw.txt",
     ("transcription_wslang_raw", "txt"): "transcription_wslang_raw.txt",
     ("transcription_wslang_continuous", "txt"): "transcription_wslang_continuous.txt",
+    ("transcription_wslang_turbo_raw", "txt"): "transcription_wslang_turbo_raw.txt",
+    ("transcription_parakeet-tdt-0-6b-v3_raw", "nemo_transcription.txt"): "transcription_parakeet-tdt-0-6b-v3_raw.txt",
+
     # ("stoks_raw", "__key__"): "__key__",
     # ("meta_aes_quality_scores_raw", "aes"): "aes",
     # ("atoks_raw", "atoks.npy"): "atoks.npy",

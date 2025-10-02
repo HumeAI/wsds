@@ -129,6 +129,7 @@ def shard_from_webdataset(
             for sample_key in audio_entries:
                 fields = samples[sample_key]
                 new_s = {}
+                new_s["__key__"] = sample_key
             
                 for ak in AUDIO_KEYS:
                     if ak in fields:
@@ -209,15 +210,14 @@ def shard_from_webdataset(
                         continue
 
                     new_s[k] = v
-
-            renamed = {}
-            for k, v in new_s.items():
-                # Find (out_dir, k) in ShardMapping
-                # otherwise use the original key k as default
-                target_key = ShardMapping.get((out_dir, k), k)
-                renamed[target_key] = v
-
-            yield renamed
+                renamed = {}
+                for k, v in new_s.items():
+                    # Find (out_dir, k) in ShardMapping
+                    # otherwise use the original key k as default
+                    target_key = ShardMapping.get((out_dir, k), k)
+                    renamed[target_key] = v
+    
+                yield renamed
 
     if compression == 'no-compression':
         compression = None
