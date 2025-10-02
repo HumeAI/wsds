@@ -3,6 +3,7 @@ import gzip
 import io
 import json
 import os
+import sys
 
 import tarfile
 from collections import defaultdict
@@ -283,25 +284,86 @@ def dump_index(source_dataset: Path):
 
 
 @command
-def validate_shards(dataset, verbose=False):
-    from .utils import list_all_shards
-    from .ws_sink import indented
-    shards = list_all_shards(dataset, verbose)
-    print()
-    for subdir in Path(dataset).iterdir():
-        if not subdir.is_dir(): continue
-        schemas = {shard:get_shard_schema((subdir/shard).with_suffix('.wsds')) for shard in shards}
-        unique = set(s for s in schemas.values() if s)
-        if len(unique) > 1:
-            print(f"Found schema conflicts for {subdir}:\n")
-            for schema in unique:
-                matching_shards = [shard for shard, shard_schema in schemas.items() if schema == shard_schema]
-                prefix = f"  in {len(matching_shards)} shards: "
-                print(indented(prefix, schema))
-                if verbose:
-                    for shard in matching_shards:
-                        print(indented(" "*len(prefix), shard))
-                    print()
+class validate:
+    @command('validate_shards') # backwards compatibility
+    @staticmethod
+    def shards(dataset:Path, verbose=False):
+        """Validate if subdirs have all the shards and if all their schemas match."""
+        from .utils import list_all_shards
+        from .ws_sink import indented
+        shard_names = list_all_shards(dataset, verbose)
+        print()
+        for subdir in Path(dataset).iterdir():
+            if not subdir.is_dir(): continue
+            shards = [(subdir/shard).with_suffix('.wsds') for shard in shard_names]
+            schemas = {shard:get_shard_schema(shard) for shard in shards}
+            unique = set(s for s in schemas.values() if s)
+            if len(unique) > 1:
+                print(f"Found schema conflicts for {subdir}:\n")
+                for schema in unique:
+                    matching_shards = [shard for shard, shard_schema in schemas.items() if schema == shard_schema]
+                    prefix = f"  in {len(matching_shards)} shards: "
+                    print(indented(prefix, schema))
+                    if verbose:
+                        for shard in matching_shards:
+                            print(indented(" "*len(prefix), shard))
+                        print()
+
+    @staticmethod
+    def keys(dataset:Path, verbose=False, skip_audio=True):
+        """Validate __key__s against the index for all the shards in the dataset."""
+        from . import WSDataset
+        import polars as pl
+        from tqdm import tqdm
+        from collections import defaultdict
+
+        dataset = Path(dataset)
+        if next(dataset.iterdir()).suffix == '.wsds':
+            subdirs = [dataset]
+            dataset = dataset.parent
+        else:
+            subdirs = list(dataset.iterdir())
+            if skip_audio:
+                subdirs = [dir for dir in subdirs if dir.name != 'audio']
+
+        ds = WSDataset(dataset)
+        shards = ds.get_shard_list()
+        missing_shards = defaultdict(int)
+        for shard in tqdm(shards, desc=str(dataset)):
+            expected_keys = generate_all_keys_for_shard(ds.index, shard)
+            for subdir in subdirs:
+                if not subdir.is_dir(): continue
+                shard_fname = (subdir/shard).with_suffix('.wsds')
+                if not shard_fname.exists():
+                    missing_shards[subdir] += 1
+                else:
+                    if not pl.scan_ipc(shard_fname).select(
+                        (pl.col('__key__') == expected_keys).all()
+                    ).collect().item():
+                        tqdm.write(f"Shard {shard} in {subdir} has keys that don't match the index.")
+        for subdir, count in missing_shards.items():
+            tqdm.write("")
+            tqdm.write(f"{subdir}: missing {count} shards")
+
+    @staticmethod
+    def all(base_path, skip_audio=True):
+        from tqdm import tqdm
+
+        base_path = Path(base_path)
+        all_segmentations = []
+        for base_dataset in base_path.iterdir():
+            if not base_dataset.is_dir(): continue
+            for segmentation in base_dataset.iterdir():
+                if not segmentation.is_dir(): continue
+                all_segmentations.append(segmentation)
+
+        for segmentation in tqdm(all_segmentations):
+            if not (segmentation/'index.sqlite3').exists():
+                tqdm.write(f"{segmentation}: Missing index.sqlite3")
+                continue
+            subdirs = [d for d in segmentation.iterdir() if d.is_dir()]
+            if not subdirs: tqdm.write(f"{segmentation}: Empty dataset!")
+            validate.keys(segmentation, skip_audio=skip_audio)
 
 def get_shard_schema(fname):
     fname = Path(fname)
@@ -309,6 +371,20 @@ def get_shard_schema(fname):
         return None
     return repr(pa.RecordBatchFileReader(pa.memory_map(str(fname))).schema).split('-- schema metadata --')[0]
 
+def generate_all_keys_for_shard(index, shard):
+    import polars as pl
+    N, shard_id = index.query('SELECT n_samples, shard_id FROM shards WHERE shards.shard = ?', shard).fetchone()
+    files = index.query('SELECT name, offset FROM files WHERE files.shard_id == ?', shard_id).fetchall()
+    df = pl.DataFrame(files, schema=['name', 'offset'], orient="row")
+    if not index.metadata['segmented']:
+        return df['name']
+    return df.with_columns(
+        N = pl.col('offset').extend_constant(N, 1).diff(null_behavior="drop")
+    ).with_columns(
+        seq = pl.arange('N').over('name', mapping_strategy='join')
+    ).explode('seq').select(
+        __key__ = pl.format('{}_{}', 'name', pl.col('seq').cast(pl.String).str.zfill(3))
+    )['__key__']
 
 @command
 def init(
