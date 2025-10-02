@@ -75,6 +75,7 @@ def shard_from_webdataset(
     min_batch_size_bytes: int = 1024*1024,
     no_keys: bool = False,
     yt_data_specific: bool = False,
+    audio_requires_sorting: bool = False,
 ):
     """Converts a WebDataset shard into wsds format.
 
@@ -110,7 +111,10 @@ def shard_from_webdataset(
             tar = tarfile.TarFile(fileobj=f)
         
             for member in tar.getmembers():
-                path, name = member.name.rsplit('/', 1)
+                if "/" in member.name:
+                    path, name = member.name.rsplit('/', 1)
+                else:
+                    path, name = "", member.name  # fallback if at root level
                 name = name.replace('_comments', '.comments')
                 key, field = name.split('.', 1)
                 sample_key = f'{path}/{key}'
@@ -122,7 +126,7 @@ def shard_from_webdataset(
         
             return tar, all_samples, audio_entries
             
-        if out_dir == 'audio' and yt_data_specific:
+        if out_dir == 'audio' and audio_requires_sorting:
 
             tar, samples, audio_entries = list_keys_tarfile(input_shard)
             
@@ -133,24 +137,25 @@ def shard_from_webdataset(
             
                 for ak in AUDIO_KEYS:
                     if ak in fields:
-                        new_s[ak] = tar.extractfile(fields[ak]).read()
-            
-                for meta in ["info.json", "description", "comments.json"]:
-                    if meta in fields:
-                        try:
-                            new_s[meta] = tar.extractfile(fields[meta]).read().decode("utf-8", errors="ignore")
-                        except Exception:
-                            new_s[meta] = ""
-            
-                vtts = {}
-                for k, v in fields.items():
-                    if k.endswith(".vtt"):
-                        try:
-                            vtts[k] = tar.extractfile(v).read().decode("utf-8", errors="ignore")
-                        except Exception:
-                            continue
-                new_s["vtt"] = json.dumps(vtts) if vtts else "{}"
-            
+                        new_s['audio'] = tar.extractfile(fields[ak]).read()
+                
+                if yt_data_specific: 
+                    for meta in ["info.json", "description", "comments.json"]:
+                        if meta in fields:
+                            try:
+                                new_s[meta] = tar.extractfile(fields[meta]).read().decode("utf-8", errors="ignore")
+                            except Exception:
+                                new_s[meta] = ""
+                
+                    vtts = {}
+                    for k, v in fields.items():
+                        if k.endswith(".vtt"):
+                            try:
+                                vtts[k] = tar.extractfile(v).read().decode("utf-8", errors="ignore")
+                            except Exception:
+                                continue
+                    new_s["vtt"] = json.dumps(vtts) if vtts else "{}"
+                
                 yield new_s
 
         # regular processing
@@ -223,6 +228,8 @@ def shard_from_webdataset(
         compression = None
 
     if out_dir == 'audio' and yt_data_specific:
+        iterator = process(None)
+    elif out_dir == 'audio' and audio_requires_sorting:
         iterator = process(None)
     else:
         ds = wds.WebDataset([input_shard], shardshuffle=False).compose(process)
