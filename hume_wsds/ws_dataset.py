@@ -6,7 +6,7 @@ import sys
 from collections import defaultdict
 from pathlib import Path
 
-from hume_wsds.utils import list_all_columns, list_all_shards, make_key, parse_key
+from hume_wsds.utils import list_all_columns, list_all_shards, make_key, parse_key, scan_ipc
 from hume_wsds.ws_index import WSIndex
 from hume_wsds.ws_sample import WSSample
 from hume_wsds.ws_shard import WSShard
@@ -152,7 +152,7 @@ class WSDataset:
             col_merge = []
             for subdir in subdirs:
                 try:
-                    df = pl.scan_ipc(self.get_shard(subdir, shard).fname)
+                    df = scan_ipc(self.get_shard(subdir, shard).fname, glob=False)
                     if len(col_merge) > 0:
                         df = df.drop("__key__")  # ensure only one __key__ column
                     col_merge.append(df)
