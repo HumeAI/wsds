@@ -156,6 +156,8 @@ class WSDataset:
                 subdir, field = self.fields[col]
                 assert col == field, "renamed fields are not supported in SQL queries yet"
                 subdirs.add(subdir)
+            if not subdirs and '__key__' in expr.meta.root_names():
+                subdirs.add(self.fields['__key__'][0])
             exprs.append(expr)
         row_merge = []
         missing = defaultdict(list)
@@ -218,9 +220,9 @@ class WSDataset:
         self.last_query_n_samples = len(keys)
         while True:
             if N is None:
-                keys = keys.sample(frac=1, shuffle=shuffle, seed=seed)
+                keys = keys.sample(fraction=1, shuffle=shuffle, seed=seed)
             else:
-                keys = keys.sample(n=pl.all().len().clip(0, N), shuffle=shuffle, seed=seed)
+                keys = keys.sample(n=pl.len().clip(0, N), shuffle=shuffle, seed=seed)
             for key in keys:
                 yield self[key]
                 i += 1
