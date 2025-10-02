@@ -99,18 +99,29 @@ class WSDataset:
         while True:
             yield from self.sequential_from(self.random_sample(), max_N=max_N)
 
-    def __getitem__(self, key: str):
-        """Returns a sample with the given key."""
-        # FIXME: push `parse_key` to the index class
-        file_name, offset = self.parse_key(key)
-        r = self.index.query(
-            "SELECT s.shard, offset FROM files AS f, shards AS s WHERE f.name = ? AND s.shard_id == f.shard_id",
-            file_name,
-        ).fetchone()
-        if not r:
-            return None
-        shard_name, file_offset = r
-        return WSSample(self, shard_name, file_offset + offset)
+    def __getitem__(self, key: str | int):
+        """Returns a sample with the given __key__ or sample number."""
+        if isinstance(key, int):
+            r = self.index.query(
+                "SELECT s.shard, global_offset FROM shards AS s WHERE s.global_offset <= ? ORDER BY s.global_offset DESC LIMIT 1",
+                key,
+            ).fetchone()
+            if not r: return None
+            shard_name, global_offset = r
+            return WSSample(self, shard_name, key - global_offset)
+        elif isinstance(key, str):
+            # FIXME: push `parse_key` to the index class
+            file_name, offset = self.parse_key(key)
+            r = self.index.query(
+                "SELECT s.shard, offset FROM files AS f, shards AS s WHERE f.name = ? AND s.shard_id == f.shard_id",
+                file_name,
+            ).fetchone()
+            if not r:
+                return None
+            shard_name, file_offset = r
+            return WSSample(self, shard_name, file_offset + offset)
+        else:
+            raise TypeError(f"Invalid key type: {type(key)}")
 
     def sequential_from(self, sample, max_N=None):
         """Yields samples sequentially from the given `sample`, stopping after `max_N` samples."""
