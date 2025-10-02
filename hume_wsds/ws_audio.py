@@ -30,7 +30,7 @@ def load_segment(src, start, end, sample_rate=None):
 
 @dataclass(slots=True)
 class AudioReader:
-    """A lazy seeking-capable audio reader for random-access to recordings stored in WSDS shards."""
+    """A lazy seeking-capable audio reader for random-access to recordings stored in wsds shards."""
 
     src: typing.Any
     reader: "torchaudio.io.StreamReader" | None = None  # noqa: F821

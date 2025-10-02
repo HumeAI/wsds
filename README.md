@@ -43,3 +43,10 @@ pip install -e .
 ## Viewing a converted dataset
 
 Examples for viewing and analyzing the converted datasets can be found in the `examples/` directory.
+
+## Tests
+
+To run tests you currently need a copy of the `librilight` dataset. On IREN it can be run with:
+```
+WSDS_DATASET_PATH=/mnt/weka/data-wsds/ python tests.py
+```

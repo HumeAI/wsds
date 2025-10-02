@@ -1,5 +1,6 @@
 import importlib
 import json
+import os
 import random
 import sys
 from collections import defaultdict
@@ -12,12 +13,38 @@ from hume_wsds.ws_shard import WSShard
 
 
 class WSDataset:
+    """A multimodal dataset.
+
+    A dataset works like a table (dataframe) of samples. Samples are split into directories,
+    with each directory storing a subset of columns. Inside these directories are shards, with
+    each shard storing a subset of rows. This enables very efficient parallelization of data
+    processing.
+
+    This class offers a straightforward way to access the dataset, both sequentially and randomly
+    (by key or index) and returns dict-like `hume_wsds.ws_sample.WSSample` objects which transparently and lazily
+    load the requested data.
+
+    Examples:
+    >>> dataset = WSDataset("librilight/v3-vad_ws")
+    >>> sample = dataset["large/5304/the_tinted_venus_1408_librivox_64kb_mp3/tintedvenus_05_anstey_64kb_090"]
+    >>> print(repr(sample["transcription_wslang_raw.txt"]))
+    ' I will accompany you," she said.'
+    >>> sample['audio']
+    WSAudio(audio_reader=AudioReader(src=<class 'pyarrow.lib.BinaryScalar'>, sample_rate=None), tstart=1040.2133, tend=1042.8413)
+    """
+    dir : str
+    """Path to the dataset directory."""
+    fields : dict
+    """List of fields available for each sample."""
+    computed_columns : dict
+    """List of computed columns (e.g. the source audio or video link). @private"""
+
     # FIXME: this should be overridable with metadata in index.sqlite3
     _audio_file_keys = ["flac", "mp3", "sox", "wav", "m4a", "ogg", "wma", "opus"]
 
     def __init__(self, dir):
-        self.dir = dir
-        index_file = f"{self.dir}/index.sqlite3"
+        self.dir = self._resolve_dataset_path(dir)
+        index_file = self.dir/"index.sqlite3"
         if Path(index_file).exists():
             self.index = WSIndex(index_file)
             self.segmented = self.index.metadata.get("segmented", False)
@@ -36,7 +63,14 @@ class WSDataset:
     # Accessing samples randomly and sequentially
     #
     def random_sample(self):
-        """Returns one random sample."""
+        """Returns one random sample.
+
+        Example:
+        >>> dataset = WSDataset('librilight/v3-vad_ws')
+        >>> sample = dataset.random_sample()
+        >>> 'transcription_wslang_raw.txt' in sample
+        True
+        """
         assert self.index is not None, "Random access is only supported for indexed datasets"
         # FIXME: randomize the global sample index once (this has a bias towards smaller shards)
         # we'll need to modify the index to store the cumulative number of samples in each shard
@@ -49,12 +83,14 @@ class WSDataset:
     def __iter__(self):
         """Starts at a random position in the dataset and yields samples sequentially.
         Once it reaches the end of a shard it will jump to a new random position.
+
+        @public
         """
         while True:
             yield from self.sequential_from(self.random_sample())
 
     def random_samples(self, N: int = 1):
-        """Yields N random samples."""
+        """Yields N random samples (not sequential)."""
         for _ in range(N):
             yield self.random_sample()
 
@@ -133,15 +169,17 @@ class WSDataset:
                 print(f"{subdir}: {shards}")
             if not row_merge:
                 raise FileNotFoundError(
-                    f"No usable shards found (columns: {', '.join(subdirs)}) for dataset in: {self.dir}"
+                    f"No usable shards found (columns: {', '.join(subdirs)}) for dataset in: {str(self.dir)}"
                 )
         return exprs, pl.concat(row_merge)
 
     def sql(self, *queries):
+        """Given a list of SQL expressions, returns a Polars DataFrame with the results."""
         exprs, df = self._sql(*queries)
         return df.select(exprs).collect()
 
     def sql_filter(self, query):
+        """Given a boolean SQL expression, returns a list of keys for samples that match the query."""
         exprs, df = self._sql(query)
         return df.filter(exprs[0]).select("__key__").collect()["__key__"]
 
@@ -157,9 +195,10 @@ class WSDataset:
         that match the query.
 
         Examples:
-        >>> dataset.filtered('pq < 3', N=10) # ten low-quality samples
-        >>> dataset.filtered('pq > 3 AND CAST(txt AS string) ILIKE '%hello%' AND pq < 3', infinite=True)
-        >>> dataset.filtered('CAST(`transcription_wslang_raw.txt` AS string) ILIKE "%between New Orleans and St. Louis%"')
+        >>> dataset = WSDataset("librilight/v3-vad_ws")
+        >>> next(dataset.filtered('pq < 3', N=10, shuffle=False)) # ten low-quality samples
+        >>> next(dataset.filtered("CAST(`transcription_wslang_raw.txt` AS string) ILIKE '%between New Orleans and St. Louis%'", shuffle=False))['__key__']
+        'large/107/oldtimes_jg_librivox_64kb_mp3/oldtimesonthemississippi_07_twain_64kb_032'
         """
         import polars as pl
 
@@ -182,6 +221,23 @@ class WSDataset:
     #
     # Helper and internal API
     #
+    def _resolve_dataset_path(self, dir):
+        """If the path is relative and does not exist, we search for it using the WSDS_DATASET_PATH environment variable.
+
+        WSDS_DATASET_PATH is a colon-separated list of directories where datasets are stored.
+
+        Example:
+
+            WSDS_DATASET_PATH=/path/to/datasets:/another/path/to/datasets"""
+        dir = Path(dir)
+        if dir.is_absolute() or dir.exists():
+            return dir
+        for path in os.environ.get('WSDS_DATASET_PATH', "").split(":"):
+            path = Path(path)
+            if (path / dir).exists():
+                return path / dir
+        raise ValueError(f"Dataset {repr(str(dir))} not found.")
+
     def get_shard_list(self):
         if self.index:
             return list(self.index.shards())
@@ -191,7 +247,7 @@ class WSDataset:
     def _register_wsds_links(self):
         for subdir, _ in self.fields.values():
             if subdir.endswith(".wsds-link"):
-                spec = json.loads(Path(f"{self.dir}/{subdir}").read_text())
+                spec = json.loads((self.dir/subdir).read_text())
                 self.computed_columns[subdir] = spec
 
     def add_computed(self, name, **link):
@@ -227,11 +283,11 @@ class WSDataset:
             loader_class = getattr(loader_module, loader)
 
         return loader_class.from_link(
-            link, self.get_linked_dataset(f"{self.dir}/{link['dataset_dir']}"), self, shard_name
+            link, self.get_linked_dataset(self.dir/link['dataset_dir']), self, shard_name
         )
 
     def get_shard(self, subdir, shard_name):
-        dir = f"{self.dir}/{subdir}"
+        dir = self.dir/subdir
 
         shard = self._open_shards.get(dir, None)
         if shard is not None and shard.shard_name == shard_name:
@@ -270,14 +326,9 @@ class WSDataset:
 
 
 def format_duration(duration):
-    """Formats a duration in seconds as a string."""
+    """Formats a duration in seconds as hours (or kilo-hours)."""
     hours = duration // 3600
     if hours > 1000:
         return f"{hours / 1000:.2f} k hours"
     else:
         return f"{hours:.2f} hours"
-
-
-def thousand_separator(num):
-    """Formats a number with a thousand separator."""
-    return f"{num:,}"

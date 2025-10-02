@@ -2,6 +2,7 @@ import io
 import pickle
 from dataclasses import dataclass
 import re
+import typing
 
 import numpy as np
 import pyarrow as pa
@@ -9,8 +10,22 @@ import pyarrow as pa
 from hume_wsds.ws_audio import AudioReader, WSAudio
 from hume_wsds.ws_sample import WSSample
 
+class WSShardInterface:
+    shard_name: str
+    """Used by WSDataset to invalidate cached shards."""
 
-class WSShard:
+    def get_sample(self, column:str, offset:int) -> typing.Any:
+        raise NotImplementedError
+
+class WSShard(WSShardInterface):
+    """Represents a single open data shard (`.wsds` file).
+
+    Caches one batch worth of data for efficient sequential access to samples."""
+    fname: str
+    reader: pa.RecordBatchFileReader
+    batch_size: int
+    dataset: 'WSDataset'
+
     def __init__(self, dataset, fname, shard_name=None):
         self.dataset = dataset
         self.shard_name = shard_name
@@ -24,7 +39,7 @@ class WSShard:
         self._end = None
         self._data = None
 
-    def get_sample(self, column, offset):
+    def get_sample(self, column:str, offset:int) -> typing.Any:
         if self._data is None or offset < self._start or offset >= self._end:
             i = offset // self.batch_size
             if i >= self.reader.num_record_batches:
@@ -58,7 +73,10 @@ class WSShard:
 
 
 @dataclass(slots=True)
-class WSSourceAudioShard:
+class WSSourceAudioShard(WSShardInterface):
+    """A proxy shard class (does not correspond to an actual `.wsds` file) to access audio data from a source dataset.
+
+    It is used via the `WSDataset.add_computed` method or the `.wsds-link` file mechanism."""
     shard_name: str
     source_dataset: "WSDataset"  # noqa: F821
     derived_dataset: "WSDataset"  # noqa: F821
