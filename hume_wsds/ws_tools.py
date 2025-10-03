@@ -77,6 +77,8 @@ def shard_from_webdataset(
     yt_data_specific: bool = False,
     audio_requires_sorting: bool = False,
     mixed_audio: bool = False,
+    check_audio: bool = False,
+    skip_corrupt_filename: bool = True, 
 ):
     """Converts a WebDataset shard into wsds format.
 
@@ -90,7 +92,8 @@ def shard_from_webdataset(
     from hume_wsds import WSSink
     from hume_wsds.utils import cast_types_for_storage
     from hume_wsds.constants import ShardMapping
-
+    import soundfile as sf
+    
     out_dir = Path(output_shard).parents[0].name
     if out_dir == 'audio':
         compression = 'no-compression'
@@ -126,22 +129,46 @@ def shard_from_webdataset(
                     audio_entries.append(sample_key)
         
             return tar, all_samples, audio_entries
-            
+
+        def is_audio_valid(audio_bytes: bytes) -> bool:
+            try:
+                with io.BytesIO(audio_bytes) as f:
+                    with sf.SoundFile(f) as sf_desc:
+                        _ = sf_desc.frames  # force metadata read
+                return True
+            except Exception as e:
+                print(f"[Warning] Corrupt audio detected: {e}")
+                return False
+        
         if out_dir == 'audio' and audio_requires_sorting:
 
             tar, samples, audio_entries = list_keys_tarfile(input_shard)
             
             for sample_key in audio_entries:
+                if skip_corrupt_filename: 
+                    if '~' in sample_key: 
+                        continue
                 fields = samples[sample_key]
                 new_s = {}
                 new_s["__key__"] = sample_key
             
                 for ak in AUDIO_KEYS:
                     if ak in fields:
-                        if mixed_audio: 
-                            new_s['audio'] = tar.extractfile(fields[ak]).read()
-                        else: 
-                            new_s[ak] = tar.extractfile(fields[ak]).read()
+                        if mixed_audio:
+                            audio_bytes = tar.extractfile(fields[ak]).read()
+                            if check_audio and not is_audio_valid(audio_bytes):
+                                print(f"[Skipping] corrupt audio in {sample_key}")
+                                continue
+
+                            new_s['audio'] = audio_bytes
+                            new_s['audio_type'] = ak
+
+                        else:
+                            audio_bytes = tar.extractfile(fields[ak]).read()
+                            if check_audio and not is_audio_valid(audio_bytes):
+                                print(f"[Skipping] corrupt audio in {sample_key}")
+                                continue
+                            new_s[ak] = audio_bytes
                 
                 if yt_data_specific: 
                     for meta in ["info.json", "description", "comments.json"]:
