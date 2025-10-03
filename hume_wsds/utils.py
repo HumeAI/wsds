@@ -2,6 +2,7 @@ from pathlib import Path
 
 import numpy as np
 import pyarrow as pa
+import re
 
 
 def get_columns(fname):
@@ -22,6 +23,7 @@ def list_all_columns(ds_path, shard_name=None):
     on network-filesystems where listing folder contents is slow."""
     dupes = {}
     cols = {}
+    key_col = []
     for p in Path(ds_path).iterdir():
         if p.suffix == ".wsds-link":
             col = p.with_suffix("").name
@@ -35,7 +37,8 @@ def list_all_columns(ds_path, shard_name=None):
             fname = (p / shard_name).with_suffix(".wsds")
         if fname and fname.exists():
             for col in get_columns(fname):
-                if col == "__key__" and "__key__" in cols:
+                if col == "__key__":
+                    key_col.append((fname.stat().st_size, p.name, col))
                     continue
                 # seems like we should fix this during the original conversion
                 if col in cols or col in dupes:
@@ -47,6 +50,9 @@ def list_all_columns(ds_path, shard_name=None):
                     cols[f"{p.name}.{col}"] = (p.name, col)
                 else:
                     cols[col] = (p.name, col)
+    # use the smallest shards for __key__ (should be the fastest)
+    if len(key_col) > 0:
+        cols['__key__'] = sorted(key_col)[0][1:]
     return dict(sorted(cols.items()))
 
 
@@ -150,3 +156,28 @@ def parse_key_two_parts(key: str):
 
     src_file, segmentation_kind, segment_id = key.rsplit("_", 2)
     return src_file, segmentation_kind, int(segment_id)
+
+magic_check = re.compile('([*?[])')
+magic_check_bytes = re.compile(b'([*?[])')
+
+def has_magic(s):
+    """Does the given input contain any shell globbing characters?"""
+    if isinstance(s, bytes):
+        match = magic_check_bytes.search(s)
+    else:
+        match = magic_check.search(s)
+    return match is not None
+
+def scan_ipc(path: str | Path, *args, glob=True, **kwargs):
+    """Like pl.scan_ipc but with a workaround to disable globbing.
+
+    See also: https://github.com/pola-rs/polars/issues/24608"""
+    import polars as pl
+    path = str(path)
+    if glob or not has_magic(path):
+        return pl.scan_ipc(path, *args, **kwargs)
+    else:
+        # we open the file manually since scan_ipc always does globbing which does not work on files with square brackets in their names
+        f = open(path, 'rb')
+        # we will leak the file descriptor in this case but there is not a lot we can do about it (GC will close it eventually)
+        return pl.scan_ipc(f)
