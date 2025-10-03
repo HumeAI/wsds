@@ -1,6 +1,8 @@
 import io
 import pickle
 from dataclasses import dataclass
+import re
+import typing
 
 import numpy as np
 import pyarrow as pa
@@ -8,9 +10,24 @@ import pyarrow as pa
 from hume_wsds.ws_audio import AudioReader, WSAudio
 from hume_wsds.ws_sample import WSSample
 
+class WSShardInterface:
+    shard_name: str
+    """Used by WSDataset to invalidate cached shards."""
 
-class WSShard:
-    def __init__(self, fname, shard_name=None):
+    def get_sample(self, column:str, offset:int) -> typing.Any:
+        raise NotImplementedError
+
+class WSShard(WSShardInterface):
+    """Represents a single open data shard (`.wsds` file).
+
+    Caches one batch worth of data for efficient sequential access to samples."""
+    fname: str
+    reader: pa.RecordBatchFileReader
+    batch_size: int
+    dataset: 'WSDataset'
+
+    def __init__(self, dataset, fname, shard_name=None):
+        self.dataset = dataset
         self.shard_name = shard_name
         self.fname = fname
 
@@ -22,7 +39,7 @@ class WSShard:
         self._end = None
         self._data = None
 
-    def get_sample(self, column, offset):
+    def get_sample(self, column:str, offset:int) -> typing.Any:
         if self._data is None or offset < self._start or offset >= self._end:
             i = offset // self.batch_size
             if i >= self.reader.num_record_batches:
@@ -42,6 +59,8 @@ class WSShard:
             return pickle.load(io.BytesIO(data.as_buffer()))
         elif column.endswith("txt"):
             return data.as_buffer().to_pybytes().decode("utf-8")
+        elif column in self.dataset._audio_file_keys:
+            return AudioReader(data)
         else:
             # FIXME: we need to handle audio decoding here to avoid copying the entire audio buffer
             return data.as_py(maps_as_pydicts="strict")
@@ -54,7 +73,10 @@ class WSShard:
 
 
 @dataclass(slots=True)
-class WSSourceAudioShard:
+class WSSourceAudioShard(WSShardInterface):
+    """A proxy shard class (does not correspond to an actual `.wsds` file) to access audio data from a source dataset.
+
+    It is used via the `WSDataset.add_computed` method or the `.wsds-link` file mechanism."""
     shard_name: str
     source_dataset: "WSDataset"  # noqa: F821
     derived_dataset: "WSDataset"  # noqa: F821
@@ -79,8 +101,38 @@ class WSSourceAudioShard:
 
         if self._source_file_name != file_name:
             self._source_sample = self.source_dataset[file_name]
-            self._source_reader = AudioReader(self._source_sample.get_audio())
+            self._source_reader = self._source_sample.get_audio()
             self._source_file_name = file_name
 
         tstart, tend = self.get_timestamps(segment_offset)
         return WSAudio(self._source_reader, tstart, tend)
+
+class WSYoutubeVideoShard(WSSourceAudioShard):
+    re_pattern : re.Pattern[str]
+
+    @classmethod
+    def from_link(cls, link, source_dataset, derived_dataset, shard_name):
+        self = super().from_link(link, source_dataset, derived_dataset, shard_name)
+        self.re_pattern = re.compile(link['youtube_id_regexp'])
+        return self
+
+    def get_sample(self, _column, offset):
+        sample = super().get_sample(_column, offset)
+        match = self.re_pattern.search(self._source_file_name)
+        if not match:
+            raise ValueError(f'No Youtube ID found in file name: {self._source_file_name} (using pattern: {self.re_pattern.pattern})')
+        return WSYouTubeVideo(match[1], sample.tstart)
+
+@dataclass
+class WSYouTubeVideo:
+    id : str
+    tstart : float
+
+    def get_url(self):
+        return f'https://www.youtube.com/embed/{self.id}?start={int(self.tstart)}'
+
+    def _repr_html_(self):
+        return f'<iframe width="560" height="315" src="{self.get_url()}" title="YouTube video player" frameborder="0" allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share" referrerpolicy="strict-origin-when-cross-origin" allowfullscreen></iframe>'
+
+    def __repr__(self):
+        return f'WSYouTubeVideo(video_url="{self.get_url()}")'

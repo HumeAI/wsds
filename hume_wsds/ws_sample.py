@@ -1,9 +1,12 @@
 from dataclasses import dataclass, field
 
+from typing import TYPE_CHECKING
+if TYPE_CHECKING:
+    from .ws_dataset import WSDataset
 
 @dataclass(frozen=True, slots=True)
 class WSSample:
-    dataset: "WSDataset"  # noqa: F821
+    dataset: "WSDataset"
     shard_name: str
     offset: int
     overrides: dict = field(default_factory=dict)
