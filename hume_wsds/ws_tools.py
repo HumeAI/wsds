@@ -3,20 +3,15 @@ import gzip
 import io
 import json
 import os
-
 import tarfile
 from collections import defaultdict
 from pathlib import Path
 
 import numpy as np
 import pyarrow as pa
-from pathlib import Path
-from collections import defaultdict
 import webdataset as wds
 
-from hume_wsds import WSSink, WSSample
-
-
+from hume_wsds import WSSample, WSSink
 
 commands = {}
 
@@ -68,11 +63,11 @@ def inspect(input_path: str):
 
 @command
 def shard_from_webdataset(
-    input_shard: str,          # input shard URL/path
-    output_shard: str,         # output shard URL/path
-    batch_size: int = 16,      # batch size
-    compression: str = 'zstd',
-    min_batch_size_bytes: int = 1024*1024,
+    input_shard: str,  # input shard URL/path
+    output_shard: str,  # output shard URL/path
+    batch_size: int = 16,  # batch size
+    compression: str = "zstd",
+    min_batch_size_bytes: int = 1024 * 1024,
     no_keys: bool = False,
     yt_data_specific: bool = False,
     audio_requires_sorting: bool = False,
@@ -83,19 +78,17 @@ def shard_from_webdataset(
 
     Supports yt_data_specific mode with optional sorting.
     """
-    import io, json, tarfile, gzip
-    import numpy as np
-    import webdataset as wds
+    import json
     from pathlib import Path
-    from collections import defaultdict
-    from hume_wsds import WSSink
-    from hume_wsds.utils import cast_types_for_storage
-    from hume_wsds.constants import ShardMapping
+
     import soundfile as sf
-    
+
+    from hume_wsds.constants import ShardMapping
+    from hume_wsds.utils import cast_types_for_storage
+
     out_dir = Path(output_shard).parents[0].name
-    if out_dir == 'audio':
-        compression = 'no-compression'
+    if out_dir == "audio":
+        compression = "no-compression"
 
     AUDIO_KEYS = ["m4a", "mp3", "wav", "flac", "ogg", "opus"]
 
@@ -106,30 +99,28 @@ def shard_from_webdataset(
                 o = gzip.open
             else:
                 o = open
-        
+
             all_samples = defaultdict(dict)
-            audio_entries = [] 
-        
-            f = o(input_shard, 'rb')
+            audio_entries = []
+
+            f = o(input_shard, "rb")
             tar = tarfile.TarFile(fileobj=f)
-        
+
             for member in tar.getmembers():
                 if "/" in member.name:
-                    path, name = member.name.rsplit('/', 1)
+                    path, name = member.name.rsplit("/", 1)
                 else:
                     path, name = "", member.name  # fallback if at root level
-                name = name.replace('_comments', '.comments')
-                key, field = name.split('.', 1)
-                sample_key = f'{path}/{key}'
-        
+                name = name.replace("_comments", ".comments")
+                key, field = name.split(".", 1)
+                sample_key = f"{path}/{key}"
+
                 all_samples[sample_key][field] = member
-        
+
                 if field in AUDIO_KEYS:
                     audio_entries.append(sample_key)
-        
+
             return tar, all_samples, audio_entries
-
-
 
         def is_audio_valid(audio_bytes: bytes) -> bool:
             try:
@@ -140,20 +131,15 @@ def shard_from_webdataset(
             except Exception as e:
                 print(f"[Warning] Corrupt audio detected: {e}")
                 return False
-        
-        if out_dir == 'audio' and audio_requires_sorting:
 
+        if out_dir == "audio" and audio_requires_sorting:
             tar, samples, audio_entries = list_keys_tarfile(input_shard)
-            
+
             for sample_key in audio_entries:
-
-
-
-                        
                 fields = samples[sample_key]
                 new_s = {}
                 new_s["__key__"] = sample_key
-            
+
                 for ak in AUDIO_KEYS:
                     if ak in fields:
                         if mixed_audio:
@@ -162,8 +148,8 @@ def shard_from_webdataset(
                                 print(f"[Skipping] corrupt audio in {sample_key}")
                                 continue
 
-                            new_s['audio'] = audio_bytes
-                            new_s['audio_type'] = ak
+                            new_s["audio"] = audio_bytes
+                            new_s["audio_type"] = ak
 
                         else:
                             audio_bytes = tar.extractfile(fields[ak]).read()
@@ -171,15 +157,15 @@ def shard_from_webdataset(
                                 print(f"[Skipping] corrupt audio in {sample_key}")
                                 continue
                             new_s[ak] = audio_bytes
-                
-                if yt_data_specific: 
+
+                if yt_data_specific:
                     for meta in ["info.json", "description", "comments.json"]:
                         if meta in fields:
                             try:
                                 new_s[meta] = tar.extractfile(fields[meta]).read().decode("utf-8", errors="ignore")
                             except Exception:
                                 new_s[meta] = ""
-                
+
                     vtts = {}
                     for k, v in fields.items():
                         if k.endswith(".vtt"):
@@ -188,13 +174,12 @@ def shard_from_webdataset(
                             except Exception:
                                 continue
                     new_s["vtt"] = json.dumps(vtts) if vtts else "{}"
-                
+
                 yield new_s
 
         # regular processing
         else:
             for s in stream:
-
                 new_s = {}
 
                 def get_or_empty(field, as_text=True):
@@ -207,11 +192,10 @@ def shard_from_webdataset(
 
                 # process fields
                 for k, v in s.items():
-                    
                     if k.endswith(".json"):
                         try:
                             v = json.loads(v)
-                            k = k[:-len(".json")]
+                            k = k[: -len(".json")]
                             v = cast_types_for_storage(v, float_cast="float16", int_cast="int32")
                         except Exception:
                             pass
@@ -225,6 +209,7 @@ def shard_from_webdataset(
                         continue
 
                     if k == "vad_silero_diarized_continuous":
+
                         def to_npy_bytes(array):
                             buf = io.BytesIO()
                             np.save(buf, array, allow_pickle=False)
@@ -255,10 +240,10 @@ def shard_from_webdataset(
                     # otherwise use the original key k as default
                     target_key = ShardMapping.get((out_dir, k), k)
                     renamed[target_key] = v
-    
+
                 yield renamed
 
-    if compression == 'no-compression':
+    if compression == "no-compression":
         compression = None
 
     if out_dir == "audio" and (yt_data_specific or audio_requires_sorting):
@@ -274,12 +259,12 @@ def shard_from_webdataset(
         min_batch_size_bytes=min_batch_size_bytes,
     ) as sink:
         for i, x in enumerate(iterator):
-            drop_keys(x, '__url__', '__local_path__')
-            if no_keys and '__key__' in x:
-                del x['__key__']
+            drop_keys(x, "__url__", "__local_path__")
+            if no_keys and "__key__" in x:
+                del x["__key__"]
             sink.write(dict(sorted(x.items())))
-         
-            
+
+
 @command
 def drop_keys(dict, *keys):
     """Remove specified keys from the given dictionary."""
@@ -368,6 +353,7 @@ def extract_index_for_shard(dataset, shard, vad_column=None):
 
     from . import WSDataset
     from .ws_audio import to_filelike
+
     ds = WSDataset(dataset)
     index = []
     i = 0
@@ -377,7 +363,6 @@ def extract_index_for_shard(dataset, shard, vad_column=None):
     sample = WSSample(ds, shard, 0)
 
     for s in ds.sequential_from(sample, 0):
-
         try:
             key = str(s["__key__"])
         except IndexError:
