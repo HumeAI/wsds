@@ -209,7 +209,8 @@ class WSDataset:
 
         Examples:
         >>> dataset = WSDataset("librilight/v3-vad_ws")
-        >>> next(dataset.filtered('pq < 3', N=10, shuffle=False)) # ten low-quality samples
+        >>> next(dataset.filtered('pq < 3', shuffle=False))['__key__']  # first low-quality sample
+        'large/6454/over_plum_pudding_1305_librivox_64kb_mp3/plumpudding_09_bangs_64kb_072'
         >>> next(dataset.filtered("CAST(`transcription_wslang_raw.txt` AS string) ILIKE '%between New Orleans and St. Louis%'", shuffle=False))['__key__']
         'large/107/oldtimes_jg_librivox_64kb_mp3/oldtimesonthemississippi_07_twain_64kb_032'
         """
@@ -220,7 +221,8 @@ class WSDataset:
         self.last_query_n_samples = len(keys)
         while True:
             if N is None:
-                keys = keys.sample(fraction=1, shuffle=shuffle, seed=seed)
+                if shuffle:
+                    keys = keys.sample(fraction=1, shuffle=shuffle, seed=seed)
             else:
                 keys = keys.sample(n=pl.len().clip(0, N), shuffle=shuffle, seed=seed)
             for key in keys:
