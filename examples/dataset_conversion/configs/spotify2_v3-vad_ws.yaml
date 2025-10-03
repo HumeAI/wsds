@@ -1,22 +1,26 @@
+# only converting audio for spotify2 as there is key mismatch in source
 flags:
   convert_audio: true
-  convert_mvad: true
-  convert_artifacts: true
-  create_index: true
-  
+  convert_mvad: false
+  convert_artifacts: false
+  create_index: false
+
   audio_requires_sorting: true
   mixed_audio: true
+
+  run_cleanup: false
+  cleanup_dry_run: false
 
 paths:
   audio_base: /mnt/weka/data2/multimodal/core/spotify2/raw/audio/
   input_base: /mnt/weka/data2/multimodal/core/spotify2/processed-v3-pipeline-vad_ws/staging/
   output_base: /mnt/weka/data-wsds/spotify2/
 
-segmentation_type: v3-vad_ws 
+# segmentation_type: v3-vad_ws
 
-subdirs:
-  - acoustic_scores_raw
-  - transcription_wslang_raw
+# subdirs:
+  # - acoustic_scores_raw
+  # - transcription_wslang_raw
   # - transcription_wslang_turbo_raw
   # - transcription_parakeet-tdt-0-6b-v3_raw
   # - pquality_wmusic_scores_raw
