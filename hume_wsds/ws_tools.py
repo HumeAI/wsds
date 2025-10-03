@@ -78,7 +78,6 @@ def shard_from_webdataset(
     audio_requires_sorting: bool = False,
     mixed_audio: bool = False,
     check_audio: bool = False,
-    skip_corrupt_filename: bool = True, 
 ):
     """Converts a WebDataset shard into wsds format.
 
@@ -130,6 +129,8 @@ def shard_from_webdataset(
         
             return tar, all_samples, audio_entries
 
+
+
         def is_audio_valid(audio_bytes: bytes) -> bool:
             try:
                 with io.BytesIO(audio_bytes) as f:
@@ -145,9 +146,10 @@ def shard_from_webdataset(
             tar, samples, audio_entries = list_keys_tarfile(input_shard)
             
             for sample_key in audio_entries:
-                if skip_corrupt_filename: 
-                    if '~' in sample_key: 
-                        continue
+
+
+
+                        
                 fields = samples[sample_key]
                 new_s = {}
                 new_s["__key__"] = sample_key
@@ -205,6 +207,7 @@ def shard_from_webdataset(
 
                 # process fields
                 for k, v in s.items():
+                    
                     if k.endswith(".json"):
                         try:
                             v = json.loads(v)
@@ -258,9 +261,7 @@ def shard_from_webdataset(
     if compression == 'no-compression':
         compression = None
 
-    if out_dir == 'audio' and yt_data_specific:
-        iterator = process(None)
-    elif out_dir == 'audio' and audio_requires_sorting:
+    if out_dir == "audio" and (yt_data_specific or audio_requires_sorting):
         iterator = process(None)
     else:
         ds = wds.WebDataset([input_shard], shardshuffle=False).compose(process)
