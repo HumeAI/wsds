@@ -12,9 +12,17 @@ class WSSample:
         return self.dataset.get_key(self.shard_name, self.offset)
 
     def get_audio(self, audio_columns=None):
-        r = self.get_one_of(*(audio_columns or self.dataset._audio_file_keys))
+        candidates = audio_columns or self.dataset._audio_file_keys
+    
+        # if we normalized into a single 'audio' field
+        if "audio" in self:
+            return self["audio"]
+    
+        r = self.get_one_of(*candidates)
         if not r:
-            raise KeyError(f"No audio column (tried {self.dataset._audio_file_keys}) found among: {self.keys()}")
+            raise KeyError(
+                f"No audio column (tried {candidates}) found among: {list(self.keys())}"
+            )
         return r
 
     def keys(self):
