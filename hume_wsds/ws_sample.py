@@ -1,12 +1,11 @@
 from dataclasses import dataclass, field
 
-from typing import TYPE_CHECKING
-if TYPE_CHECKING:
-    from .ws_dataset import WSDataset
+from hume_wsds.ws_audio import AudioReader
+
 
 @dataclass(frozen=True, slots=True)
 class WSSample:
-    dataset: "WSDataset"
+    dataset: "WSDataset"  # noqa: F821
     shard_name: str
     offset: int
     overrides: dict = field(default_factory=dict)
@@ -17,13 +16,24 @@ class WSSample:
     def get_audio(self, audio_columns=None):
         candidates = audio_columns or self.dataset._audio_file_keys
 
-        # if we normalized into a single 'audio' field
+        # normalized 'audio' field
         if "audio" in self:
-            return self["audio"]
+            r = self["audio"]
+        else:
+            r = self.get_one_of(*candidates)
 
-        r = self.get_one_of(*candidates)
         if not r:
             raise KeyError(f"No audio column (tried {candidates}) found among: {list(self.keys())}")
+
+        # if not saved in bytes directly needs to be unwrapped?
+        if isinstance(r, AudioReader):
+            if hasattr(r.src, "as_buffer"):
+                return r.src.as_buffer().to_pybytes()
+            elif isinstance(r.src, (bytes, bytearray)):
+                return r.src
+            else:
+                raise TypeError(f"Unsupported AudioReader src type: {type(r.src)}")
+
         return r
 
     def keys(self):
