@@ -490,3 +490,28 @@ def extract_index_for_shard(dataset, shard, vad_column=None):
         "index": index,
         "n_samples": i,
     }
+
+
+@command
+def _sort_columns(*fnames):
+    import tqdm
+
+    from .ws_sink import AtomicFile
+
+    _renames = {
+        "dtok_v2_ml_50hz_32x16384_graphemes_key16k.dtok_level_1_16k.txt": "dtok_level_1_16k.npy",
+        "source_start_end_time.txt": "dtok_v2_ml_50hz_32x16384_graphemes_key16k.source_start_end_time.npy",
+    }
+
+    for fname in tqdm.tqdm(fnames):
+        reader = pa.ipc.open_file(fname)
+        table = reader.read_all()
+        table2 = table.select(sorted(table.column_names))
+        table2 = table2.rename_columns([k if k not in _renames else _renames[k] for k in table2.column_names])
+        # print(table.schema)
+        if table.schema != table2.schema:
+            with AtomicFile(fname) as fname:
+                with pa.ipc.new_file(fname, table2.schema.with_metadata(reader.schema.metadata)) as sink:
+                    sink.write_table(table2)
+        # else:
+        #     print(f"No changes needed: {fname}")
