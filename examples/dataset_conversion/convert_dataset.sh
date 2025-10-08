@@ -13,6 +13,9 @@ CONVERT_ARTIFACTS=$(to_bool "$(yq -r '.flags.convert_artifacts' "$CFG")")
 CREATE_INDEX=$(to_bool "$(yq -r '.flags.create_index' "$CFG")")
 
 YT_DATA_SPECIFIC=$(to_bool "$(yq -r '.flags.yt_data_specific' "$CFG")")
+REQUIRES_SORTING=$(to_bool "$(yq -r '.flags.audio_requires_sorting' "$CFG")")
+MIXED_AUDIO=$(to_bool "$(yq -r '.flags.mixed_audio' "$CFG")")
+
 
 MVAD_DIR_NAME=$(yq -r '.flags.mvad_dir_name // "mvad"' "$CFG")
 
@@ -41,6 +44,17 @@ COMMON_ARGS=()
 if [[ "$YT_DATA_SPECIFIC" == "true" ]]; then
   COMMON_ARGS+=(--yt_data_specific)
 fi
+
+if [[ "$REQUIRES_SORTING" == "true" ]]; then
+  COMMON_ARGS+=(--audio_requires_sorting)
+fi
+
+if [[ "$MIXED_AUDIO" == "true" ]]; then
+  COMMON_ARGS+=(--mixed_audio)
+fi
+
+
+
 
 ### audio ###
 if [[ "$CONVERT_AUDIO" == "true" ]]; then

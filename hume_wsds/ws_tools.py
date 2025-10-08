@@ -1,23 +1,15 @@
 import functools
-import gzip
-import io
 import json
 import os
-import sys
-
 import tarfile
 from collections import defaultdict
 from pathlib import Path
 
 import numpy as np
 import pyarrow as pa
-from pathlib import Path
-from collections import defaultdict
 import webdataset as wds
 
-from hume_wsds import WSSink, WSSample
-
-
+from hume_wsds import WSSample, WSSink
 
 commands = {}
 
@@ -55,6 +47,7 @@ def _list(input_shard: str):
 def inspect_dataset(input_path, verbose=True):
     """Displays metadata and schema of a wsds dataset."""
     from . import WSDataset
+
     ds = WSDataset(input_path)
     print(ds)
     if verbose:
@@ -68,16 +61,16 @@ def inspect_dataset(input_path, verbose=True):
 def inspect(input_path: str):
     """Displays metadata and schema of a wsds dataset or shard."""
     if Path(input_path).is_dir():
-        if (Path(input_path) / 'index.sqlite3').exists():
+        if (Path(input_path) / "index.sqlite3").exists():
             inspect_dataset(input_path)
         else:
-            segmentations = [x for x in Path(input_path).iterdir() if (x/'index.sqlite3').exists()]
+            segmentations = [x for x in Path(input_path).iterdir() if (x / "index.sqlite3").exists()]
             if segmentations:
                 print(f"Found {len(segmentations)} segmentations:")
                 print()
             for file in segmentations:
                 inspect_dataset(str(file), verbose=False)
-    elif input_path.endswith('.wsds'):
+    elif input_path.endswith(".wsds"):
         reader = pa.RecordBatchFileReader(pa.memory_map(input_path))
         print(f"Batches: {reader.num_record_batches}")
         print(f"Rows: {int(reader.schema.metadata[b'batch_size']) * reader.num_record_batches}")
@@ -86,30 +79,33 @@ def inspect(input_path: str):
 
 @command
 def shard_from_webdataset(
-    input_shard: str,          # input shard URL/path
-    output_shard: str,         # output shard URL/path
-    batch_size: int = 16,      # batch size
-    compression: str = 'zstd',
-    min_batch_size_bytes: int = 1024*1024,
+    input_shard: str,  # input shard URL/path
+    output_shard: str,  # output shard URL/path
+    batch_size: int = 16,  # batch size
+    compression: str = "zstd",
+    min_batch_size_bytes: int = 1024 * 1024,
     no_keys: bool = False,
     yt_data_specific: bool = False,
+    audio_requires_sorting: bool = False,
+    mixed_audio: bool = False,
+    check_audio: bool = False,
 ):
     """Converts a WebDataset shard into wsds format.
 
     Supports yt_data_specific mode with optional sorting.
     """
-    import io, json, tarfile, gzip
-    import numpy as np
-    import webdataset as wds
+    import gzip
+    import io
     from pathlib import Path
-    from collections import defaultdict
-    from hume_wsds import WSSink
-    from hume_wsds.utils import cast_types_for_storage
+
+    import soundfile as sf
+
     from hume_wsds.constants import ShardMapping
+    from hume_wsds.utils import cast_types_for_storage
 
     out_dir = Path(output_shard).parents[0].name
-    if out_dir == 'audio':
-        compression = 'no-compression'
+    if out_dir == "audio":
+        compression = "no-compression"
 
     AUDIO_KEYS = ["m4a", "mp3", "wav", "flac", "ogg", "opus"]
 
@@ -120,61 +116,87 @@ def shard_from_webdataset(
                 o = gzip.open
             else:
                 o = open
-        
+
             all_samples = defaultdict(dict)
-            audio_entries = [] 
-        
-            f = o(input_shard, 'rb')
+            audio_entries = []
+
+            f = o(input_shard, "rb")
             tar = tarfile.TarFile(fileobj=f)
-        
+
             for member in tar.getmembers():
-                path, name = member.name.rsplit('/', 1)
-                name = name.replace('_comments', '.comments')
-                key, field = name.split('.', 1)
-                sample_key = f'{path}/{key}'
-        
+                if "/" in member.name:
+                    path, name = member.name.rsplit("/", 1)
+                else:
+                    path, name = "", member.name  # fallback if at root level
+                name = name.replace("_comments", ".comments")
+                key, field = name.split(".", 1)
+                sample_key = f"{path}/{key}"
+
                 all_samples[sample_key][field] = member
-        
+
                 if field in AUDIO_KEYS:
                     audio_entries.append(sample_key)
-        
-            return tar, all_samples, audio_entries
-            
-        if out_dir == 'audio' and yt_data_specific:
 
+            return tar, all_samples, audio_entries
+
+        def is_audio_valid(audio_bytes: bytes) -> bool:
+            try:
+                with io.BytesIO(audio_bytes) as f:
+                    with sf.SoundFile(f) as sf_desc:
+                        _ = sf_desc.frames  # force metadata read
+                return True
+            except Exception as e:
+                print(f"[Warning] Corrupt audio detected: {e}")
+                return False
+
+        if out_dir == "audio" and audio_requires_sorting:
             tar, samples, audio_entries = list_keys_tarfile(input_shard)
-            
+
             for sample_key in audio_entries:
                 fields = samples[sample_key]
                 new_s = {}
                 new_s["__key__"] = sample_key
-            
+
                 for ak in AUDIO_KEYS:
                     if ak in fields:
-                        new_s[ak] = tar.extractfile(fields[ak]).read()
-            
-                for meta in ["info.json", "description", "comments.json"]:
-                    if meta in fields:
-                        try:
-                            new_s[meta] = tar.extractfile(fields[meta]).read().decode("utf-8", errors="ignore")
-                        except Exception:
-                            new_s[meta] = ""
-            
-                vtts = {}
-                for k, v in fields.items():
-                    if k.endswith(".vtt"):
-                        try:
-                            vtts[k] = tar.extractfile(v).read().decode("utf-8", errors="ignore")
-                        except Exception:
-                            continue
-                new_s["vtt"] = json.dumps(vtts) if vtts else "{}"
-            
+                        if mixed_audio:
+                            audio_bytes = tar.extractfile(fields[ak]).read()
+                            if check_audio and not is_audio_valid(audio_bytes):
+                                print(f"[Skipping] corrupt audio in {sample_key}")
+                                continue
+
+                            new_s["audio"] = audio_bytes
+                            new_s["audio_type"] = ak
+
+                        else:
+                            audio_bytes = tar.extractfile(fields[ak]).read()
+                            if check_audio and not is_audio_valid(audio_bytes):
+                                print(f"[Skipping] corrupt audio in {sample_key}")
+                                continue
+                            new_s[ak] = audio_bytes
+
+                if yt_data_specific:
+                    for meta in ["info.json", "description", "comments.json"]:
+                        if meta in fields:
+                            try:
+                                new_s[meta] = tar.extractfile(fields[meta]).read().decode("utf-8", errors="ignore")
+                            except Exception:
+                                new_s[meta] = ""
+
+                    vtts = {}
+                    for k, v in fields.items():
+                        if k.endswith(".vtt"):
+                            try:
+                                vtts[k] = tar.extractfile(v).read().decode("utf-8", errors="ignore")
+                            except Exception:
+                                continue
+                    new_s["vtt"] = json.dumps(vtts) if vtts else "{}"
+
                 yield new_s
 
         # regular processing
         else:
             for s in stream:
-
                 new_s = {}
 
                 def get_or_empty(field, as_text=True):
@@ -190,7 +212,7 @@ def shard_from_webdataset(
                     if k.endswith(".json"):
                         try:
                             v = json.loads(v)
-                            k = k[:-len(".json")]
+                            k = k[: -len(".json")]
                             v = cast_types_for_storage(v, float_cast="float16", int_cast="int32")
                         except Exception:
                             pass
@@ -204,6 +226,7 @@ def shard_from_webdataset(
                         continue
 
                     if k == "vad_silero_diarized_continuous":
+
                         def to_npy_bytes(array):
                             buf = io.BytesIO()
                             np.save(buf, array, allow_pickle=False)
@@ -234,13 +257,13 @@ def shard_from_webdataset(
                     # otherwise use the original key k as default
                     target_key = ShardMapping.get((out_dir, k), k)
                     renamed[target_key] = v
-    
+
                 yield renamed
 
-    if compression == 'no-compression':
+    if compression == "no-compression":
         compression = None
 
-    if out_dir == 'audio' and yt_data_specific:
+    if out_dir == "audio" and (yt_data_specific or audio_requires_sorting):
         iterator = process(None)
     else:
         ds = wds.WebDataset([input_shard], shardshuffle=False).compose(process)
@@ -253,12 +276,12 @@ def shard_from_webdataset(
         min_batch_size_bytes=min_batch_size_bytes,
     ) as sink:
         for i, x in enumerate(iterator):
-            drop_keys(x, '__url__', '__local_path__')
-            if no_keys and '__key__' in x:
-                del x['__key__']
+            drop_keys(x, "__url__", "__local_path__")
+            if no_keys and "__key__" in x:
+                del x["__key__"]
             sink.write(dict(sorted(x.items())))
-         
-            
+
+
 @command
 def drop_keys(dict, *keys):
     """Remove specified keys from the given dictionary."""
@@ -285,18 +308,20 @@ def dump_index(source_dataset: Path):
 
 @command
 class validate:
-    @command('validate_shards') # backwards compatibility
+    @command("validate_shards")  # backwards compatibility
     @staticmethod
-    def shards(dataset:Path, verbose=False):
+    def shards(dataset: Path, verbose=False):
         """Validate if subdirs have all the shards and if all their schemas match."""
         from .utils import list_all_shards
         from .ws_sink import indented
+
         shard_names = list_all_shards(dataset, verbose)
         print()
         for subdir in Path(dataset).iterdir():
-            if not subdir.is_dir(): continue
-            shards = [(subdir/shard).with_suffix('.wsds') for shard in shard_names]
-            schemas = {shard:get_shard_schema(shard) for shard in shards}
+            if not subdir.is_dir():
+                continue
+            shards = [(subdir / shard).with_suffix(".wsds") for shard in shard_names]
+            schemas = {shard: get_shard_schema(shard) for shard in shards}
             unique = set(s for s in schemas.values() if s)
             if len(unique) > 1:
                 print(f"Found schema conflicts for {subdir}:\n")
@@ -306,25 +331,27 @@ class validate:
                     print(indented(prefix, schema))
                     if verbose:
                         for shard in matching_shards:
-                            print(indented(" "*len(prefix), shard))
+                            print(indented(" " * len(prefix), shard))
                         print()
 
     @staticmethod
-    def keys(dataset:Path, verbose=False, skip_audio=True):
+    def keys(dataset: Path, verbose=False, skip_audio=True):
         """Validate __key__s against the index for all the shards in the dataset."""
-        from . import WSDataset
-        import polars as pl
-        from tqdm import tqdm
         from collections import defaultdict
 
+        import polars as pl
+        from tqdm import tqdm
+
+        from . import WSDataset
+
         dataset = Path(dataset)
-        if next(dataset.iterdir()).suffix == '.wsds':
+        if next(dataset.iterdir()).suffix == ".wsds":
             subdirs = [dataset]
             dataset = dataset.parent
         else:
             subdirs = list(dataset.iterdir())
             if skip_audio:
-                subdirs = [dir for dir in subdirs if dir.name != 'audio']
+                subdirs = [dir for dir in subdirs if dir.name != "audio"]
 
         ds = WSDataset(dataset)
         shards = ds.get_shard_list()
@@ -332,14 +359,13 @@ class validate:
         for shard in tqdm(shards, desc=str(dataset)):
             expected_keys = generate_all_keys_for_shard(ds.index, shard)
             for subdir in subdirs:
-                if not subdir.is_dir(): continue
-                shard_fname = (subdir/shard).with_suffix('.wsds')
+                if not subdir.is_dir():
+                    continue
+                shard_fname = (subdir / shard).with_suffix(".wsds")
                 if not shard_fname.exists():
                     missing_shards[subdir] += 1
                 else:
-                    if not pl.scan_ipc(shard_fname).select(
-                        (pl.col('__key__') == expected_keys).all()
-                    ).collect().item():
+                    if not pl.scan_ipc(shard_fname).select((pl.col("__key__") == expected_keys).all()).collect().item():
                         tqdm.write(f"Shard {shard} in {subdir} has keys that don't match the index.")
         for subdir, count in missing_shards.items():
             tqdm.write("")
@@ -352,39 +378,45 @@ class validate:
         base_path = Path(base_path)
         all_segmentations = []
         for base_dataset in base_path.iterdir():
-            if not base_dataset.is_dir(): continue
+            if not base_dataset.is_dir():
+                continue
             for segmentation in base_dataset.iterdir():
-                if not segmentation.is_dir(): continue
+                if not segmentation.is_dir():
+                    continue
                 all_segmentations.append(segmentation)
 
         for segmentation in tqdm(all_segmentations):
-            if not (segmentation/'index.sqlite3').exists():
+            if not (segmentation / "index.sqlite3").exists():
                 tqdm.write(f"{segmentation}: Missing index.sqlite3")
                 continue
             subdirs = [d for d in segmentation.iterdir() if d.is_dir()]
-            if not subdirs: tqdm.write(f"{segmentation}: Empty dataset!")
+            if not subdirs:
+                tqdm.write(f"{segmentation}: Empty dataset!")
             validate.keys(segmentation, skip_audio=skip_audio)
+
 
 def get_shard_schema(fname):
     fname = Path(fname)
     if not fname.exists():
         return None
-    return repr(pa.RecordBatchFileReader(pa.memory_map(str(fname))).schema).split('-- schema metadata --')[0]
+    return repr(pa.RecordBatchFileReader(pa.memory_map(str(fname))).schema).split("-- schema metadata --")[0]
+
 
 def generate_all_keys_for_shard(index, shard):
     import polars as pl
-    N, shard_id = index.query('SELECT n_samples, shard_id FROM shards WHERE shards.shard = ?', shard).fetchone()
-    files = index.query('SELECT name, offset FROM files WHERE files.shard_id == ?', shard_id).fetchall()
-    df = pl.DataFrame(files, schema=['name', 'offset'], orient="row")
-    if not index.metadata['segmented']:
-        return df['name']
-    return df.with_columns(
-        N = pl.col('offset').extend_constant(N, 1).diff(null_behavior="drop")
-    ).with_columns(
-        seq = pl.arange('N').over('name', mapping_strategy='join')
-    ).explode('seq').select(
-        __key__ = pl.format('{}_{}', 'name', pl.col('seq').cast(pl.String).str.zfill(3))
-    )['__key__']
+
+    N, shard_id = index.query("SELECT n_samples, shard_id FROM shards WHERE shards.shard = ?", shard).fetchone()
+    files = index.query("SELECT name, offset FROM files WHERE files.shard_id == ?", shard_id).fetchall()
+    df = pl.DataFrame(files, schema=["name", "offset"], orient="row")
+    if not index.metadata["segmented"]:
+        return df["name"]
+    return (
+        df.with_columns(N=pl.col("offset").extend_constant(N, 1).diff(null_behavior="drop"))
+        .with_columns(seq=pl.arange("N").over("name", mapping_strategy="join"))
+        .explode("seq")
+        .select(__key__=pl.format("{}_{}", "name", pl.col("seq").cast(pl.String).str.zfill(3)))["__key__"]
+    )
+
 
 @command
 def init(
@@ -443,6 +475,7 @@ def extract_index_for_shard(dataset, shard, vad_column=None):
 
     from . import WSDataset
     from .ws_audio import to_filelike
+
     ds = WSDataset(dataset)
     index = []
     i = 0
@@ -452,7 +485,6 @@ def extract_index_for_shard(dataset, shard, vad_column=None):
     sample = WSSample(ds, shard, 0)
 
     for s in ds.sequential_from(sample, 0):
-
         try:
             key = str(s["__key__"])
         except IndexError:

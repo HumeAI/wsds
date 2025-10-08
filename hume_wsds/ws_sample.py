@@ -1,9 +1,9 @@
 from dataclasses import dataclass, field
 
-from typing import TYPE_CHECKING
-if TYPE_CHECKING:
-    from .ws_dataset import WSDataset
+from hume_wsds.ws_audio import AudioReader
 
+from typing import TYPE_CHECKING
+s
 @dataclass(frozen=True, slots=True)
 class WSSample:
     dataset: "WSDataset"
@@ -12,9 +12,19 @@ class WSSample:
     overrides: dict = field(default_factory=dict)
 
     def get_audio(self, audio_columns=None):
-        r = self.get_one_of(*(audio_columns or self.dataset._audio_file_keys))
+        candidates = audio_columns or self.dataset._audio_file_keys
+
+        # normalized 'audio' field
+        if "audio" in self:
+            r = self["audio"]
+        else:
+            r = self.get_one_of(*candidates)
+
         if not r:
-            raise KeyError(f"No audio column (tried {self.dataset._audio_file_keys}) found among: {self.keys()}")
+            raise KeyError(f"No audio column (tried {candidates}) found among: {list(self.keys())}")
+
+        if isinstance(r, AudioReader):
+            return r.unwrap()
         return r
 
     def keys(self):
