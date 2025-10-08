@@ -3,7 +3,7 @@ from dataclasses import dataclass, field
 from hume_wsds.ws_audio import AudioReader
 
 from typing import TYPE_CHECKING
-s
+
 @dataclass(frozen=True, slots=True)
 class WSSample:
     dataset: "WSDataset"
