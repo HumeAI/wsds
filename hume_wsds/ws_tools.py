@@ -550,12 +550,14 @@ def _sort_columns(*fnames):
 
 
 @command
-def _convert_datatype(*fnames, target_type="string"):
+def _convert_datatype(*fnames, target_type="string", columns=""):
     """
-    Convert all columns in the given .wsds files to a specific Arrow datatype e.g., string for transcription.
+    Convert all or specific columns in the given .wsds files to a specific Arrow datatype
+    (e.g., string for transcription).
 
     Example:
         wsds _convert_datatype /path/to/shards/*.wsds --target_type string
+        wsds _convert_datatype /path/to/shards/*.wsds --target_type string --columns transcription.txt,other_field
     """
     import pyarrow as pa
     import tqdm
@@ -576,6 +578,9 @@ def _convert_datatype(*fnames, target_type="string"):
 
     target_arrow_type = _type_map[target_type]
 
+    # Parse optional column list
+    selected_cols = [c.strip() for c in columns.split(",") if c.strip()] if columns else None
+
     for fname in tqdm.tqdm(fnames, desc=f"Converting to {target_type}"):
         reader = pa.ipc.open_file(fname)
         table = reader.read_all()
@@ -585,6 +590,12 @@ def _convert_datatype(*fnames, target_type="string"):
             col = table[name]
             col_type = col.type
 
+            # Skip columns not in selection (if provided)
+            if selected_cols and name not in selected_cols:
+                new_cols[name] = col
+                continue
+
+            # Skip if already of desired type
             if col_type == target_arrow_type:
                 new_cols[name] = col
                 continue
