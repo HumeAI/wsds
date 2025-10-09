@@ -607,3 +607,37 @@ def _convert_datatype(*fnames, target_type="string"):
             with AtomicFile(fname) as tmp:
                 with pa.ipc.new_file(tmp, table2.schema.with_metadata(reader.schema.metadata)) as sink:
                     sink.write_table(table2)
+
+
+@command
+def _remove_columns(*fnames, remove: str = ""):
+    """
+    Remove one or more columns from .wsds shard files if they exist.
+
+    Example:
+        wsds _remove_columns /path/to/shards/*.wsds --remove transcription_parakeet-tdt-0-6b-v3_raw.txt
+        wsds _remove_columns /path/to/shards/*.wsds --remove col1,col2,col3
+    """
+    import pyarrow as pa
+    import tqdm
+
+    from .ws_sink import AtomicFile
+
+    remove_cols = [r.strip() for r in remove.split(",") if r.strip()]
+    if not remove_cols:
+        raise ValueError("You must specify at least one column to remove via --remove")
+
+    for fname in tqdm.tqdm(fnames, desc=f"Removing {remove_cols}"):
+        reader = pa.ipc.open_file(fname)
+        table = reader.read_all()
+
+        cols_to_drop = [c for c in table.column_names if c in remove_cols]
+        if not cols_to_drop:
+            continue
+
+        table2 = table.drop(cols_to_drop)
+
+        if table.schema != table2.schema:
+            with AtomicFile(fname) as tmp:
+                with pa.ipc.new_file(tmp, table2.schema.with_metadata(reader.schema.metadata)) as sink:
+                    sink.write_table(table2)
