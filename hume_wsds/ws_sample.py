@@ -13,22 +13,21 @@ class WSSample:
 
     def get_audio(self, audio_columns=None):
         candidates = audio_columns or self.dataset._audio_file_keys
-
-        # normalized 'audio' field
+    
         if "audio" in self:
             r = self["audio"]
         else:
             r = self.get_one_of(*candidates)
-
+    
         if not r:
             raise KeyError(f"No audio column (tried {candidates}) found among: {list(self.keys())}")
-
+    
         if isinstance(r, AudioReader):
-            return r
+            return r.unwrap()
         elif isinstance(r, (bytes, bytearray)):
-            return AudioReader(r)
+            return r
         elif hasattr(r, "as_buffer"):
-            return AudioReader(r)
+            return r.as_buffer().to_pybytes()
         else:
             raise TypeError(f"Unsupported audio type for {type(r)}")
 
