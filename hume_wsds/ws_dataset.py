@@ -6,7 +6,7 @@ import sys
 from collections import defaultdict
 from pathlib import Path
 
-from hume_wsds.utils import list_all_columns, list_all_shards, make_key, parse_key, scan_ipc
+from hume_wsds.utils import list_all_columns, list_all_shards, parse_key, scan_ipc
 from hume_wsds.ws_index import WSIndex
 from hume_wsds.ws_sample import WSSample
 from hume_wsds.ws_shard import WSShard
@@ -32,19 +32,20 @@ class WSDataset:
     >>> sample['audio']
     WSAudio(audio_reader=AudioReader(src=<class 'pyarrow.lib.BinaryScalar'>, sample_rate=None), tstart=1040.2133, tend=1042.8413)
     """
-    dir : str
+
+    dir: str
     """Path to the dataset directory."""
-    fields : dict
+    fields: dict
     """List of fields available for each sample."""
-    computed_columns : dict
+    computed_columns: dict
     """List of computed columns (e.g. the source audio or video link). @private"""
 
     # FIXME: this should be overridable with metadata in index.sqlite3
-    _audio_file_keys = ["flac", "mp3", "sox", "wav", "m4a", "ogg", "wma", "opus"]
+    _audio_file_keys = ["audio", "flac", "mp3", "sox", "wav", "m4a", "ogg", "wma", "opus"]
 
     def __init__(self, dir):
         self.dir = self._resolve_dataset_path(dir)
-        index_file = self.dir/"index.sqlite3"
+        index_file = self.dir / "index.sqlite3"
         if Path(index_file).exists():
             self.index = WSIndex(index_file)
             self.segmented = self.index.metadata.get("segmented", False)
@@ -100,7 +101,8 @@ class WSDataset:
                 "SELECT s.shard, global_offset FROM shards AS s WHERE s.global_offset <= ? ORDER BY s.global_offset DESC LIMIT 1",
                 key,
             ).fetchone()
-            if not r: return None
+            if not r:
+                return None
             shard_name, global_offset = r
             return WSSample(self, shard_name, key - global_offset)
         elif isinstance(key, str):
@@ -150,8 +152,8 @@ class WSDataset:
                 subdir, field = self.fields[col]
                 assert col == field, "renamed fields are not supported in SQL queries yet"
                 subdirs.add(subdir)
-            if not subdirs and '__key__' in expr.meta.root_names():
-                subdirs.add(self.fields['__key__'][0])
+            if not subdirs and "__key__" in expr.meta.root_names():
+                subdirs.add(self.fields["__key__"][0])
             exprs.append(expr)
         row_merge = []
         missing = defaultdict(list)
@@ -241,7 +243,7 @@ class WSDataset:
         dir = Path(dir)
         if dir.is_absolute() or dir.exists():
             return dir
-        for path in os.environ.get('WSDS_DATASET_PATH', "").split(":"):
+        for path in os.environ.get("WSDS_DATASET_PATH", "").split(":"):
             path = Path(path)
             if (path / dir).exists():
                 return path / dir
@@ -256,7 +258,7 @@ class WSDataset:
     def _register_wsds_links(self):
         for subdir, _ in self.fields.values():
             if subdir.endswith(".wsds-link"):
-                spec = json.loads((self.dir/subdir).read_text())
+                spec = json.loads((self.dir / subdir).read_text())
                 self.computed_columns[subdir] = spec
 
     def add_computed(self, name, **link):
@@ -276,12 +278,10 @@ class WSDataset:
             loader_module = importlib.import_module(loader_mod)
             loader_class = getattr(loader_module, loader)
 
-        return loader_class.from_link(
-            link, self.get_linked_dataset(self.dir/link['dataset_dir']), self, shard_name
-        )
+        return loader_class.from_link(link, self.get_linked_dataset(self.dir / link["dataset_dir"]), self, shard_name)
 
     def get_shard(self, subdir, shard_name):
-        dir = self.dir/subdir
+        dir = self.dir / subdir
 
         shard = self._open_shards.get(dir, None)
         if shard is not None and shard.shard_name == shard_name:

@@ -24,8 +24,13 @@ class WSSample:
             raise KeyError(f"No audio column (tried {candidates}) found among: {list(self.keys())}")
 
         if isinstance(r, AudioReader):
-            return r.unwrap()
-        return r
+            return r
+        elif isinstance(r, (bytes, bytearray)):
+            return AudioReader(r)
+        elif hasattr(r, "as_buffer"):
+            return AudioReader(r)
+        else:
+            raise TypeError(f"Unsupported audio type for {type(r)}")
 
     def keys(self):
         return self.dataset.fields.keys()
