@@ -547,3 +547,63 @@ def _sort_columns(*fnames):
                     sink.write_table(table2)
         # else:
         #     print(f"No changes needed: {fname}")
+
+
+@command
+def _convert_datatype(*fnames, target_type="string"):
+    """
+    Convert all columns in the given .wsds files to a specific Arrow datatype e.g., string for transcription.
+
+    Example:
+        wsds _convert_datatype /path/to/shards/*.wsds --target_type string
+    """
+    import pyarrow as pa
+    import tqdm
+
+    from .ws_sink import AtomicFile
+
+    _type_map = {
+        "string": pa.string(),
+        "binary": pa.binary(),
+        "float32": pa.float32(),
+        "float16": pa.float16(),
+        "int32": pa.int32(),
+        "int64": pa.int64(),
+    }
+
+    if target_type not in _type_map:
+        raise ValueError(f"Unsupported target_type: {target_type}. Choose from {list(_type_map)}")
+
+    target_arrow_type = _type_map[target_type]
+
+    for fname in tqdm.tqdm(fnames, desc=f"Converting to {target_type}"):
+        reader = pa.ipc.open_file(fname)
+        table = reader.read_all()
+        new_cols = {}
+
+        for name in table.column_names:
+            col = table[name]
+            col_type = col.type
+
+            if col_type == target_arrow_type:
+                new_cols[name] = col
+                continue
+
+            try:
+                if target_type == "string":
+                    new_cols[name] = pa.array(
+                        [str(v.as_py() if hasattr(v, "as_py") else v) for v in col],
+                        type=target_arrow_type,
+                    )
+                else:
+                    new_cols[name] = col.cast(target_arrow_type)
+            except Exception as e:
+                print(f"Failed to convert column '{name}' in {fname}: {e}")
+                new_cols[name] = col  # fallback
+
+        table2 = pa.table(new_cols)
+
+        if table.schema != table2.schema:
+            with AtomicFile(fname) as tmp:
+                with pa.ipc.new_file(tmp, table2.schema.with_metadata(reader.schema.metadata)) as sink:
+                    sink.write_table(table2)
