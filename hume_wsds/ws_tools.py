@@ -560,6 +560,7 @@ def _convert_datatype(*fnames, target_type="string", columns=""):
         wsds _convert_datatype /path/to/shards/*.wsds --target_type string
         wsds _convert_datatype /path/to/shards/*.wsds --target_type string --columns transcription.txt,other_field
     """
+    import ast
     import pyarrow as pa
     import tqdm
     from .ws_sink import AtomicFile
@@ -573,10 +574,10 @@ def _convert_datatype(*fnames, target_type="string", columns=""):
         "int64": pa.int64(),
     }
 
-    if target_type not in _type_map:
+    if target_type not in _type_map and target_type != "string_from_byte_string":
         raise ValueError(f"Unsupported target_type: {target_type}. Choose from {list(_type_map)}")
 
-    target_arrow_type = _type_map[target_type]
+    target_arrow_type = pa.utf8() if target_type == "string_from_byte_string" else _type_map[target_type]
 
     # Parse optional column list
     selected_cols = [c.strip() for c in columns.split(",") if c.strip()] if columns else None
@@ -601,7 +602,24 @@ def _convert_datatype(*fnames, target_type="string", columns=""):
                 continue
 
             try:
-                new_cols[name] = col.cast(target_arrow_type)
+                if target_type == "string_from_byte_string":
+                    values = []
+                    for v in col.to_pylist():
+                        if v is None:
+                            values.append(None)
+                            continue
+                        if isinstance(v, (bytes, bytearray)):
+                            s = repr(v)  
+                        else:
+                            s = str(v)
+                        values.append(s)
+                    new_cols[name] = pa.array(values, type=target_arrow_type)
+
+
+                else:
+                    # Normal casting for other types
+                    new_cols[name] = col.cast(target_arrow_type)
+
             except Exception as e:
                 print(f"Failed to convert column '{name}' in {fname}: {e}")
                 new_cols[name] = col  # fallback
