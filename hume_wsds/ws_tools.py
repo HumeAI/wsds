@@ -534,25 +534,36 @@ def extract_index_for_shard(dataset, shard, vad_column=None):
 
 
 @command
-def _sort_columns(*fnames):
-    import tqdm
+def _sort_columns(*fnames, add_prefix : str | None = None, dry_run : bool = False):
+    from tqdm import tqdm
 
     from .ws_sink import AtomicFile
 
     _renames = {
-        "dtok_v2_ml_50hz_32x16384_graphemes_key16k.dtok_level_1_16k.txt": "dtok_level_1_16k.npy",
-        "source_start_end_time.txt": "dtok_v2_ml_50hz_32x16384_graphemes_key16k.source_start_end_time.npy",
+        "dtok_level_1_16k.npy": "dtok_v2_ml_50hz_32x16384_graphemes_key16k.dtok_level_1_16k.txt",
+        "source_start_end_time.npy": "dtok_v2_ml_50hz_32x16384_graphemes_key16k.source_start_end_time.npy",
     }
 
-    for fname in tqdm.tqdm(fnames):
+    if dry_run: fnames = fnames[:1]
+    for fname in tqdm(fnames):
         reader = pa.ipc.open_file(fname)
         table = reader.read_all()
         table2 = table.select(sorted(table.column_names))
-        table2 = table2.rename_columns([k if k not in _renames else _renames[k] for k in table2.column_names])
-        # print(table.schema)
-        if table.schema != table2.schema:
+        if add_prefix:
+            table2 = table2.rename_columns([f"{add_prefix}{k}" if k != '__key__' else '__key__' for k in table2.column_names])
+        else:
+            table2 = table2.rename_columns([k if k not in _renames else _renames[k] for k in table2.column_names])
+        if dry_run:
+            from .ws_sink import indented
+            if table.schema != table2.schema:
+                new = "NEW: "
+                tqdm.write(indented("OLD: ", table.schema))
+            else:
+                new = "NO CHANGE: "
+            tqdm.write(indented(new, table2.schema))
+            # return
+        else:
+            if table.schema == table2.schema: return
             with AtomicFile(fname) as fname:
                 with pa.ipc.new_file(fname, table2.schema.with_metadata(reader.schema.metadata)) as sink:
                     sink.write_table(table2)
-        # else:
-        #     print(f"No changes needed: {fname}")
