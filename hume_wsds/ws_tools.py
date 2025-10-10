@@ -56,6 +56,11 @@ def inspect_dataset(input_path, verbose=True):
             print(x)
             break
 
+def inspect_shard(input_path):
+    reader = pa.RecordBatchFileReader(pa.memory_map(str(input_path)))
+    print(f"Batches: {reader.num_record_batches}")
+    print(f"Rows: {int(reader.schema.metadata[b'batch_size']) * reader.num_record_batches}")
+    print(f"Schema:\n{reader.schema}")
 
 @command
 def inspect(input_path: str):
@@ -70,11 +75,15 @@ def inspect(input_path: str):
                 print()
             for file in segmentations:
                 inspect_dataset(str(file), verbose=False)
-    elif input_path.endswith(".wsds"):
-        reader = pa.RecordBatchFileReader(pa.memory_map(input_path))
-        print(f"Batches: {reader.num_record_batches}")
-        print(f"Rows: {int(reader.schema.metadata[b'batch_size']) * reader.num_record_batches}")
-        print(f"Schema:\n{reader.schema}")
+            if not segmentations:
+                for shard in Path(input_path).glob('*.wsds'):
+                    print(f"Inspecting first shard: {shard}")
+                    inspect_shard(shard)
+                    break
+                else:
+                    print("Nothing to inspect here...")
+    elif input_path.endswith('.wsds'):
+        inspect_shard(input_path)
 
 
 @command
