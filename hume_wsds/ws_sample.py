@@ -22,11 +22,11 @@ class WSSample:
             raise KeyError(f"No audio column (tried {candidates}) found among: {list(self.keys())}")
 
         if isinstance(r, AudioReader):
-            return r.unwrap()
-        elif isinstance(r, (bytes, bytearray)):
             return r
+        elif isinstance(r, (bytes, bytearray)):
+            return AudioReader(r)
         elif hasattr(r, "as_buffer"):
-            return r.as_buffer().to_pybytes()
+            return AudioReader(r)
         else:
             raise TypeError(f"Unsupported audio type for {type(r)}")
 
