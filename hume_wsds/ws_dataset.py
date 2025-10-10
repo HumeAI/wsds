@@ -156,6 +156,7 @@ class WSDataset:
                 subdirs.add(self.fields["__key__"][0])
             exprs.append(expr)
         row_merge = []
+        subdir_samples = {}
         missing = defaultdict(list)
         for shard in self.get_shard_list():
             col_merge = []
@@ -164,16 +165,21 @@ class WSDataset:
                     df = scan_ipc(self.get_shard(subdir, shard).fname, glob=False)
                     if len(col_merge) > 0:
                         df = df.drop("__key__")  # ensure only one __key__ column
-                    col_merge.append(df)
+                    if subdir not in subdir_samples:
+                        subdir_samples[subdir] = df.clear().collect()
                 except FileNotFoundError:
+                    # create a fake dataframe with all NULL rows and matching schema
+                    n_samples = self.index.query("SELECT n_samples FROM shards WHERE shard=?", shard).fetchone()[0]
+                    df = pl.defer(
+                        lambda subdir=subdir, n_samples=n_samples: subdir_samples[subdir].clear(n=n_samples),
+                        schema=lambda subdir=subdir: subdir_samples[subdir].schema
+                    )
                     missing[subdir].append(shard)
-                    # if any of the subdirs are missing this shard, skip it completely
-                    col_merge = []
-                    break
+                col_merge.append(df)
             if col_merge:
                 row_merge.append(pl.concat(col_merge, how="horizontal"))
         if missing:
-            print("WARNING: You are missing shards for some of the columns:")
+            print("WARNING: You are missing shards for some of the columns (filled them with NULLs):")
             for subdir, shards in missing.items():
                 print(f"{subdir}: {shards}")
             if not row_merge:
@@ -190,7 +196,7 @@ class WSDataset:
     def sql_filter(self, query):
         """Given a boolean SQL expression, returns a list of keys for samples that match the query."""
         exprs, df = self._sql(query)
-        return df.filter(exprs[0]).select("__key__").collect()["__key__"]
+        return df.filter(exprs[0]).select("__key__").filter(pl.col('__key__').is_not_null()).collect()["__key__"]
 
     def filtered(
         self,
