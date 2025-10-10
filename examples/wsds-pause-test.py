@@ -45,7 +45,7 @@ def _(btn, ds):
             pause = _x['audio-pause'].load(16000).numpy()
             mo.output.append(mo.md(f"""
     &nbsp;
-    ## `{_x.get_key()}`
+    ## `{_x['__key__']}`
     `full_transcript:` {_x['transcription_wslang_raw.txt']}
     `last 2s` {mo.audio(_x['audio'].load(16000).numpy()[:,-32000:], rate=16000, normalize=False)}
     `pause {pause.shape[-1]/16000:.1f}s` {mo.audio(pause, rate=16000, normalize=False) if pause.size > 0 else "no pause"}

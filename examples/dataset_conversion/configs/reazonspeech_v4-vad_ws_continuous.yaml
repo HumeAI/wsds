@@ -1,0 +1,19 @@
+flags:
+  convert_audio: true
+  convert_mvad: true
+  convert_artifacts: true
+  create_index: false
+
+paths:
+  audio_base: /mnt/weka/data2/multimodal/specific/reazon-jp/reazonspeech/all/audio_tarred
+  input_base: /mnt/weka/data2/multimodal/specific/reazon-jp/reazonspeech/all/processed-v4-pipeline-vad_ws_continuous
+  output_base: /mnt/weka/data-wsds/reazonspeech
+
+segmentation_type: v4-vad_ws_continuous
+
+subdirs:
+  - acoustic_scores_raw
+  - transcription_wslang_turbo_raw
+  - pquality_wmusic_scores_raw
+  - dtok_v2_ml_25hz_32x16384_graphemes_v2_encoder
+  - dtok_v2_ml_50hz_32x16384_graphemes_key16k

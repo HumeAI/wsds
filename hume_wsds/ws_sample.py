@@ -10,13 +10,9 @@ class WSSample:
     offset: int
     overrides: dict = field(default_factory=dict)
 
-    def get_key(self):
-        return self.dataset.get_key(self.shard_name, self.offset)
-
     def get_audio(self, audio_columns=None):
         candidates = audio_columns or self.dataset._audio_file_keys
 
-        # normalized 'audio' field
         if "audio" in self:
             r = self["audio"]
         else:
@@ -25,16 +21,14 @@ class WSSample:
         if not r:
             raise KeyError(f"No audio column (tried {candidates}) found among: {list(self.keys())}")
 
-        # if not saved in bytes directly needs to be unwrapped?
         if isinstance(r, AudioReader):
-            if hasattr(r.src, "as_buffer"):
-                return r.src.as_buffer().to_pybytes()
-            elif isinstance(r.src, (bytes, bytearray)):
-                return r.src
-            else:
-                raise TypeError(f"Unsupported AudioReader src type: {type(r.src)}")
-
-        return r
+            return r.unwrap()
+        elif isinstance(r, (bytes, bytearray)):
+            return r
+        elif hasattr(r, "as_buffer"):
+            return r.as_buffer().to_pybytes()
+        else:
+            raise TypeError(f"Unsupported audio type for {type(r)}")
 
     def keys(self):
         return self.dataset.fields.keys()

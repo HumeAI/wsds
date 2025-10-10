@@ -40,6 +40,15 @@ class AudioReader:
     def __repr__(self):
         return f"AudioReader(src={type(self.src)}, sample_rate={self.sample_rate})"
 
+    def unwrap(self):
+        """Return the raw audio bytes"""
+        if hasattr(self.src, "as_buffer"):
+            return self.src.as_buffer().to_pybytes()
+        elif isinstance(self.src, (bytes, bytearray)):
+            return self.src
+        else:
+            raise TypeError(f"Unsupported AudioReader src type: {type(self.src)}")
+
     # we materialize the reader on first use
     def get_reader(self, sample_rate=None):
         # import here to avoid pulling in the heavy torch dependency unless we really need it
@@ -108,10 +117,12 @@ class WSAudio:
 
     def _display_(self):
         import marimo
+
         samples = self.load()
         return marimo.audio(samples.numpy(), rate=samples.sample_rate)
 
     def _ipython_display_(self):
-        from IPython.display import display, Audio
+        from IPython.display import Audio, display
+
         samples = self.load()
         display(Audio(samples.numpy(), rate=samples.sample_rate))

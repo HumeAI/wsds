@@ -130,7 +130,9 @@ if [[ "$CONVERT_ARTIFACTS" == "true" ]]; then
     echo -e "${BLU}${BOLD}=== Converting $sub ===${RST}"
 
     mapfile -t ART_TARS < <(
-      for f in "$in_dir"/*.tar.gz; do
+      for f in "$in_dir"/*.tar.gz "$in_dir"/*.tar; do
+        # Skip if the glob didn't expand (file doesn't exist)
+        [[ -f "$f" ]] || continue
         base=$(basename "${f}")
         base_root="${base%%.*}"   # keep only before the first dot
         out="$out_dir/${base_root}.wsds"
@@ -149,6 +151,15 @@ if [[ "$CONVERT_ARTIFACTS" == "true" ]]; then
 
     counts["$SEGMENTATION_TYPE/$sub"]=$(ls -1 "$out_dir"/*.wsds 2>/dev/null | wc -l || echo 0)
   done
+
+  # Rename source_separation to isolated_audio if it exists
+  source_sep_dir="$OUTPUT_BASE/$SEGMENTATION_TYPE/source_separation"
+  isolated_audio_dir="$OUTPUT_BASE/$SEGMENTATION_TYPE/isolated_audio"
+  if [[ -d "$source_sep_dir" ]]; then
+    echo -e "${BLU}${BOLD}=== Renaming source_separation to isolated_audio ===${RST}"
+    mv "$source_sep_dir" "$isolated_audio_dir"
+    echo "Renamed: $source_sep_dir -> $isolated_audio_dir"
+  fi
 fi
 
 ### index creation ###
