@@ -193,6 +193,7 @@ class WSDataset:
 
     def sql_filter(self, query):
         """Given a boolean SQL expression, returns a list of keys for samples that match the query."""
+        import polars as pl
         exprs, df = self._sql(query)
         return df.filter(exprs[0]).select("__key__").filter(pl.col('__key__').is_not_null()).collect()["__key__"]
 
