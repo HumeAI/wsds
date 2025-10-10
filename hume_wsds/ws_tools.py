@@ -182,6 +182,8 @@ def shard_from_webdataset(
                                 new_s[meta] = tar.extractfile(fields[meta]).read().decode("utf-8", errors="ignore")
                             except Exception:
                                 new_s[meta] = ""
+                        else:
+                            new_s[meta] = ""
 
                     vtts = {}
                     for k, v in fields.items():
