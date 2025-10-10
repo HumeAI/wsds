@@ -565,7 +565,7 @@ def _convert_datatype(*fnames, target_type="string", columns=""):
     from .ws_sink import AtomicFile
 
     _type_map = {
-        "string": pa.string(),
+        "string": pa.utf8(),
         "binary": pa.binary(),
         "float32": pa.float32(),
         "float16": pa.float16(),
@@ -601,13 +601,7 @@ def _convert_datatype(*fnames, target_type="string", columns=""):
                 continue
 
             try:
-                if target_type == "string":
-                    new_cols[name] = pa.array(
-                        [str(v.as_py() if hasattr(v, "as_py") else v) for v in col],
-                        type=target_arrow_type,
-                    )
-                else:
-                    new_cols[name] = col.cast(target_arrow_type)
+                new_cols[name] = col.cast(target_arrow_type)
             except Exception as e:
                 print(f"Failed to convert column '{name}' in {fname}: {e}")
                 new_cols[name] = col  # fallback
