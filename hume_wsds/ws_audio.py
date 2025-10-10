@@ -4,17 +4,16 @@ import io
 import typing
 from dataclasses import dataclass
 
-import pyarrow as pa
 
-
-def to_filelike(src: typing.Any) -> typing.BinaryIO:
-    """Coerces files, byte-strings and PyArrow binary buffers into file-like objects."""
-    if hasattr(src, "read"):  # an open file
-        return src
-    # if not an open file then we assume some kind of binary data in memory
-    if hasattr(src, "as_buffer"):  # PyArrow binary data
-        return pa.BufferReader(src.as_buffer())
-    return io.BytesIO(src)
+def to_filelike(src):
+    if isinstance(src, AudioReader):
+        return io.BytesIO(src.unwrap() if hasattr(src, "unwrap") else src.read())
+    elif hasattr(src, "as_buffer"):
+        return io.BytesIO(src.as_buffer().to_pybytes())
+    elif isinstance(src, (bytes, bytearray)):
+        return io.BytesIO(src)
+    else:
+        raise TypeError(f"a bytes-like object is required, not {type(src).__name__}")
 
 
 def load_segment(src, start, end, sample_rate=None):

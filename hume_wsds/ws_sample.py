@@ -26,7 +26,7 @@ class WSSample:
         elif isinstance(r, (bytes, bytearray)):
             return AudioReader(r)
         elif hasattr(r, "as_buffer"):
-            return AudioReader(r)
+            return AudioReader(r.as_buffer().to_pybytes())
         else:
             raise TypeError(f"Unsupported audio type for {type(r)}")
 
