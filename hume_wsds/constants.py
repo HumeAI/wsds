@@ -32,11 +32,27 @@ ShardMapping = {
     ("pquality_wmusic_scores_raw", "music_qual"): "music_qual",
     ("pquality_scores_continuous", "pq"): "pq",
     # tokens
-    ("dtok_25_10_10_vocab_256_32k", "dtok_global.npy"): "dtok_25_10_10_vocab_256_32k.dtok_global.npy",
-    ("dtok_25_10_10_vocab_256_32k", "dtok_level_1.npy"): "dtok_25_10_10_vocab_256_32k.dtok_level_1.npy",
-    ("dtok_25_10_10_vocab_256_32k", "dtok_level_2.npy"): "dtok_25_10_10_vocab_256_32k.dtok_level_2.npy",
-    ("dtok_25_10_10_vocab_256_32k", "dtok_level_3.npy"): "dtok_25_10_10_vocab_256_32k.dtok_level_3.npy",
     ("dtok_v2_ml_50hz_32x16384_graphemes_key16k", "dtok_level_1_16k.npy"): "dtok_level_1_16k.npy",
+    (
+        "dtok_v2_ml_50hz_32x16384_graphemes_key16k",
+        "source_start_end_time.npy",
+    ): "dtok_v2_ml_50hz_32x16384_graphemes_key16k.source_start_end_time.npy",
+    (
+        "dtok_v2_ml_50hz_32x16384_graphemes_key16k",
+        "boundary_shift_energy.npy",
+    ): "dtok_v2_ml_50hz_32x16384_graphemes_key16k.boundary_shift_energy.npy",
+    (
+        "dtok_v2_ml_50hz_32x16384_graphemes_key16k",
+        "vad_boundary_shift.npy",
+    ): "dtok_v2_ml_50hz_32x16384_graphemes_key16k.vad_boundary_shift.npy",
+    (
+        "dtok_v2_ml_50hz_32x16384_graphemes_key16k",
+        "vad_original_duration.npy",
+    ): "dtok_v2_ml_50hz_32x16384_graphemes_key16k.vad_original_duration.npy",
+    (
+        "dtok_v2_ml_50hz_32x16384_graphemes_key16k",
+        "vad_original_gap.npy",
+    ): "dtok_v2_ml_50hz_32x16384_graphemes_key16k.vad_original_gap.npy",
     (
         "dtok_v2_ml_25hz_32x16384_graphemes_v2_encoder",
         "dtok_global.npy",
@@ -54,18 +70,28 @@ ShardMapping = {
         "source_start_end_time.npy",
     ): "dtok_v2_ml_25hz_32x16384_graphemes_v2_encoder.source_start_end_time.npy",
     (
-        "dtok_v2_ml_50hz_32x16384_graphemes_key16k",
-        "source_start_end_time.npy",
-    ): "dtok_v2_ml_50hz_32x16384_graphemes_key16k.source_start_end_time.npy",
-
-  # transcripts
+        "dtok_v2_ml_25hz_32x16384_graphemes_v2_encoder",
+        "boundary_shift_energy.npy",
+    ): "dtok_v2_ml_25hz_32x16384_graphemes_v2_encoder.boundary_shift_energy.npy",
+    (
+        "dtok_v2_ml_25hz_32x16384_graphemes_v2_encoder",
+        "vad_boundary_shift.npy",
+    ): "dtok_v2_ml_25hz_32x16384_graphemes_v2_encoder.vad_boundary_shift.npy",
+    (
+        "dtok_v2_ml_25hz_32x16384_graphemes_v2_encoder",
+        "vad_original_duration.npy",
+    ): "dtok_v2_ml_25hz_32x16384_graphemes_v2_encoder.vad_original_duration.npy",
+    (
+        "dtok_v2_ml_25hz_32x16384_graphemes_v2_encoder",
+        "vad_original_gap.npy",
+    ): "dtok_v2_ml_25hz_32x16384_graphemes_v2_encoder.vad_original_gap.npy",
+    # transcripts
     ("transcription_parakeet-ctc-1-1b_raw", "nemo_transcription.txt"): "nemo_transcription.txt",
     ("transcription_ws_raw", "txt"): "transcription_ws_raw.txt",
     ("transcription_wslang_raw", "txt"): "transcription_wslang_raw.txt",
     ("transcription_wslang_continuous", "txt"): "transcription_wslang_continuous.txt",
     ("transcription_wslang_turbo_raw", "txt"): "transcription_wslang_turbo_raw.txt",
     ("transcription_parakeet-tdt-0-6b-v3_raw", "nemo_transcription.txt"): "transcription_parakeet-tdt-0-6b-v3_raw.txt",
-
     # ("stoks_raw", "__key__"): "__key__",
     # ("meta_aes_quality_scores_raw", "aes"): "aes",
     # ("atoks_raw", "atoks.npy"): "atoks.npy",
