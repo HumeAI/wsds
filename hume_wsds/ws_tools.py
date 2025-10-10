@@ -182,6 +182,8 @@ def shard_from_webdataset(
                                 new_s[meta] = tar.extractfile(fields[meta]).read().decode("utf-8", errors="ignore")
                             except Exception:
                                 new_s[meta] = ""
+                        else:
+                            new_s[meta] = ""
 
                     vtts = {}
                     for k, v in fields.items():
@@ -503,8 +505,7 @@ def extract_index_for_shard(dataset, shard, vad_column=None):
                 speech_duration = float((vad[:, -1] - vad[:, -2]).sum())  # tend - tstart
 
         try:
-            # FIXME: move this to ws_audio and add to autodecoders?
-            decoder = AudioDecoder(to_filelike(s.get_audio()))
+            decoder = s.get_audio()
             audio_duration = decoder.metadata.duration_seconds_from_header
         except Exception as e:
             print("Audio loading error:", e)
@@ -559,13 +560,13 @@ def _convert_datatype(*fnames, target_type="string", columns=""):
         wsds _convert_datatype /path/to/shards/*.wsds --target_type string
         wsds _convert_datatype /path/to/shards/*.wsds --target_type string --columns transcription.txt,other_field
     """
+    import ast
     import pyarrow as pa
     import tqdm
-
     from .ws_sink import AtomicFile
 
     _type_map = {
-        "string": pa.string(),
+        "string": pa.utf8(),
         "binary": pa.binary(),
         "float32": pa.float32(),
         "float16": pa.float16(),
@@ -573,10 +574,10 @@ def _convert_datatype(*fnames, target_type="string", columns=""):
         "int64": pa.int64(),
     }
 
-    if target_type not in _type_map:
+    if target_type not in _type_map and target_type != "string_from_byte_string":
         raise ValueError(f"Unsupported target_type: {target_type}. Choose from {list(_type_map)}")
 
-    target_arrow_type = _type_map[target_type]
+    target_arrow_type = pa.utf8() if target_type == "string_from_byte_string" else _type_map[target_type]
 
     # Parse optional column list
     selected_cols = [c.strip() for c in columns.split(",") if c.strip()] if columns else None
@@ -601,13 +602,24 @@ def _convert_datatype(*fnames, target_type="string", columns=""):
                 continue
 
             try:
-                if target_type == "string":
-                    new_cols[name] = pa.array(
-                        [str(v.as_py() if hasattr(v, "as_py") else v) for v in col],
-                        type=target_arrow_type,
-                    )
+                if target_type == "string_from_byte_string":
+                    values = []
+                    for v in col.to_pylist():
+                        if v is None:
+                            values.append(None)
+                            continue
+                        if isinstance(v, (bytes, bytearray)):
+                            s = repr(v)  
+                        else:
+                            s = str(v)
+                        values.append(s)
+                    new_cols[name] = pa.array(values, type=target_arrow_type)
+
+
                 else:
+                    # Normal casting for other types
                     new_cols[name] = col.cast(target_arrow_type)
+
             except Exception as e:
                 print(f"Failed to convert column '{name}' in {fname}: {e}")
                 new_cols[name] = col  # fallback
@@ -618,7 +630,6 @@ def _convert_datatype(*fnames, target_type="string", columns=""):
             with AtomicFile(fname) as tmp:
                 with pa.ipc.new_file(tmp, table2.schema.with_metadata(reader.schema.metadata)) as sink:
                     sink.write_table(table2)
-
 
 @command
 def _remove_columns(*fnames, remove: str = ""):
@@ -631,7 +642,6 @@ def _remove_columns(*fnames, remove: str = ""):
     """
     import pyarrow as pa
     import tqdm
-
     from .ws_sink import AtomicFile
 
     remove_cols = [r.strip() for r in remove.split(",") if r.strip()]
@@ -644,7 +654,7 @@ def _remove_columns(*fnames, remove: str = ""):
 
         cols_to_drop = [c for c in table.column_names if c in remove_cols]
         if not cols_to_drop:
-            continue
+            continue  
 
         table2 = table.drop(cols_to_drop)
 

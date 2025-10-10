@@ -3,7 +3,6 @@ from __future__ import annotations
 import io
 import typing
 from dataclasses import dataclass
-
 import pyarrow as pa
 
 
@@ -15,8 +14,7 @@ def to_filelike(src: typing.Any) -> typing.BinaryIO:
     if hasattr(src, "as_buffer"):  # PyArrow binary data
         return pa.BufferReader(src.as_buffer())
     return io.BytesIO(src)
-
-
+    
 def load_segment(src, start, end, sample_rate=None):
     """Efficiently loads an audio segment from `src` (see below) `tstart` to `tend` seconds while
     optionally resampling it to `sample_rate`.
