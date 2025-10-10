@@ -2,6 +2,7 @@ from dataclasses import dataclass, field
 
 from hume_wsds.ws_audio import AudioReader
 
+from typing import TYPE_CHECKING
 
 @dataclass(frozen=True, slots=True)
 class WSSample:
@@ -13,22 +14,12 @@ class WSSample:
     def get_audio(self, audio_columns=None):
         candidates = audio_columns or self.dataset._audio_file_keys
 
-        if "audio" in self:
-            r = self["audio"]
-        else:
-            r = self.get_one_of(*candidates)
+        r = self.get_one_of(*candidates)
 
         if not r:
             raise KeyError(f"No audio column (tried {candidates}) found among: {list(self.keys())}")
 
-        if isinstance(r, AudioReader):
-            return r
-        elif isinstance(r, (bytes, bytearray)):
-            return AudioReader(r)
-        elif hasattr(r, "as_buffer"):
-            return AudioReader(r.as_buffer().to_pybytes())
-        else:
-            raise TypeError(f"Unsupported audio type for {type(r)}")
+        return r
 
     def keys(self):
         return self.dataset.fields.keys()
