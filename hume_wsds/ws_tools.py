@@ -505,8 +505,7 @@ def extract_index_for_shard(dataset, shard, vad_column=None):
                 speech_duration = float((vad[:, -1] - vad[:, -2]).sum())  # tend - tstart
 
         try:
-            # FIXME: move this to ws_audio and add to autodecoders?
-            decoder = AudioDecoder(to_filelike(s.get_audio()))
+            decoder = s.get_audio()
             audio_duration = decoder.metadata.duration_seconds_from_header
         except Exception as e:
             print("Audio loading error:", e)
@@ -563,7 +562,6 @@ def _convert_datatype(*fnames, target_type="string", columns=""):
     """
     import pyarrow as pa
     import tqdm
-
     from .ws_sink import AtomicFile
 
     _type_map = {
@@ -621,7 +619,6 @@ def _convert_datatype(*fnames, target_type="string", columns=""):
                 with pa.ipc.new_file(tmp, table2.schema.with_metadata(reader.schema.metadata)) as sink:
                     sink.write_table(table2)
 
-
 @command
 def _remove_columns(*fnames, remove: str = ""):
     """
@@ -633,7 +630,6 @@ def _remove_columns(*fnames, remove: str = ""):
     """
     import pyarrow as pa
     import tqdm
-
     from .ws_sink import AtomicFile
 
     remove_cols = [r.strip() for r in remove.split(",") if r.strip()]
@@ -646,7 +642,7 @@ def _remove_columns(*fnames, remove: str = ""):
 
         cols_to_drop = [c for c in table.column_names if c in remove_cols]
         if not cols_to_drop:
-            continue
+            continue  
 
         table2 = table.drop(cols_to_drop)
 
