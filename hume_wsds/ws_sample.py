@@ -1,8 +1,9 @@
 from dataclasses import dataclass, field
-
-from hume_wsds.ws_audio import AudioReader
-
 from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from hume_wsds.ws_dataset import WSDataset
+
 
 @dataclass(frozen=True, slots=True)
 class WSSample:
@@ -22,13 +23,13 @@ class WSSample:
         return r
 
     def keys(self):
-        return self.dataset.fields.keys()
+        return self.dataset.fields.keys() | (self.overrides.keys() if self.overrides else set())
 
     def items(self):
-        yield from ((k, self[k]) for k in self.dataset.fields.keys())
+        yield from ((k, self[k]) for k in self.keys())
 
     def values(self):
-        yield from (v for k, v in self.items())
+        yield from (v for _, v in self.items())
 
     def __getitem__(self, field):
         if field in self.overrides:
