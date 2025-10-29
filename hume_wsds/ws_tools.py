@@ -215,7 +215,12 @@ def shard_from_webdataset(
                         try:
                             v = json.loads(v)
                             k = k[: -len(".json")]
-                            v = cast_types_for_storage(v, float_cast="float16", int_cast="int32")
+                            # For speaker_labels_continuous data, cast all numeric values to float16
+                            # to avoid PyArrow dtype mismatch between float16 and int32
+                            if out_dir == "speaker_labels_continuous":
+                                v = cast_types_for_storage(v, float_cast="float16", int_cast="float16")
+                            else:
+                                v = cast_types_for_storage(v, float_cast="float16", int_cast="int32")
                         except Exception:
                             pass
 
@@ -505,8 +510,14 @@ def extract_index_for_shard(dataset, shard, vad_column=None):
                 speech_duration = float((vad[:, -1] - vad[:, -2]).sum())  # tend - tstart
 
         try:
-            decoder = s.get_audio()
-            audio_duration = decoder.metadata.duration_seconds_from_header
+            # decoder = s.get_audio()
+            # audio_duration = decoder.metadata.duration_seconds_from_header
+            import torchaudio
+            import io
+            audio_reader = s.get_audio()
+            audio_data = audio_reader.unwrap()
+            info = torchaudio.info(io.BytesIO(audio_data))
+            audio_duration = info.num_frames / info.sample_rate
         except Exception as e:
             print("Audio loading error:", e)
             print("         for sample:", s)

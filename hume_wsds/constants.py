@@ -32,7 +32,10 @@ ShardMapping = {
     ("pquality_wmusic_scores_raw", "music_qual"): "music_qual",
     ("pquality_scores_continuous", "pq"): "pq",
     # tokens
-    ("dtok_v2_ml_50hz_32x16384_graphemes_key16k", "dtok_level_1_16k.npy"): "dtok_level_1_16k.npy",
+    (
+        "dtok_v2_ml_50hz_32x16384_graphemes_key16k", 
+        "dtok_level_1_16k.npy"
+    ): "dtok_v2_ml_50hz_32x16384_graphemes_key16k.dtok_level_1_16k.npy",
     (
         "dtok_v2_ml_50hz_32x16384_graphemes_key16k",
         "source_start_end_time.npy",

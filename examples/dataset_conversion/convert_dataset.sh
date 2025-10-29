@@ -9,6 +9,7 @@ to_bool() {
 
 CONVERT_AUDIO=$(to_bool "$(yq -r '.flags.convert_audio' "$CFG")")
 CONVERT_MVAD=$(to_bool "$(yq -r '.flags.convert_mvad' "$CFG")")
+CONVERT_ISOLATED_AUDIO=$(to_bool "$(yq -r '.flags.convert_isolated_audio' "$CFG")")
 CONVERT_ARTIFACTS=$(to_bool "$(yq -r '.flags.convert_artifacts' "$CFG")")
 CREATE_INDEX=$(to_bool "$(yq -r '.flags.create_index' "$CFG")")
 
@@ -32,7 +33,7 @@ MVAD_DIR="${SEGMENTATION_TYPE}_mvad"
 RUN_CLEANUP=$(to_bool "$(yq -r '.flags.run_cleanup // "false"' "$CFG")")
 CLEANUP_DRY_RUN=$(to_bool "$(yq -r '.flags.cleanup_dry_run // "true"' "$CFG")")
 
-mkdir -p "$OUTPUT_BASE/source/audio" "$OUTPUT_BASE/source/$MVAD_DIR" "$OUTPUT_BASE/$SEGMENTATION_TYPE"
+mkdir -p "$OUTPUT_BASE/source/audio" "$OUTPUT_BASE/source/$MVAD_DIR" "$OUTPUT_BASE/source/isolated_audio" "$OUTPUT_BASE/$SEGMENTATION_TYPE"
 
 RED='\033[0;31m'; GRN='\033[0;32m'; YLW='\033[1;33m'; BLU='\033[0;34m'; BOLD='\033[1m'; RST='\033[0m'
 
@@ -117,6 +118,34 @@ if [[ "$CONVERT_MVAD" == "true" ]]; then
   counts["source/$MVAD_DIR"]=$(ls -1 "$OUTPUT_BASE/source/$MVAD_DIR"/*.wsds 2>/dev/null | wc -l || echo 0)
 fi
 
+### isolated_audio ###
+if [[ "$CONVERT_ISOLATED_AUDIO" == "true" ]]; then
+  echo -e "${BLU}${BOLD}=== Converting isolated_audio ===${RST}"
+
+  mapfile -t ISOLATED_TARS < <(
+    for f in "$INPUT_BASE/source_separation"/*.tar "$INPUT_BASE/source_separation"/*.tar.gz; do
+      # Skip if the glob didn't expand (file doesn't exist)
+      [[ -f "$f" ]] || continue
+      base=$(basename "${f}")
+      base_noext="${base%.tar.gz}"
+      base_noext="${base_noext%.tar}"
+      out="$OUTPUT_BASE/source/isolated_audio/${base_noext}.wsds"
+      [[ -f "$out" ]] || echo "$f"
+    done
+  )
+
+  if (( ${#ISOLATED_TARS[@]} > 0 )); then
+    parallel --plus --tag --bar \
+      wsds shard_from_webdataset {} "$OUTPUT_BASE/source/isolated_audio/{/...}.wsds" \
+      "${COMMON_ARGS[@]}" \
+      ::: "${ISOLATED_TARS[@]}"
+  else
+    echo "No new isolated_audio tars to process."
+  fi
+
+  counts["source/isolated_audio"]=$(ls -1 "$OUTPUT_BASE/source/isolated_audio"/*.wsds 2>/dev/null | wc -l || echo 0)
+fi
+
 ### artifacts ###
 if [[ "$CONVERT_ARTIFACTS" == "true" ]]; then
   for sub in "${SUBDIRS[@]}"; do
@@ -151,15 +180,6 @@ if [[ "$CONVERT_ARTIFACTS" == "true" ]]; then
 
     counts["$SEGMENTATION_TYPE/$sub"]=$(ls -1 "$out_dir"/*.wsds 2>/dev/null | wc -l || echo 0)
   done
-
-  # Rename source_separation to isolated_audio if it exists
-  source_sep_dir="$OUTPUT_BASE/$SEGMENTATION_TYPE/source_separation"
-  isolated_audio_dir="$OUTPUT_BASE/$SEGMENTATION_TYPE/isolated_audio"
-  if [[ -d "$source_sep_dir" ]]; then
-    echo -e "${BLU}${BOLD}=== Renaming source_separation to isolated_audio ===${RST}"
-    mv "$source_sep_dir" "$isolated_audio_dir"
-    echo "Renamed: $source_sep_dir -> $isolated_audio_dir"
-  fi
 fi
 
 ### index creation ###
@@ -234,6 +254,7 @@ subdirs = sys.argv[4:]
 base_dir = f"{output_base}/source/audio"
 artifact_dirs = [f"{output_base}/{segmentation_type}/{sub}" for sub in subdirs]
 artifact_dirs.insert(0, f"{output_base}/source/{segmentation_type}_mvad")  # include mvad
+artifact_dirs.insert(1, f"{output_base}/source/isolated_audio")  # include isolated_audio
 
 sync_and_clean(base_dir, artifact_dirs, dry_run=dry_run)
 EOF

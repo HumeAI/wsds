@@ -10,6 +10,7 @@ from hume_wsds.utils import list_all_columns, list_all_shards, parse_key, scan_i
 from hume_wsds.ws_index import WSIndex
 from hume_wsds.ws_sample import WSSample
 from hume_wsds.ws_shard import WSShard
+import polars as pl
 
 
 class WSDataset:

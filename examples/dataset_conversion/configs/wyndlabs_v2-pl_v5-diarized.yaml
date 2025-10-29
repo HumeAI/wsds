@@ -1,0 +1,27 @@
+flags:
+  convert_audio: true
+  convert_mvad: true
+  convert_isolated_audio: true
+  convert_artifacts: true
+  run_cleanup: true
+  create_index: true
+  cleanup_dry_run: false
+  yt_data_specific: true
+  audio_requires_sorting: true
+  mixed_audio: true
+  mvad_dir_name: "vad_silero_diarized_continuous"
+
+paths:
+  audio_base: /mnt/weka/data2/yt_data/wyndlabs_v2/hq_anneal/polish/wyndlabs_v2/raw/audio/
+  input_base: /mnt/weka/data2/yt_data/wyndlabs_v2/hq_anneal/polish/wyndlabs_v2/processed-v5-pipeline-diarized-continuous-pl/
+  output_base: /mnt/weka/data-wsds/hq_annealed/wyndlabs_v2-pl/
+
+segmentation_type: v5-diarized_continuous
+
+subdirs:
+  - acoustic_scores_continuous
+  - transcription_wslang_continuous
+  - pquality_scores_continuous
+  - dtok_v2_ml_25hz_32x16384_graphemes_v2_encoder
+  - dtok_v2_ml_50hz_32x16384_graphemes_key16k
+  - speaker_labels_continuous

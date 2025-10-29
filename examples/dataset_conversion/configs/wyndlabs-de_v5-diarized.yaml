@@ -1,8 +1,8 @@
 flags:
-  convert_audio: false
-  convert_mvad: false
-  convert_isolated_audio: false
-  convert_artifacts: false
+  convert_audio: true
+  convert_mvad: true
+  convert_isolated_audio: true
+  convert_artifacts: true
   run_cleanup: true
   create_index: true
   cleanup_dry_run: false
@@ -12,9 +12,9 @@ flags:
   mvad_dir_name: "vad_silero_diarized_continuous"
 
 paths:
-  audio_base: /mnt/weka/data2/yt_data/hq_anneal/wyndlabs_1M/processed-v4-pipeline-vad_ws_continuous_ja/raw/audio/
-  input_base: /mnt/weka/data2/yt_data/hq_anneal/wyndlabs_1M/processed-v5-pipeline-diarized-continuous-ja/
-  output_base: /mnt/weka/data-wsds/hq_annealed/wyndlabs_1M-ja/
+  audio_base: /mnt/weka/data2/yt_data/hq_anneal/wyndlabs_1M/processed-v4-pipeline-vad_ws_continuous_de/raw/audio/
+  input_base: /mnt/weka/data2/yt_data/hq_anneal/wyndlabs_1M/processed-v5-pipeline-diarized-continuous-de/
+  output_base: /mnt/weka/data-wsds/hq_annealed/wyndlabs_1M-de/
 
 segmentation_type: v5-diarized_continuous
 
