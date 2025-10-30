@@ -208,6 +208,7 @@ class WSDataset:
                 subdir, field = self.fields[col]
                 assert col == field, "renamed fields are not supported in SQL queries yet"
                 subdirs.add(subdir)
+
             # If only __key__ is in the query, we need to load shards from at least one subdir
             if not subdirs and "__key__" in expr.meta.root_names():
                 subdirs.add(self.fields["__key__"][0])
@@ -255,6 +256,7 @@ class WSDataset:
 
     def sql_filter(self, query):
         """Given a boolean SQL expression, returns a list of keys for samples that match the query."""
+
         exprs, df = self._parse_sql_queries_polars(query)
         return df.filter(exprs[0]).select("__key__").filter(pl.col("__key__").is_not_null()).collect()["__key__"]
 
@@ -304,6 +306,7 @@ class WSDataset:
 
         Example:
             WSDS_DATASET_PATH=/path/to/datasets:/another/path/to/datasets"""
+
         path = Path(path_str)
         if path.is_absolute() or path.exists():
             return path

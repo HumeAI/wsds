@@ -7,6 +7,8 @@ to_bool() {
   [[ "${1:-}" == "true" ]] && echo "true" || echo "false"
 }
 
+# SELECTED_TARS=("ko_00499" "ko_00519" "ko_00520" "ko_00521" "ko_00522")
+
 CONVERT_AUDIO=$(to_bool "$(yq -r '.flags.convert_audio' "$CFG")")
 CONVERT_MVAD=$(to_bool "$(yq -r '.flags.convert_mvad' "$CFG")")
 CONVERT_ARTIFACTS=$(to_bool "$(yq -r '.flags.convert_artifacts' "$CFG")")
@@ -54,27 +56,39 @@ if [[ "$MIXED_AUDIO" == "true" ]]; then
 fi
 
 
+# SELECTED_TARS=("ko_00499" "ko_00519" "ko_00520" "ko_00521" "ko_00522")
 
 
 ### audio ###
 if [[ "$CONVERT_AUDIO" == "true" ]]; then
   echo -e "${BLU}${BOLD}=== Converting audio ===${RST}"
 
+  # Only process these tar prefixes
+
   mapfile -t AUDIO_TARS < <(
-    for f in "$AUDIO_BASE"/*.tar; do
-      base=$(basename "${f}")
-      out="$OUTPUT_BASE/source/audio/${base%.tar*}.wsds"
-      [[ -f "$out" ]] || echo "$f"
+    for f in "$AUDIO_BASE"/*.tar "$AUDIO_BASE"/*.tar.gz; do
+      [[ -f "$f" ]] || continue
+      base=$(basename "$f")
+      prefix="${base%%.*}"  # part before first period
+
+      # include only if it's in SELECTED_TARS
+      if [[ -z "${SELECTED_TARS[*]:-}" ]] || [[ " ${SELECTED_TARS[*]} " == *" $prefix "* ]]; then
+        out="$OUTPUT_BASE/source/audio/${prefix}.wsds"
+        [[ -f "$out" ]] || echo "$f"
+      fi
     done
   )
 
   if (( ${#AUDIO_TARS[@]} > 0 )); then
-    parallel --plus --tag --bar \
+    echo "Processing ${#AUDIO_TARS[@]} selected audio tar(s):"
+    printf ' - %s\n' "${AUDIO_TARS[@]}"
+
+    parallel -j 8 --plus --tag --bar \
       wsds shard_from_webdataset {} "$OUTPUT_BASE/source/audio/{/.}.wsds" \
       "${COMMON_ARGS[@]}" \
       ::: "${AUDIO_TARS[@]}"
   else
-    echo "No new audio tars to process."
+    echo "No matching or new audio tars to process."
   fi
 
   counts["source/audio"]=$(ls -1 "$OUTPUT_BASE/source/audio"/*.wsds 2>/dev/null | wc -l || echo 0)
@@ -94,57 +108,81 @@ fi
 if [[ "$CONVERT_MVAD" == "true" ]]; then
   echo -e "${BLU}${BOLD}=== Converting $MVAD_DIR ===${RST}"
 
+
   mapfile -t MVAD_TARS < <(
     for f in "$INPUT_BASE/$MVAD_DIR_NAME"/*.tar.gz; do
-        base=$(basename "${f}")
-        # remove trailing .tar.gz or .tar
+      [[ -f "$f" ]] || continue
+      base=$(basename "$f")
+      prefix="${base%%.*}"  # part before first dot
+
+      # include only if it's in SELECTED_TARS
+      if [[ -z "${SELECTED_TARS[*]:-}" ]] || [[ " ${SELECTED_TARS[*]} " == *" $prefix "* ]]; then
+        # remove trailing .tar.gz / .tar / .mvad
         base_noext="${base%.tar.gz}"
         base_noext="${base_noext%.tar}"
         base_noext="${base_noext%.mvad}"
         out="$OUTPUT_BASE/source/$MVAD_DIR/${base_noext}.wsds"
         [[ -f "$out" ]] || echo "$f"
+      fi
     done
   )
 
   if (( ${#MVAD_TARS[@]} > 0 )); then
-    parallel --plus --tag --bar \
+    echo "Processing ${#MVAD_TARS[@]} selected MVAD tar(s):"
+    printf ' - %s\n' "${MVAD_TARS[@]}"
+
+    parallel -j 8 --plus --tag --bar \
       wsds shard_from_webdataset {} "$OUTPUT_BASE/source/$MVAD_DIR/{/...}.wsds" \
       ::: "${MVAD_TARS[@]}"
   else
-    echo "No new mvad tars to process."
+    echo "No matching or new MVAD tars to process."
   fi
 
   counts["source/$MVAD_DIR"]=$(ls -1 "$OUTPUT_BASE/source/$MVAD_DIR"/*.wsds 2>/dev/null | wc -l || echo 0)
 fi
 
 ### artifacts ###
+### artifacts ###
 if [[ "$CONVERT_ARTIFACTS" == "true" ]]; then
+  # Only process these tar prefixes
+
   for sub in "${SUBDIRS[@]}"; do
     in_dir="$INPUT_BASE/$sub"
     out_dir="$OUTPUT_BASE/$SEGMENTATION_TYPE/$sub"
+
     if [[ ! -d "$in_dir" ]]; then
       echo -e "${YLW}Skip missing input dir:${RST} $in_dir"
       continue
     fi
+
     mkdir -p "$out_dir"
     echo -e "${BLU}${BOLD}=== Converting $sub ===${RST}"
 
     mapfile -t ART_TARS < <(
       for f in "$in_dir"/*.tar.gz; do
-        base=$(basename "${f}")
-        base_root="${base%%.*}"   # keep only before the first dot
-        out="$out_dir/${base_root}.wsds"
-        [[ -f "$out" ]] || echo "$f"
+        [[ -f "$f" ]] || continue
+        base=$(basename "$f")
+        prefix="${base%%.*}"  # prefix before first dot
+
+        # include only if it's in SELECTED_TARS
+      if [[ -z "${SELECTED_TARS[*]:-}" ]] || [[ " ${SELECTED_TARS[*]} " == *" $prefix "* ]]; then
+          base_root="${base%%.*}"
+          out="$out_dir/${base_root}.wsds"
+          [[ -f "$out" ]] || echo "$f"
+        fi
       done
     )
 
     if (( ${#ART_TARS[@]} > 0 )); then
-      parallel --plus --tag --bar \
+      echo "Processing ${#ART_TARS[@]} selected artifact tar(s) for $sub:"
+      printf ' - %s\n' "${ART_TARS[@]}"
+
+      parallel -j 8 --plus --tag --bar \
         wsds shard_from_webdataset {} "$out_dir/{/...}.wsds" \
         --compression no-compression \
         ::: "${ART_TARS[@]}"
     else
-      echo "No new artifact tars to process for $sub."
+      echo "No matching or new artifact tars to process for $sub."
     fi
 
     counts["$SEGMENTATION_TYPE/$sub"]=$(ls -1 "$out_dir"/*.wsds 2>/dev/null | wc -l || echo 0)
@@ -217,7 +255,8 @@ def sync_and_clean(base_dir, other_dirs, dry_run=True):
 # args from bash
 output_base = sys.argv[1]
 segmentation_type = sys.argv[2]
-dry_run = sys.argv[3].lower() == "true"
+dry_run = False
+# sys.argv[3].lower() == "true"
 subdirs = sys.argv[4:]
 
 base_dir = f"{output_base}/source/audio"
@@ -227,4 +266,3 @@ artifact_dirs.insert(0, f"{output_base}/source/{segmentation_type}_mvad")  # inc
 sync_and_clean(base_dir, artifact_dirs, dry_run=dry_run)
 EOF
 fi
-

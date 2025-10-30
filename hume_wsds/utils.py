@@ -56,14 +56,15 @@ def list_all_columns(ds_path, shard_name=None):
     return dict(sorted(cols.items()))
 
 
-def list_all_shards(dataset: str, verbose: bool = False):
+def list_all_shards(dataset: str, verbose: bool = False, print_missing: bool = False):
     shards = {}
     for subdir in Path(dataset).iterdir():
         if not subdir.is_dir():
             continue
         shards[subdir] = {file.name for file in subdir.iterdir() if file.suffix == ".wsds"}
         if not shards[subdir]:
-            print(f"error: empty folder {subdir}")
+            if verbose:
+                print(f"error: empty folder {subdir}")
             del shards[subdir]
 
     common_shards = {v for shard_values in shards.values() for v in shard_values}
@@ -78,9 +79,10 @@ def list_all_shards(dataset: str, verbose: bool = False):
         else:
             status = f"[MISSING {n_missing}]"
 
-        print(f"Path {subdir} has {len(files)}/{num_common} shards {status}")
+        if verbose:
+            print(f"Path {subdir} has {len(files)}/{num_common} shards {status}")
 
-        if n_missing > 0 and verbose:
+        if n_missing > 0 and print_missing:
             for m in sorted(missing):
                 print(f"    {m}")
             errors = True
@@ -92,7 +94,8 @@ def list_all_shards(dataset: str, verbose: bool = False):
     audio_dir = Path(dataset) / "../source/audio"
     if audio_dir.exists():
         audio_shards = [f for f in audio_dir.iterdir() if f.suffix == ".wsds"]
-        print(f"\nAudio dir {audio_dir.resolve()} has {len(audio_shards)} shards.")
+        if verbose:
+            print(f"\nAudio dir {audio_dir.resolve()} has {len(audio_shards)} shards.")
 
     return [x.replace(".wsds", "") for x in common_shards]
 
