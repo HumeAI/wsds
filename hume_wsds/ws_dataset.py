@@ -186,6 +186,13 @@ class WSDataset:
             return sys.maxsize
         return self.index.query("SELECT n_samples FROM shards WHERE shard = ?", shard_name).fetchone()[0]
 
+    def __len__(self):
+        """Returns the number of samples in the dataset.
+
+        @public"""
+        assert self.index is not None, "Length is only known for indexed datasets"
+        return self.index.n_samples
+
     #
     # SQL support, using Polars
     #
@@ -383,7 +390,7 @@ class WSDataset:
         if self.segmented:
             out += f"    Speech duration: {format_duration(self.index.speech_duration)}\n"
         out += f"   Number of shards: {self.index.n_shards}\n"
-        out += f"Number of samples: {format(self.index.n_samples, ',d').replace(',', ' ')}\n"
+        out += f"  Number of samples: {format(len(self), ',d').replace(',', ' ')}\n"
         return out
 
     def __repr__(self):
