@@ -51,7 +51,7 @@ class WSSample:
     def __contains__(self, field):
         return field in self.overrides or field in self.dataset.fields.keys()
 
-    def __repr_field__(self, field):
+    def __repr_field__(self, field, repr=repr):
         try:
             _, v = field, self[field]
             if hasattr(v, "shape"):
@@ -65,15 +65,54 @@ class WSSample:
                     v = repr(v)
             else:
                 v = repr(v)
-                if len(v) > 1000:
+                if isinstance(v, str) and len(v) > 1000:
                     v = v[:1000] + "…"
         except FileNotFoundError:
             _, v = field, f"<missing shard: {self.dataset.fields[field][1]}/{self.shard_name}>"
         return v
 
-    def __repr__(self):
-        r = f"WSSample({repr(self.dataset)}, shard_name={repr(self.shard_name)}, offset={repr(self.offset)}, fields={'{'}\n"
+    def __repr__(self, repr=repr):
+        r = [f"WSSample({self.dataset.__repr__()}, shard_name={repr(self.shard_name)}, offset={repr(self.offset)}, fields={'{'}"]
+        other = []
+        txt = []
+        arrays = []
         for k in self.keys():
-            r += f"  {k} = {self.__repr_field__(k)},\n"
-        r += "})\n"
-        return r
+            try:
+                v = self[k]
+            except FileNotFoundError:
+                arrays.append(k)
+            else:
+                if hasattr(v, "shape") and v.shape:
+                    arrays.append(k)
+                elif isinstance(v, (str, bytes)):
+                    txt.append(k)
+                else:
+                    other.append(k)
+        def print_keys(keys):
+            for k in keys:
+                r.append(f"  '{k}': {self.__repr_field__(k, repr=repr)},")
+
+        print_keys(other)
+        r.append("# Text:")
+        print_keys(txt)
+        r.append("# Arrays:")
+        print_keys(arrays)
+        r.append("})\n")
+        return '\n'.join(r)
+
+    def _display_(self):
+        import marimo
+        import random
+        special = {}
+        def marimo_repr(x):
+            if hasattr(x, "_display_"):
+                rand_str = ('__%030x__' % random.getrandbits(60))
+                special[rand_str] = x._display_().text
+                return rand_str
+            else:
+                return repr(x)
+        # print(repr(special))
+        html = marimo.md(f"```python\n{self.__repr__(repr=marimo_repr)}\n```").text
+        for k, v in special.items():
+            html = html.replace(k, v)
+        return marimo.Html(html)
