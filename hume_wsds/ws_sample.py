@@ -56,8 +56,11 @@ class WSSample:
             _, v = field, self[field]
             if hasattr(v, "shape"):
                 if v.shape:
-                    trunc_repr = " ".join(repr(v).split(" ")[:10])
-                    v = f"{trunc_repr}…, shape={repr(v.shape)}, dtype={v.dtype})"
+                    if v.size > 10:
+                        trunc_repr = " ".join(repr(v).split(" ")[:10])
+                        v = f"{trunc_repr}…], shape={repr(v.shape)}, dtype={v.dtype})"
+                    else:
+                        v = repr(v)
                 else:
                     v = repr(v)
             else:
