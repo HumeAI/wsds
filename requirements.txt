@@ -2,7 +2,7 @@ fastprogress
 fire
 numpy
 polars
-pyarrow
+pyarrow>=20
 torch
 torchaudio
 torchcodec
