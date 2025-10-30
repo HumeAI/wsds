@@ -396,6 +396,13 @@ class WSDataset:
     def __repr__(self):
         return f"WSDataset({repr(str(self.dataset_dir))}, segmented={self.segmented})"
 
+    def _display_(self):
+        import marimo
+        return marimo.vstack([
+            marimo.md(f"```python\n{self.__str__()}\n```\n### One sample:\n"),
+            self.random_sample()._display_(),
+        ])
+
 
 def format_duration(duration):
     """Formats a duration in seconds as hours (or kilo-hours)."""
