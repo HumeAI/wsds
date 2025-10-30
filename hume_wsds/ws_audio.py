@@ -57,6 +57,16 @@ class CompatAudioDecoder:
             (chunk,) = self.reader.pop_chunks()
         return samples
 
+def marimo_audio_mp3(samples):
+    from io import BytesIO
+    import marimo
+    from torchcodec.encoders import AudioEncoder
+
+    out = BytesIO()
+    AudioEncoder(samples, sample_rate=samples.sample_rate).to_file_like(out, "mp3")
+
+    return marimo.audio(out.getvalue())
+
 @dataclass(slots=True)
 class AudioReader:
     """A lazy seeking-capable audio reader for random-access to recordings stored in wsds shards."""
@@ -132,10 +142,8 @@ class WSAudio:
         return samples
 
     def _display_(self):
-        import marimo
-
         samples = self.load()
-        return marimo.audio(samples.numpy(), rate=samples.sample_rate)
+        return marimo_audio_mp3(samples)
 
     def _ipython_display_(self):
         from IPython.display import Audio, display
