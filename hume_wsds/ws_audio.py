@@ -121,6 +121,16 @@ class AudioReader:
         samples.sample_rate = sample_rate
         return samples
 
+    def _display_(self):
+        samples = self.read_segment()
+        return marimo_audio_mp3(samples)
+
+    def _ipython_display_(self):
+        from IPython.display import Audio, display
+
+        samples = self.read_full()
+        display(Audio(samples.numpy(), rate=samples.sample_rate))
+
 
 @dataclass(frozen=True, slots=True)
 class WSAudio:
