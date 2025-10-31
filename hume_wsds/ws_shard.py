@@ -3,12 +3,17 @@ import pickle
 from dataclasses import dataclass
 import re
 import typing
+from typing import TYPE_CHECKING
 
 import numpy as np
 import pyarrow as pa
 
 from hume_wsds.ws_audio import AudioReader, WSAudio
 from hume_wsds.ws_sample import WSSample
+
+if TYPE_CHECKING:
+    from hume_wsds.ws_dataset import WSDataset
+
 
 class WSShardInterface:
     shard_name: str
