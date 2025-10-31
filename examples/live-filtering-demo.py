@@ -103,7 +103,7 @@ def _(
             show_error(f"**KeyError**: Key `{_e.args[0]}` not available in this dataset.")
         except pl.exceptions.SQLInterfaceError as _e:
             show_error(f"**SQL Error**: {_e}")
-        
+
     mo.output.append(mo.md(f"Computed in {time.time() - _start_time:.1f}s"))
     return
 

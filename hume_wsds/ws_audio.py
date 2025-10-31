@@ -3,6 +3,7 @@ from __future__ import annotations
 import io
 import typing
 from dataclasses import dataclass
+
 import pyarrow as pa
 
 
@@ -14,7 +15,8 @@ def to_filelike(src: typing.Any) -> typing.BinaryIO:
     if hasattr(src, "as_buffer"):  # PyArrow binary data
         return pa.BufferReader(src.as_buffer())
     return io.BytesIO(src)
-    
+
+
 def load_segment(src, start, end, sample_rate=None):
     """Efficiently loads an audio segment from `src` (see below) `tstart` to `tend` seconds while
     optionally resampling it to `sample_rate`.
@@ -25,10 +27,12 @@ def load_segment(src, start, end, sample_rate=None):
     - a PyArrow binary buffer in memory"""
     return AudioReader(src).read_segment(start, end, sample_rate=sample_rate)
 
+
 class CompatAudioDecoder:
     def __init__(self, src, sample_rate):
         import torchaudio
-        if not hasattr(torchaudio, 'io'):
+
+        if not hasattr(torchaudio, "io"):
             raise ImportError("You need either torchaudio<2.9 or torchcodec installed")
         self.src = src
         self.sample_rate = sample_rate
@@ -42,8 +46,7 @@ class CompatAudioDecoder:
         # FIXME: check if we can get away with some better settings here (-1, maybe 10s + concatenate the chunks in a loop)
         self.reader.add_basic_audio_stream(frames_per_chunk=int(32 * sample_rate), sample_rate=sample_rate)
 
-
-    def get_samples_played_in_range(self, tstart = 0, tend = None):
+    def get_samples_played_in_range(self, tstart=0, tend=None):
         # rought seek
         self.reader.seek(max(0, tstart - 1), "key")
         self.reader.fill_buffer()
@@ -57,8 +60,10 @@ class CompatAudioDecoder:
             (chunk,) = self.reader.pop_chunks()
         return samples
 
+
 def marimo_audio_mp3(samples):
     from io import BytesIO
+
     import marimo
     from torchcodec.encoders import AudioEncoder
 
@@ -66,6 +71,7 @@ def marimo_audio_mp3(samples):
     AudioEncoder(samples, sample_rate=samples.sample_rate).to_file_like(out, "mp3")
 
     return marimo.audio(out.getvalue())
+
 
 @dataclass(slots=True)
 class AudioReader:
@@ -112,11 +118,13 @@ class AudioReader:
 
         return self.reader, self.sample_rate
 
-    def read_segment(self, start = 0, end = None, sample_rate=None):
+    def read_segment(self, start=0, end=None, sample_rate=None):
         reader, sample_rate = self.get_reader(sample_rate)
         seek_adjustment = self.skip_samples / sample_rate if start > 0 else 0
-        _samples = reader.get_samples_played_in_range(start + seek_adjustment, end + seek_adjustment if end is not None else None)
-        if hasattr(_samples, 'data'):
+        _samples = reader.get_samples_played_in_range(
+            start + seek_adjustment, end + seek_adjustment if end is not None else None
+        )
+        if hasattr(_samples, "data"):
             samples = _samples.data
         samples.sample_rate = sample_rate
         return samples

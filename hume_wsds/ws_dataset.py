@@ -55,7 +55,9 @@ class WSDataset:
             self.index = WSIndex(index_file)
             self.segmented = self.index.metadata.get("segmented", False)
 
-        self.fields = list_all_columns(self.dataset_dir, next(self.index.shards()) if self.index else None, include_in_progress=include_in_progress)
+        self.fields = list_all_columns(
+            self.dataset_dir, next(self.index.shards()) if self.index else None, include_in_progress=include_in_progress
+        )
         self.computed_columns = {}
 
         self._filter_dfs = None  # mapping of "filter name" -> polars dataframe representing the filter
@@ -398,10 +400,13 @@ class WSDataset:
 
     def _display_(self):
         import marimo
-        return marimo.vstack([
-            marimo.md(f"```python\n{self.__str__()}\n```\n### One sample:\n"),
-            self.random_sample()._display_(),
-        ])
+
+        return marimo.vstack(
+            [
+                marimo.md(f"```python\n{self.__str__()}\n```\n### One sample:\n"),
+                self.random_sample()._display_(),
+            ]
+        )
 
 
 def format_duration(duration):

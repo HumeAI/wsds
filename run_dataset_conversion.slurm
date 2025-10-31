@@ -50,19 +50,19 @@ echo ""
 # Process each config file
 for config_file in "${CONFIG_FILES[@]}"; do
     config_name=$(basename "$config_file" .yaml)
-    
+
     echo "=========================================="
     echo "Processing: $config_name"
     echo "Time: $(date)"
     echo "=========================================="
-    
+
     if [[ ! -f "$config_file" ]]; then
         echo "ERROR: Config file not found: $config_file"
         ((failure_count++))
         failed_configs+=("$config_name")
         continue
     fi
-    
+
     # Run conversion and capture exit code
     if bash "$CONVERT_SCRIPT" "$config_file"; then
         echo "✅ SUCCESS: $config_name"
@@ -72,7 +72,7 @@ for config_file in "${CONFIG_FILES[@]}"; do
         ((failure_count++))
         failed_configs+=("$config_name")
     fi
-    
+
     echo ""
 done
 

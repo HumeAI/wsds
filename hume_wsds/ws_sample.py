@@ -72,7 +72,9 @@ class WSSample:
         return v
 
     def __repr__(self, repr=repr):
-        r = [f"WSSample({self.dataset.__repr__()}, shard_name={repr(self.shard_name)}, offset={repr(self.offset)}, fields={'{'}"]
+        r = [
+            f"WSSample({self.dataset.__repr__()}, shard_name={repr(self.shard_name)}, offset={repr(self.offset)}, fields={'{'}"
+        ]
         other = []
         txt = []
         arrays = []
@@ -88,6 +90,7 @@ class WSSample:
                     txt.append(k)
                 else:
                     other.append(k)
+
         def print_keys(keys):
             for k in keys:
                 r.append(f"  '{k}': {self.__repr_field__(k, repr=repr)},")
@@ -98,19 +101,23 @@ class WSSample:
         r.append("# Arrays:")
         print_keys(arrays)
         r.append("})\n")
-        return '\n'.join(r)
+        return "\n".join(r)
 
     def _display_(self):
-        import marimo
         import random
+
+        import marimo
+
         special = {}
+
         def marimo_repr(x):
             if hasattr(x, "_display_"):
-                rand_str = ('__%030x__' % random.getrandbits(60))
+                rand_str = "__%030x__" % random.getrandbits(60)
                 special[rand_str] = x._display_().text
                 return rand_str
             else:
                 return repr(x)
+
         # print(repr(special))
         html = marimo.md(f"```python\n{self.__repr__(repr=marimo_repr)}\n```").text
         for k, v in special.items():

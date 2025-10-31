@@ -88,18 +88,21 @@ def inspect(input_path: str):
     elif input_path.endswith(".wsds"):
         inspect_shard(input_path)
 
+
 def print_head(shard: str, n: int = 5):
     reader = pa.ipc.open_file(shard)
     batch = reader.get_batch(0)
     table = batch.to_pandas()
     print(table.head(n))
 
+
 @command
 def head_shard(input_path: str, n: int = 5):
     """Displays metadata and schema of a wsds dataset or shard."""
     import warnings
-    warnings.filterwarnings('ignore', category=RuntimeWarning, module='pandas.io.formats.format')
-    
+
+    warnings.filterwarnings("ignore", category=RuntimeWarning, module="pandas.io.formats.format")
+
     if Path(input_path).is_dir():
         for shard in Path(input_path).glob("*.wsds"):
             print(f"Inspecting first shard: {shard}")
@@ -903,7 +906,13 @@ def _remove_columns(*fnames, remove: str = ""):
 @command
 class check_status:
     @staticmethod
-    def all_datasets_progress(dataset: Path = None, test_yaml: Path = None, columns: list[str] = None, show_mvad: bool = False, refresh_interval: float = 2.0):
+    def all_datasets_progress(
+        dataset: Path = None,
+        test_yaml: Path = None,
+        columns: list[str] = None,
+        show_mvad: bool = False,
+        refresh_interval: float = 2.0,
+    ):
         """Display a live-updating table of shard completion across datasets."""
         import time
 
@@ -948,15 +957,19 @@ class check_status:
                         completed = len(list(shard_dir.glob("*.wsds")))
                         if completed > 0:
                             if dataset_dir.name not in dataset_info:
-                                dataset_info[dataset_dir.name] = {"type": version_dir.name, "total": total_shards, "shards": {}}
+                                dataset_info[dataset_dir.name] = {
+                                    "type": version_dir.name,
+                                    "total": total_shards,
+                                    "shards": {},
+                                }
                             dataset_info[dataset_dir.name]["shards"][shard_dir.name] = completed
-                
+
             if show_mvad:
                 for dataset_name in dataset_info.keys():
                     source_dir = base_path / dataset_name / "source"
                     num_mvad_shards = len(list(source_dir.glob("v*/*.wsds")))
                     dataset_info[dataset_name]["shards"]["mvad"] = num_mvad_shards
-            
+
             # Build table
             table = Table(title="Dataset Shard Validation Status")
             table.add_column("Dataset", style="cyan", no_wrap=True)
