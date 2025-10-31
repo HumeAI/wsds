@@ -122,12 +122,12 @@ def _(N, ds, mo):
     def show_sample(_x):
         mo.output.append(mo.md(f"""
     &nbsp;
-    /// admonition | {_x['__key__']}
-    `full_transcript:` {_x.get_one_of('transcription_wslang_raw.txt', 'txt', 'transcription_wslang_continuous.txt')}  
-    `pq`: {_x.get('pq')}  
-    `language`: {_x.get('language_whisper.txt')}  
+    /// admonition | {_x['__key__']}<br />
+    `full_transcript:` {_x.get_one_of('transcription_wslang_raw.txt', 'txt', 'transcription_wslang_continuous.txt')}<br />
+    `pq`: {_x.get('pq')}<br />
+    `language`: {_x.get('language_whisper.txt')}<br />
     {mo.audio(_x['audio'].load(24000).numpy(), rate=24000)
-               if _x['audio'].tend - _x['audio'].tstart > 0 else _EMPTY}  
+               if _x['audio'].tend - _x['audio'].tstart > 0 else _EMPTY}<br />
     """))
 
     def show_file_not_found_error(_e):
