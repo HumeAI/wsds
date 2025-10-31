@@ -45,7 +45,7 @@ class WSDataset:
     # FIXME: this should be overridable with metadata in index.sqlite3
     _audio_file_keys = ["flac", "mp3", "sox", "wav", "m4a", "ogg", "wma", "opus", "audio"]
 
-    def __init__(self, dataset_dir: str):
+    def __init__(self, dataset_dir: str, include_in_progress: bool = True):
         self.dataset_dir = self._resolve_path(dataset_dir)
 
         self.index = None
@@ -55,7 +55,7 @@ class WSDataset:
             self.index = WSIndex(index_file)
             self.segmented = self.index.metadata.get("segmented", False)
 
-        self.fields = list_all_columns(self.dataset_dir, next(self.index.shards()) if self.index else None)
+        self.fields = list_all_columns(self.dataset_dir, next(self.index.shards()) if self.index else None, include_in_progress=include_in_progress)
         self.computed_columns = {}
 
         self._filter_dfs = None  # mapping of "filter name" -> polars dataframe representing the filter

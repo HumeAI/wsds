@@ -16,7 +16,7 @@ def find_first_shard(path):
     return next(Path(path).iterdir(), None)
 
 
-def list_all_columns(ds_path, shard_name=None):
+def list_all_columns(ds_path, shard_name=None, include_in_progress=True):
     """Given a dataset path, return a list of all columns.
 
     If you also give a shard name it greatly speeds it up
@@ -31,13 +31,18 @@ def list_all_columns(ds_path, shard_name=None):
             continue
         if not p.is_dir():
             continue
-        if shard_name is None:
+        is_in_progress = p.suffix == ".in-progress"
+        if is_in_progress and not include_in_progress:
+            continue
+        if shard_name is None or is_in_progress:
             fname = find_first_shard(p)
         else:
             fname = (p / shard_name).with_suffix(".wsds")
         if fname and fname.exists():
             for col in get_columns(fname):
-                if col == "__key__":
+                if col == "__key__" and not is_in_progress:
+                    # We need a subdir that has all shards but we don't wanna list all of them (that's expensive)
+                    # so instead we rely on a subdir naming convention (the .in-progress suffix)
                     key_col.append((fname.stat().st_size, p.name, col))
                     continue
                 # seems like we should fix this during the original conversion
