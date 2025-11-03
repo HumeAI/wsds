@@ -87,7 +87,7 @@ class WSDSIndexWriter:
 
 
 class WSIndex:
-    def __init__(self, fname):
+    def __init__(self, fname: str):
         self.fname = fname
         if not Path(fname).exists():
             raise ValueError(f"WSIndex not found: {fname}")

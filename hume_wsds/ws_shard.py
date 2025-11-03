@@ -52,18 +52,21 @@ class WSShard(WSShardInterface):
         if j >= len(self._data):
             raise IndexError(f"{offset} is out of range for shard {self.fname}")
         data = self._data[column][j]
-        # FIXME: implement proper encoders and decoders
-        if column.endswith("npy"):
-            return np.load(io.BytesIO(data.as_buffer()))
-        elif column.endswith("pyd"):
-            return pickle.load(io.BytesIO(data.as_buffer()))
-        elif column.endswith("txt"):
-            return data.as_buffer().to_pybytes().decode("utf-8")
-        elif column in self.dataset._audio_file_keys:
-            return AudioReader(data)
-        else:
-            # FIXME: we need to handle audio decoding here to avoid copying the entire audio buffer
-            return data.as_py(maps_as_pydicts="strict")
+        try:
+            # FIXME: implement proper encoders and decoders
+            if column.endswith("npy"):
+                return np.load(io.BytesIO(data.as_buffer()))
+            elif column.endswith("pyd"):
+                return pickle.load(io.BytesIO(data.as_buffer()))
+            elif column.endswith("txt"):
+                return data.as_buffer().to_pybytes().decode("utf-8")
+            elif column in self.dataset._audio_file_keys:
+                return AudioReader(data)
+            else:
+                # FIXME: we need to handle audio decoding here to avoid copying the entire audio buffer
+                return data.as_py(maps_as_pydicts="strict")
+        except Exception as e:
+            raise ValueError(f"Failed to decode column {column} in shard {self.fname} (offset {offset}): {e}")
 
     def __repr__(self):
         r = f"WSShard({repr(self.fname)})"

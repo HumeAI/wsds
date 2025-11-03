@@ -56,6 +56,11 @@ def inspect_dataset(input_path, verbose=True):
             print(x)
             break
 
+def inspect_shard(input_path):
+    reader = pa.RecordBatchFileReader(pa.memory_map(str(input_path)))
+    print(f"Batches: {reader.num_record_batches}")
+    print(f"Rows: {int(reader.schema.metadata[b'batch_size']) * reader.num_record_batches}")
+    print(f"Schema:\n{reader.schema}")
 
 @command
 def inspect(input_path: str):
@@ -70,11 +75,15 @@ def inspect(input_path: str):
                 print()
             for file in segmentations:
                 inspect_dataset(str(file), verbose=False)
-    elif input_path.endswith(".wsds"):
-        reader = pa.RecordBatchFileReader(pa.memory_map(input_path))
-        print(f"Batches: {reader.num_record_batches}")
-        print(f"Rows: {int(reader.schema.metadata[b'batch_size']) * reader.num_record_batches}")
-        print(f"Schema:\n{reader.schema}")
+            if not segmentations:
+                for shard in Path(input_path).glob('*.wsds'):
+                    print(f"Inspecting first shard: {shard}")
+                    inspect_shard(shard)
+                    break
+                else:
+                    print("Nothing to inspect here...")
+    elif input_path.endswith('.wsds'):
+        inspect_shard(input_path)
 
 
 @command
@@ -182,8 +191,6 @@ def shard_from_webdataset(
                                 new_s[meta] = tar.extractfile(fields[meta]).read().decode("utf-8", errors="ignore")
                             except Exception:
                                 new_s[meta] = ""
-                        else:
-                            new_s[meta] = ""
 
                     vtts = {}
                     for k, v in fields.items():
@@ -537,139 +544,36 @@ def extract_index_for_shard(dataset, shard, vad_column=None):
 
 
 @command
-def _sort_columns(*fnames):
-    import tqdm
+def _sort_columns(*fnames, add_prefix : str | None = None, dry_run : bool = False):
+    from tqdm import tqdm
 
     from .ws_sink import AtomicFile
 
     _renames = {
-        "dtok_v2_ml_50hz_32x16384_graphemes_key16k.dtok_level_1_16k.txt": "dtok_level_1_16k.npy",
-        "source_start_end_time.txt": "dtok_v2_ml_50hz_32x16384_graphemes_key16k.source_start_end_time.npy",
+        "dtok_level_1_16k.npy": "dtok_v2_ml_50hz_32x16384_graphemes_key16k.dtok_level_1_16k.txt",
+        "source_start_end_time.npy": "dtok_v2_ml_50hz_32x16384_graphemes_key16k.source_start_end_time.npy",
     }
 
-    for fname in tqdm.tqdm(fnames):
+    if dry_run: fnames = fnames[:1]
+    for fname in tqdm(fnames):
         reader = pa.ipc.open_file(fname)
         table = reader.read_all()
         table2 = table.select(sorted(table.column_names))
-        table2 = table2.rename_columns([k if k not in _renames else _renames[k] for k in table2.column_names])
-        # print(table.schema)
-        if table.schema != table2.schema:
+        if add_prefix:
+            table2 = table2.rename_columns([f"{add_prefix}{k}" if k != '__key__' else '__key__' for k in table2.column_names])
+        else:
+            table2 = table2.rename_columns([k if k not in _renames else _renames[k] for k in table2.column_names])
+        if dry_run:
+            from .ws_sink import indented
+            if table.schema != table2.schema:
+                new = "NEW: "
+                tqdm.write(indented("OLD: ", table.schema))
+            else:
+                new = "NO CHANGE: "
+            tqdm.write(indented(new, table2.schema))
+            # return
+        else:
+            if table.schema == table2.schema: return
             with AtomicFile(fname) as fname:
                 with pa.ipc.new_file(fname, table2.schema.with_metadata(reader.schema.metadata)) as sink:
-                    sink.write_table(table2)
-        # else:
-        #     print(f"No changes needed: {fname}")
-
-
-@command
-def _convert_datatype(*fnames, target_type="string", columns=""):
-    """
-    Convert all or specific columns in the given .wsds files to a specific Arrow datatype
-    (e.g., string for transcription).
-
-    Example:
-        wsds _convert_datatype /path/to/shards/*.wsds --target_type string
-        wsds _convert_datatype /path/to/shards/*.wsds --target_type string --columns transcription.txt,other_field
-    """
-    import ast
-    import pyarrow as pa
-    import tqdm
-    from .ws_sink import AtomicFile
-
-    _type_map = {
-        "string": pa.utf8(),
-        "binary": pa.binary(),
-        "float32": pa.float32(),
-        "float16": pa.float16(),
-        "int32": pa.int32(),
-        "int64": pa.int64(),
-    }
-
-    if target_type not in _type_map and target_type != "string_from_byte_string":
-        raise ValueError(f"Unsupported target_type: {target_type}. Choose from {list(_type_map)}")
-
-    target_arrow_type = pa.utf8() if target_type == "string_from_byte_string" else _type_map[target_type]
-
-    # Parse optional column list
-    selected_cols = [c.strip() for c in columns.split(",") if c.strip()] if columns else None
-
-    for fname in tqdm.tqdm(fnames, desc=f"Converting to {target_type}"):
-        reader = pa.ipc.open_file(fname)
-        table = reader.read_all()
-        new_cols = {}
-
-        for name in table.column_names:
-            col = table[name]
-            col_type = col.type
-
-            # Skip columns not in selection (if provided)
-            if selected_cols and name not in selected_cols:
-                new_cols[name] = col
-                continue
-
-            # Skip if already of desired type
-            if col_type == target_arrow_type:
-                new_cols[name] = col
-                continue
-
-            try:
-                if target_type == "string_from_byte_string":
-                    values = []
-                    for v in col.to_pylist():
-                        if v is None:
-                            values.append(None)
-                            continue
-                        if isinstance(v, (bytes, bytearray)):
-                            s = repr(v)  
-                        else:
-                            s = str(v)
-                        values.append(s)
-                    new_cols[name] = pa.array(values, type=target_arrow_type)
-
-
-                else:
-                    # Normal casting for other types
-                    new_cols[name] = col.cast(target_arrow_type)
-
-            except Exception as e:
-                print(f"Failed to convert column '{name}' in {fname}: {e}")
-                new_cols[name] = col  # fallback
-
-        table2 = pa.table(new_cols)
-
-        if table.schema != table2.schema:
-            with AtomicFile(fname) as tmp:
-                with pa.ipc.new_file(tmp, table2.schema.with_metadata(reader.schema.metadata)) as sink:
-                    sink.write_table(table2)
-
-@command
-def _remove_columns(*fnames, remove: str = ""):
-    """
-    Remove one or more columns from .wsds shard files if they exist.
-
-    Example:
-        wsds _remove_columns /path/to/shards/*.wsds --remove transcription_parakeet-tdt-0-6b-v3_raw.txt
-        wsds _remove_columns /path/to/shards/*.wsds --remove col1,col2,col3
-    """
-    import pyarrow as pa
-    import tqdm
-    from .ws_sink import AtomicFile
-
-    remove_cols = [r.strip() for r in remove.split(",") if r.strip()]
-    if not remove_cols:
-        raise ValueError("You must specify at least one column to remove via --remove")
-
-    for fname in tqdm.tqdm(fnames, desc=f"Removing {remove_cols}"):
-        reader = pa.ipc.open_file(fname)
-        table = reader.read_all()
-
-        cols_to_drop = [c for c in table.column_names if c in remove_cols]
-        if not cols_to_drop:
-            continue  
-
-        table2 = table.drop(cols_to_drop)
-
-        if table.schema != table2.schema:
-            with AtomicFile(fname) as tmp:
-                with pa.ipc.new_file(tmp, table2.schema.with_metadata(reader.schema.metadata)) as sink:
                     sink.write_table(table2)
