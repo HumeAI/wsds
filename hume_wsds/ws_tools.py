@@ -218,7 +218,7 @@ def shard_from_webdataset(
 
                 # process fields
                 for k, v in s.items():
-                    if k.endswith(".json"):
+                    if k.endswith(".json") and k != "diarization":
                         try:
                             v = json.loads(v)
                             k = k[: -len(".json")]
@@ -230,6 +230,54 @@ def shard_from_webdataset(
                                 v = cast_types_for_storage(v, float_cast="float16", int_cast="int32")
                         except Exception:
                             pass
+
+                    if k == "diarization" or k.endswith(".diarization"):
+                        # Handle diarization JSON format: [[start, end, "SPEAKER_00"], ...]
+                        def to_npy_bytes(array):
+                            buf = io.BytesIO()
+                            np.save(buf, array, allow_pickle=False)
+                            return buf.getvalue()
+
+                        vad_array, pause_dur, pause_energy, speakers = [], [], [], []
+                        
+                        # Handle None or non-iterable values
+                        if v is None or not isinstance(v, (list, tuple)):
+                            print(f"[Warning] diarization is not a list/tuple, got {type(v)}")
+                        else:
+                            for item in v:
+                                try:
+                                    # Handle 3-element format: [start, end, speaker]
+                                    if len(item) == 3:
+                                        start, end, spk = item
+                                        dur = 0.0  # Not available in 3-element format
+                                        energy = 0.0  # Not available in 3-element format
+                                    elif len(item) == 5:
+                                        # Also support 5-element format for backward compatibility
+                                        start, end, spk, dur, energy = item
+                                    else:
+                                        print(f"[Warning] Unexpected diarization entry length: {len(item)}, expected 3 or 5")
+                                        continue
+                                    
+                                    vad_array.append([start, end])
+                                    pause_dur.append(dur)
+                                    pause_energy.append(energy)
+                                    speakers.append(spk)
+                                except Exception as e:
+                                    print(f"[Warning] Skipping diarization entry: {e}")
+                                    continue
+
+                        # Always create the fields, even if empty, to maintain schema consistency
+                        new_s["diarized.vad.npy"] = to_npy_bytes(np.array(vad_array, dtype=np.float32))
+                        new_s["diarized.pause_dur.npy"] = to_npy_bytes(np.array(pause_dur, dtype=np.float32))
+                        new_s["diarized.pause_energy.npy"] = to_npy_bytes(np.array(pause_energy, dtype=np.float32))
+                        # Store speakers as unicode string array to avoid PyArrow conversion issues
+                        if speakers:
+                            max_len = max(len(str(s)) for s in speakers)
+                            speaker_array = np.array(speakers, dtype=f'U{max_len}')
+                        else:
+                            speaker_array = np.array([], dtype='U1')
+                        new_s["diarized.speaker.npy"] = to_npy_bytes(speaker_array)
+                        continue
 
                     if k == "brouhaha_mean":
                         if isinstance(v, dict):

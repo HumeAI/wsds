@@ -1,9 +1,9 @@
 flags:
-  convert_audio: true
-  convert_mvad: true
-  convert_isolated_audio: true
-  convert_artifacts: true
-  run_cleanup: true
+  convert_audio: false
+  convert_mvad: false
+  convert_isolated_audio: false
+  convert_artifacts: false
+  run_cleanup: false
   create_index: true
   cleanup_dry_run: false
   yt_data_specific: true
@@ -24,3 +24,4 @@ subdirs:
   - pquality_scores_continuous
   - dtok_v2_ml_25hz_32x16384_graphemes_v2_encoder
   - dtok_v2_ml_50hz_32x16384_graphemes_key16k
+  - speaker_labels_continuous

@@ -10,6 +10,7 @@ to_bool() {
 CONVERT_AUDIO=$(to_bool "$(yq -r '.flags.convert_audio' "$CFG")")
 CONVERT_MVAD=$(to_bool "$(yq -r '.flags.convert_mvad' "$CFG")")
 CONVERT_ISOLATED_AUDIO=$(to_bool "$(yq -r '.flags.convert_isolated_audio' "$CFG")")
+CONVERT_DIARIZATION=$(to_bool "$(yq -r '.flags.convert_diarization' "$CFG")")
 CONVERT_ARTIFACTS=$(to_bool "$(yq -r '.flags.convert_artifacts' "$CFG")")
 CREATE_INDEX=$(to_bool "$(yq -r '.flags.create_index' "$CFG")")
 
@@ -144,6 +145,34 @@ if [[ "$CONVERT_ISOLATED_AUDIO" == "true" ]]; then
   fi
 
   counts["source/isolated_audio"]=$(ls -1 "$OUTPUT_BASE/source/isolated_audio"/*.wsds 2>/dev/null | wc -l || echo 0)
+fi
+
+### diarization ###
+if [[ "$CONVERT_DIARIZATION" == "true" ]]; then
+  echo -e "${BLU}${BOLD}=== Converting diarization ===${RST}"
+
+  mapfile -t DIARIZATION_TARS < <(
+    for f in "$INPUT_BASE/diarization"/*.tar "$INPUT_BASE/diarization"/*.tar.gz; do
+      # Skip if the glob didn't expand (file doesn't exist)
+      [[ -f "$f" ]] || continue
+      base=$(basename "${f}")
+      base_noext="${base%.tar.gz}"
+      base_noext="${base_noext%.tar}"
+      out="$OUTPUT_BASE/source/diarization/${base_noext}.wsds"
+      [[ -f "$out" ]] || echo "$f"
+    done
+  )
+
+  if (( ${#DIARIZATION_TARS[@]} > 0 )); then
+    parallel --plus --tag --bar \
+      wsds shard_from_webdataset {} "$OUTPUT_BASE/source/diarization/{/...}.wsds" \
+      "${COMMON_ARGS[@]}" \
+      ::: "${DIARIZATION_TARS[@]}"
+  else
+    echo "No new diarization tars to process."
+  fi
+
+  counts["source/diarization"]=$(ls -1 "$OUTPUT_BASE/source/diarization"/*.wsds 2>/dev/null | wc -l || echo 0)
 fi
 
 ### artifacts ###

@@ -24,3 +24,4 @@ subdirs:
   - pquality_scores_continuous
   - dtok_v2_ml_25hz_32x16384_graphemes_v2_encoder
   - dtok_v2_ml_50hz_32x16384_graphemes_key16k
+  - speaker_labels_continuous

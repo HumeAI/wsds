@@ -1,7 +1,8 @@
 flags:
-  convert_audio: false
-  convert_mvad: false
-  convert_isolated_audio: false
+  convert_audio: true
+  convert_mvad: true
+  convert_isolated_audio: true
+  convert_diarization: true
   convert_artifacts: true
   run_cleanup: true
   create_index: true
