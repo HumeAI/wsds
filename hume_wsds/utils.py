@@ -13,7 +13,10 @@ def get_columns(fname):
 
 
 def find_first_shard(path):
-    return next(Path(path).iterdir(), None)
+    for file in Path(path).iterdir():
+        if file.suffix == ".wsds":
+            return file
+    return None
 
 
 def list_all_columns(ds_path, shard_name=None, include_in_progress=True):
