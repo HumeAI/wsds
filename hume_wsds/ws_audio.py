@@ -137,6 +137,11 @@ class AudioReader:
 
         return self.reader, self.sample_rate
 
+    @property
+    def metadata(self):
+        reader, sample_rate = self.get_reader()
+        return reader.metadata
+
     def read_segment(self, start=0, end=None, sample_rate=None):
         reader, sample_rate = self.get_reader(sample_rate)
         seek_adjustment = self.skip_samples / sample_rate if start > 0 else 0
@@ -177,6 +182,10 @@ class WSAudio:
             samples = torch.nn.functional.pad(samples, (0, padding))
             samples.sample_rate = sample_rate
         return samples
+
+    @property
+    def metadata(self):
+        return self.audio_reader.metadata
 
     def _display_(self):
         samples = self.load()
