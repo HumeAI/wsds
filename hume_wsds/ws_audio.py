@@ -35,12 +35,13 @@ class CompatAudioDecoder:
         if not hasattr(torchaudio, "io"):
             raise ImportError("You need either torchaudio<2.9 or torchcodec installed")
         self.src = src
-        self.sample_rate = sample_rate
         self.reader = torchaudio.io.StreamReader(src=to_filelike(self.src))
         self.metadata = self.reader.get_src_stream_info(0)
 
         if sample_rate is None:
             sample_rate = self.metadata.sample_rate
+
+        self.sample_rate = sample_rate
 
         # fetch 32 seconds because we likely need 30s at maximum but the seeking may be imprecise (and we seek 1s early)
         # FIXME: check if we can get away with some better settings here (-1, maybe 10s + concatenate the chunks in a loop)
@@ -49,12 +50,30 @@ class CompatAudioDecoder:
     def get_samples_played_in_range(self, tstart=0, tend=None):
         # rought seek
         self.reader.seek(max(0, tstart - 1), "key")
+
+        if tend == None:
+            import torch
+            chunks = []
+            more_data = True
+            while more_data:
+                if self.reader.fill_buffer() == 1:
+                    more_data = False
+                (chunk,) = self.reader.pop_chunks()
+                if chunk is None:
+                    break
+                chunks.append(chunk)
+            prefix = int((tstart - chunks[0].pts) * self.sample_rate)
+            return torch.cat(chunks)[prefix:].mT
+
         self.reader.fill_buffer()
         (chunk,) = self.reader.pop_chunks()
         # tight crop (seems accurate down to 1 sample in my tests)
         prefix = int((tstart - chunk.pts) * self.sample_rate)
         assert prefix >= 0
-        samples = chunk[prefix : prefix + int((tend - tstart) * self.sample_rate)].mT
+        if tend:
+            samples = chunk[prefix : prefix + int((tend - tstart) * self.sample_rate)].mT
+        else:
+            samples = chunk[prefix:].mT
         # clear out any remaining data
         while chunk is not None:
             (chunk,) = self.reader.pop_chunks()
