@@ -172,15 +172,19 @@ class WSDataset:
             ).fetchone()[0]
 
         while i < max_N:
-            overrides = dict()
+            sample = WSSample(self, shard_name, i)
+            if self.index is None:
+                # if we don't have an index we have to try loading
+                # the sample to check if it exists
+                try:
+                    sample['__key__']
+                except IndexError:
+                    return
             if self._filter_dfs is not None:
-                overrides.update(
-                    {
-                        filter_name: filter_df.row(shard_global_offset + i)[0]
-                        for filter_name, filter_df in self._filter_dfs.items()
-                    }
-                )
-            yield WSSample(self, shard_name, i, overrides=overrides)
+                # TODO: treat this as just another (unsharded) column
+                for filter_name, filter_df in self._filter_dfs.items():
+                    sample[filter_name] = filter_df.row(shard_global_offset + i)[0]
+            yield sample
             i += 1
 
     def _shard_n_samples(self, shard_name: str) -> int:
@@ -388,6 +392,8 @@ class WSDataset:
     def __str__(self):
         out = ""
         out += repr(self) + "\n"
+        if self.index is None:
+            return out
         out += f"     Audio duration: {format_duration(self.index.audio_duration)}\n"
         if self.segmented:
             out += f"    Speech duration: {format_duration(self.index.speech_duration)}\n"
@@ -396,10 +402,15 @@ class WSDataset:
         return out
 
     def __repr__(self):
+        if self.index is None:
+            return f"WSDataset({repr(str(self.dataset_dir))}, segmented={self.segmented}, index=None)"
         return f"WSDataset({repr(str(self.dataset_dir))}, segmented={self.segmented})"
 
     def _display_(self):
         import marimo
+
+        if self.index is None:
+            return marimo.md(f"```python\n{self.__str__()}\n```\n")
 
         return marimo.vstack(
             [
