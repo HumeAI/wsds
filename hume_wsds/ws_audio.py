@@ -115,10 +115,11 @@ class AudioReader:
 
     # we materialize the reader on first use
     def get_reader(self, sample_rate=None):
+        sample_rate_switch = False
         if self.sample_rate is not None:
-            assert not sample_rate or sample_rate == self.sample_rate, "please use a consistent sample rate"
+            sample_rate_switch = self.sample_rate != sample_rate
 
-        if self.reader is None:
+        if self.reader is None or sample_rate_switch:
             try:
                 from torchcodec.decoders import AudioDecoder
             except ImportError:
