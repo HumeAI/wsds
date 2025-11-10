@@ -154,6 +154,11 @@ class AudioReader:
         samples.sample_rate = sample_rate
         return samples
 
+    def load(self, sample_rate=None):
+        samples = self.read_segment(sample_rate=sample_rate)
+        sample_rate = samples.sample_rate
+        return samples
+
     def _display_(self):
         samples = self.read_segment()
         return marimo_audio_mp3(samples)
