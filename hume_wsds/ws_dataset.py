@@ -192,6 +192,11 @@ class WSDataset:
             return sys.maxsize
         return self.index.query("SELECT n_samples FROM shards WHERE shard = ?", shard_name).fetchone()[0]
 
+    def iter_shard(self, shard_name):
+        if shard_name.endswith('.wsds'):
+            shard_name = shard_name[:-5]
+        return self.sequential_from(WSSample(self, shard_name, 0))
+
     def __len__(self):
         """Returns the number of samples in the dataset.
 
