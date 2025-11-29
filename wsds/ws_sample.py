@@ -1,6 +1,8 @@
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
+from .utils import WSShardMissingError
+
 if TYPE_CHECKING:
     from .ws_dataset import WSDataset
 
@@ -67,8 +69,8 @@ class WSSample:
                 v = repr(v)
                 if isinstance(v, str) and len(v) > 1000:
                     v = v[:1000] + "…"
-        except FileNotFoundError:
-            _, v = field, f"<missing shard: {self.dataset.fields[field][1]}/{self.shard_name}>"
+        except WSShardMissingError as err:
+            _, v = field, f"<missing shard: {err.fname}>"
         return v
 
     def __repr__(self, repr=repr):
@@ -81,7 +83,7 @@ class WSSample:
         for k in self.keys():
             try:
                 v = self[k]
-            except FileNotFoundError:
+            except WSShardMissingError as err:
                 arrays.append(k)
             else:
                 if hasattr(v, "shape") and v.shape:

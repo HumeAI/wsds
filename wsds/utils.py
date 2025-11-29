@@ -1,8 +1,14 @@
+from dataclasses import dataclass
 import re
 from pathlib import Path
 
 import numpy as np
 import pyarrow as pa
+
+
+@dataclass
+class WSShardMissingError(Exception):
+    fname: str
 
 
 def get_columns(fname):

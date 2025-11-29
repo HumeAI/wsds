@@ -10,6 +10,7 @@ import pyarrow as pa
 
 from .ws_audio import AudioReader, WSAudio
 from .ws_sample import WSSample
+from .utils import WSShardMissingError
 
 if TYPE_CHECKING:
     from .ws_dataset import WSDataset
@@ -38,7 +39,11 @@ class WSShard(WSShardInterface):
         self.shard_name = shard_name
         self.fname = fname
 
-        self.reader = pa.RecordBatchFileReader(pa.memory_map(fname))
+        try:
+            self.reader = pa.RecordBatchFileReader(pa.memory_map(fname))
+        except FileNotFoundError:
+            raise WSShardMissingError(fname) from None
+
         self.batch_size = int(self.reader.schema.metadata[b"batch_size"])
 
         # cache
@@ -117,7 +122,10 @@ class WSSourceAudioShard(WSShardInterface):
 
         if self._source_file_name != file_name:
             self._source_sample = self.source_dataset[file_name]
-            self._source_reader = self._source_sample.get_audio()
+            try:
+                self._source_reader = self._source_sample.get_audio()
+            except KeyError as err:
+                raise WSShardMissingError("no audio shards found")
             self._source_file_name = file_name
 
         tstart, tend = self.get_timestamps(segment_offset)
