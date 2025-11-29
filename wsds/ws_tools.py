@@ -151,7 +151,7 @@ class validate:
         for subdir in Path(dataset).iterdir():
             if not subdir.is_dir():
                 continue
-            shards = [(subdir / shard).with_suffix(".wsds") for shard in shard_names]
+            shards = [(Path(dataset_path) / subdir / shard).with_suffix(".wsds") for dataset_path, shard in shard_names]
             schemas = {shard: get_shard_schema(shard) for shard in shards}
             unique = set(s for s in schemas.values() if s)
             if len(unique) > 1:
@@ -399,12 +399,13 @@ def init(
 
     ds = WSDataset(source_dataset)
     shard_extractor = functools.partial(extract_index_for_shard, source_dataset, vad_column=vad_column)
-    all_shards = ds.get_shard_list()
+    all_shards = ds.get_shard_list(ignore_index = True)
 
     with AtomicFile(new_dataset / "index.sqlite3") as fname:
         with WSDSIndexWriter(fname) as index:
             with multiprocessing.Pool(num_workers) as p:
                 for r in progress_bar(p.imap_unordered(shard_extractor, all_shards), total=len(all_shards)):
+                    r["dataset_path"] = ""
                     try:
                         index.append(r)
                     except:
@@ -426,27 +427,71 @@ def init(
                         )
                     )
 
+@command
+def init_split(
+    splits_path: Path,
+    new_dataset: Path,
+    source_dataset: Path | None = None,
+    vad_column: str | None = None,
+    num_workers: int = 64,
+    include_in_progress: bool = False,
+):
+    """Initialize a new dataset, from scratch or from a segmentation of an existing one."""
+    if source_dataset is not None:
+        assert vad_column is not None, "vad_column must be specified when initializing from a source dataset"
+    else:
+        source_dataset = new_dataset
+
+    import multiprocessing
+
+    from fastprogress import progress_bar
+
+    from . import AtomicFile, WSDataset
+    from .ws_index import WSDSIndexWriter
+
+    with AtomicFile("index.sqlite3") as fname:
+        with WSDSIndexWriter(fname) as index:
+
+            splits = [x for x in Path(splits_path).iterdir() if x.is_dir()]
+
+            for split in progress_bar(splits):
+                ds = WSDataset(Path(split) / source_dataset)
+                shard_extractor = functools.partial(extract_index_for_shard, Path(split) / source_dataset, vad_column=vad_column)
+                all_shards = ds.get_shard_list(ignore_index = True)
+
+                with multiprocessing.Pool(num_workers) as p:
+                    for r in p.imap_unordered(shard_extractor, all_shards):
+                        r["dataset_path"] = Path(split) / new_dataset
+                        try:
+                            index.append(r)
+                        except:
+                            print("Failed to append records to index:", r)
+                            raise
+
+                index.append_metadata({"segmented": True if vad_column else False})
+
+    if vad_column:
+        with AtomicFile("audio.wsds-link") as fname:
+            with open(fname, "w") as f:
+                f.write(
+                    json.dumps(
+                        {
+                            "dataset_dir": os.path.relpath(source_dataset, new_dataset),
+                            "loader": ["wsds.ws_shard", "WSSourceAudioShard"],
+                            "vad_column": vad_column,
+                        }
+                    )
+                )
 
 def extract_index_for_shard(dataset, shard, vad_column=None):
-    from .ws_audio import to_filelike
-
     from . import WSDataset
 
     ds = WSDataset(dataset)
     index = []
     i = 0
 
-    # instead of passing `shard` directly, wrap it
-    # WSSample(ds, shard_name, offset=0)
-    sample = WSSample(ds, shard, 0)
-
-    for s in ds.sequential_from(sample, 0):
-        try:
-            key = str(s["__key__"])
-        except IndexError:
-            # this can only happen if we don't have an index yet and we got a sample that's out of bounds
-            # because of lazyness the error in WSSample only happens on first access
-            break
+    for s in ds.iter_shard(shard):
+        key = s["__key__"]
 
         if not vad_column:
             n = 1
@@ -467,7 +512,7 @@ def extract_index_for_shard(dataset, shard, vad_column=None):
 
         i += n
     return {
-        "shard_name": shard,
+        "shard_name": shard[1],
         "index": index,
         "n_samples": i,
     }

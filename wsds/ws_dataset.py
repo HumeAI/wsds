@@ -345,8 +345,8 @@ class WSDataset:
 
         raise ValueError(f"Dataset {repr(str(path))} not found.")
 
-    def get_shard_list(self):
-        if self.index:
+    def get_shard_list(self, ignore_index=False):
+        if not ignore_index and self.index:
             return list(self.index.shards())
         else:
             return list_all_shards(self.dataset_dir)

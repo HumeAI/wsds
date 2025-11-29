@@ -2,6 +2,7 @@ import functools
 import json
 import sqlite3
 from pathlib import Path
+from . import utils
 
 
 # TODO:
@@ -15,6 +16,11 @@ class WSDSIndexWriter:
         self.fname.unlink(missing_ok=True)
         self.conn = sqlite3.connect(self.fname)
 
+        self.conn.execute('PRAGMA journal_mode = OFF;')
+        self.conn.execute('PRAGMA synchronous = 0;')
+        self.conn.execute('PRAGMA locking_mode = EXCLUSIVE;')
+        self.conn.execute('PRAGMA temp_store = MEMORY;')
+
         self.conn.execute("""
         CREATE TABLE files (
             name TEXT PRIMARY KEY NOT NULL,
@@ -22,22 +28,20 @@ class WSDSIndexWriter:
             offset INTEGER NOT NULL,
             audio_duration REAL NOT NULL,
             speech_duration REAL NOT NULL
-        );""")
-        self.conn.execute("""
-        CREATE UNIQUE INDEX files_name ON files (name);
-        """)
-        self.conn.execute("""
-        CREATE UNIQUE INDEX files_shard_id_offset ON files (shard_id, offset);
-        """)
+        ) WITHOUT ROWID;""")
         self.conn.execute("""
         CREATE TABLE shards (
             shard_id INTEGER PRIMARY KEY,
             shard TEXT NOT NULL,
             n_samples INTEGER NOT NULL,
-            global_offset INTEGER NOT NULL
+            global_offset INTEGER NOT NULL,
+            dataset_path TEXT NULL
         );""")
         self.conn.execute("""
         CREATE UNIQUE INDEX shard_name ON shards (shard);
+        """)
+        self.conn.execute("""
+        CREATE UNIQUE INDEX shard_global_offset ON shards (global_offset);
         """)
         self.conn.execute("""
         CREATE TABLE metadata (
@@ -66,10 +70,13 @@ class WSDSIndexWriter:
                 )
             except sqlite3.IntegrityError as err:
                 if err.args[0] == "UNIQUE constraint failed: files.name":
-                    old_shard = self.conn.execute(
-                        "SELECT s.shard FROM shards AS s, files AS f WHERE f.name == ?",
+                    old_shard, old_duration = self.conn.execute(
+                        "SELECT s.shard, f.audio_duration FROM shards AS s, files AS f WHERE f.name == ?",
                         (name,),
-                    ).fetchone()[0]
+                    ).fetchone()
+                    if audio_duration - old_duration < 10e-3:
+                        print(f"Skipping duplicate episode: {repr(name)} ({utils.format_duration(audio_duration)} long)")
+                        continue
                     raise ValueError(
                         f"Detected duplicate file name: {repr(name)} in shard \n{repr(s['shard_name'])}, previously seen in {repr(old_shard)}"
                     )
