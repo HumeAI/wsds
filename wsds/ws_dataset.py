@@ -8,10 +8,10 @@ from pathlib import Path
 
 import polars as pl
 
-from hume_wsds.utils import list_all_columns, list_all_shards, parse_key, scan_ipc
-from hume_wsds.ws_index import WSIndex
-from hume_wsds.ws_sample import WSSample
-from hume_wsds.ws_shard import WSShard
+from .utils import list_all_columns, list_all_shards, parse_key, scan_ipc
+from .ws_index import WSIndex
+from .ws_sample import WSSample
+from .ws_shard import WSShard
 
 
 class WSDataset:

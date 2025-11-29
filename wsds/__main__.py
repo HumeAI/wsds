@@ -1,6 +1,6 @@
 import fire
 
-from hume_wsds.ws_tools import commands
+from .ws_tools import commands
 
 
 def main():

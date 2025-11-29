@@ -2,7 +2,7 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from hume_wsds.ws_dataset import WSDataset
+    from .ws_dataset import WSDataset
 
 
 @dataclass(frozen=True, slots=True)

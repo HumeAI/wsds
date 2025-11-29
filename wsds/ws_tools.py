@@ -11,7 +11,7 @@ import polars as pl
 import pyarrow as pa
 import webdataset as wds
 
-from hume_wsds import WSSample, WSSink
+from . import WSSample, WSSink
 
 commands = {}
 
@@ -420,7 +420,7 @@ def init(
                         json.dumps(
                             {
                                 "dataset_dir": os.path.relpath(source_dataset, new_dataset),
-                                "loader": ["hume_wsds.ws_shard", "WSSourceAudioShard"],
+                                "loader": ["wsds.ws_shard", "WSSourceAudioShard"],
                                 "vad_column": vad_column,
                             }
                         )
@@ -428,7 +428,7 @@ def init(
 
 
 def extract_index_for_shard(dataset, shard, vad_column=None):
-    from hume_wsds.ws_audio import to_filelike
+    from .ws_audio import to_filelike
 
     from . import WSDataset
 
