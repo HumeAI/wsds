@@ -141,7 +141,7 @@ def dump_index(source_dataset: Path):
 class validate:
     @command("validate_shards")  # backwards compatibility
     @staticmethod
-    def shards(dataset: Path, verbose=False):
+    def shards(dataset: Path, verbose=False, complete_in_progress=False):
         """Validate if subdirs have all the shards and if all their schemas match."""
         from .utils import list_all_shards
         from .ws_sink import indented
@@ -164,6 +164,8 @@ class validate:
                         for shard in matching_shards:
                             print(indented(" " * len(prefix), shard))
                         print()
+            if None not in schemas.values() and complete_in_progress:
+                os.rename(subdir, str(subdir).replace('.in-progress', ''))
 
     @staticmethod
     def load_test_yaml(test_yaml_path: Path):
@@ -357,6 +359,8 @@ class validate:
 def get_shard_schema(fname):
     fname = Path(fname)
     if not fname.exists():
+        return None
+    if fname.stat().st_size == 0:
         return None
     return repr(pa.RecordBatchFileReader(pa.memory_map(str(fname))).schema).split("-- schema metadata --")[0]
 
