@@ -126,6 +126,15 @@ class WSIndex:
         dataset_path = 'dataset_path' if self.has_dataset_path else "''"
         return self.conn.execute(f"SELECT {dataset_path}, shard FROM shards ORDER BY rowid;")
 
+    def dataframe(self):
+        import polars as pl
+        df = pl.read_database_uri("""
+            SELECT f.name, audio_duration, speech_duration, s.shard, s.n_samples
+            FROM files as f, shards as s
+            WHERE f.shard_id == s.shard_id""", f"sqlite://{self.fname}"
+        )
+        return df
+
     @functools.cached_property
     def metadata(self):
         metadata = {}

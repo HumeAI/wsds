@@ -45,7 +45,7 @@ class WSDataset:
     # FIXME: this should be overridable with metadata in index.sqlite3
     _audio_file_keys = ["flac", "mp3", "sox", "wav", "m4a", "ogg", "wma", "opus", "audio"]
 
-    def __init__(self, dataset_dir: str, include_in_progress: bool = True):
+    def __init__(self, dataset_dir: str | Path, include_in_progress: bool = True):
         self.dataset_dir = self._resolve_path(dataset_dir)
 
         self.index = None

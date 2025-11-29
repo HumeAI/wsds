@@ -86,7 +86,9 @@ class WSSample:
             except WSShardMissingError as err:
                 arrays.append(k)
             else:
-                if hasattr(v, "shape") and v.shape:
+                if k == '__key__':
+                    other.insert(0, k)
+                elif hasattr(v, "shape") and v.shape:
                     arrays.append(k)
                 elif isinstance(v, (str, bytes)):
                     txt.append(k)
@@ -98,10 +100,12 @@ class WSSample:
                 r.append(f"  '{k}': {self.__repr_field__(k, repr=repr)},")
 
         print_keys(other)
-        r.append("# Text:")
-        print_keys(txt)
-        r.append("# Arrays:")
-        print_keys(arrays)
+        if txt:
+            r.append("# Text:")
+            print_keys(txt)
+        if arrays:
+            r.append("# Arrays:")
+            print_keys(arrays)
         r.append("})\n")
         return "\n".join(r)
 
