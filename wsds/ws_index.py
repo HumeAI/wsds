@@ -55,8 +55,8 @@ class WSDSIndexWriter:
     def append(self, s):
         # we ensure plain Python types for everything passed in, otherwise sqlite will silently save invalid data
         shard_id = self.conn.execute(
-            "INSERT INTO shards (shard, n_samples, global_offset) VALUES (?, ?, ?);",
-            (str(s["shard_name"]), int(s["n_samples"]), self.global_offset),
+            "INSERT INTO shards (shard, n_samples, global_offset, dataset_path) VALUES (?, ?, ?, ?);",
+            (str(s["shard_name"]), int(s["n_samples"]), self.global_offset, str(s["dataset_path"])),
         ).lastrowid
         for name, offset, audio_duration, speech_duration in s["index"]:
             try:
@@ -93,6 +93,7 @@ class WSIndex:
             raise ValueError(f"WSIndex not found: {fname}")
         # immutable=1,ro=True greatly speeds up all queries when the database is on a remote/cluster file system
         self.conn = sqlite3.connect(f"file:{fname}?immutable=1,ro=True", uri=True)
+        self.has_dataset_path = self.conn.execute("SELECT COUNT(*) FROM pragma_table_info('shards') WHERE name='dataset_path'").fetchone()[0]
 
     @functools.cached_property
     def n_shards(self):
@@ -115,7 +116,8 @@ class WSIndex:
         return self.conn.execute("SELECT SUM(speech_duration) FROM files;").fetchone()[0]
 
     def shards(self):
-        return (shard for (shard,) in self.conn.execute("SELECT shard FROM shards ORDER BY rowid;"))
+        dataset_path = 'dataset_path' if self.has_dataset_path else "''"
+        return self.conn.execute(f"SELECT {dataset_path}, shard FROM shards ORDER BY rowid;")
 
     @functools.cached_property
     def metadata(self):

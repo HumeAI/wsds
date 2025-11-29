@@ -112,7 +112,7 @@ def list_all_shards(dataset: str, verbose: bool = False, print_missing: bool = F
         if verbose:
             print(f"\nAudio dir {audio_dir.resolve()} has {len(audio_shards)} shards.")
 
-    return [x.replace(".wsds", "") for x in common_shards]
+    return [("", x.replace(".wsds", "")) for x in common_shards]
 
 
 def make_key(src_file: str, segment_id: int):
@@ -203,3 +203,13 @@ def scan_ipc(path: str | Path, *args, glob=True, **kwargs):
         f = open(path, "rb")
         # we will leak the file descriptor in this case but there is not a lot we can do about it (GC will close it eventually)
         return pl.scan_ipc(f)
+
+def format_duration(duration):
+    """Formats a duration in seconds as hours (or minutes or kilo-hours)."""
+    hours = duration / 3600
+    if hours > 1000:
+        return f"{hours / 1000:.2f} k hours"
+    elif hours < 1:
+        return f"{duration / 60:.1f} minutes"
+    else:
+        return f"{hours:.2f} hours"

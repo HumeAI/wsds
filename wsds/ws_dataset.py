@@ -8,7 +8,7 @@ from pathlib import Path
 
 import polars as pl
 
-from .utils import list_all_columns, list_all_shards, parse_key, scan_ipc
+from .utils import list_all_columns, list_all_shards, parse_key, scan_ipc, format_duration
 from .ws_index import WSIndex
 from .ws_sample import WSSample
 from .ws_shard import WSShard
@@ -55,9 +55,13 @@ class WSDataset:
             self.index = WSIndex(index_file)
             self.segmented = self.index.metadata.get("segmented", False)
 
+        dataset_path, shard_name  = next(self.index.shards()) if self.index else ("", None)
         self.fields = list_all_columns(
-            self.dataset_dir, next(self.index.shards()) if self.index else None, include_in_progress=include_in_progress
+            self.dataset_dir / dataset_path, shard_name, include_in_progress=include_in_progress
         )
+        self.fields.update(list_all_columns(
+            self.dataset_dir, include_in_progress=include_in_progress
+        ))
         self.computed_columns = {}
 
         self._filter_dfs = None  # mapping of "filter name" -> polars dataframe representing the filter
@@ -126,26 +130,26 @@ class WSDataset:
 
         if isinstance(key_or_index, int):
             r = self.index.query(
-                "SELECT s.shard, global_offset FROM shards AS s WHERE s.global_offset <= ? ORDER BY s.global_offset DESC LIMIT 1",
+                "SELECT s.shard, global_offset, s.dataset_path FROM shards AS s WHERE s.global_offset <= ? ORDER BY s.global_offset DESC LIMIT 1",
                 key_or_index,
             ).fetchone()
             if not r:
                 return None
 
-            shard_name, shard_global_offset = r
+            shard_name, shard_global_offset, dataset_path = r
             global_offset = key_or_index
             local_offset = global_offset - shard_global_offset
         elif isinstance(key_or_index, str):
             # FIXME: push `parse_key` to the index class
             file_name, offset_of_key_wrt_file = self.parse_key(key_or_index)
             r = self.index.query(
-                "SELECT s.shard, s.global_offset, f.offset FROM files AS f, shards AS s WHERE f.name = ? AND s.shard_id == f.shard_id",
+                "SELECT s.shard, s.global_offset, f.offset, s.dataset_path FROM files AS f, shards AS s WHERE f.name = ? AND s.shard_id == f.shard_id",
                 file_name,
             ).fetchone()
             if not r:
                 return None
 
-            shard_name, shard_global_offset, file_offset_in_shard = r
+            shard_name, shard_global_offset, file_offset_in_shard, dataset_path = r
             local_offset = file_offset_in_shard + offset_of_key_wrt_file
             global_offset = shard_global_offset + local_offset
         else:
@@ -156,7 +160,7 @@ class WSDataset:
             overrides.update(
                 {filter_name: filter_df.row(global_offset)[0] for filter_name, filter_df in self._filter_dfs.items()}
             )
-        return WSSample(self, shard_name, local_offset, overrides=overrides)
+        return WSSample(self, (dataset_path, shard_name), local_offset, overrides=overrides)
 
     def sequential_from(self, sample, max_N=None):
         """Yields samples sequentially from the given `sample`, stopping after `max_N` samples."""
@@ -187,18 +191,19 @@ class WSDataset:
             yield sample
             i += 1
 
-    def _shard_n_samples(self, shard_name: str) -> int:
+    def _shard_n_samples(self, shard_name: (str, str)) -> int:
         if not self.index:
             return sys.maxsize
-        r = self.index.query("SELECT n_samples FROM shards WHERE shard = ?", shard_name).fetchone()
+        r = self.index.query("SELECT n_samples FROM shards WHERE shard = ?", shard_name[1]).fetchone()
         if r is None:
             raise IndexError(f"Shard not found: {shard_name}")
         return r[0]
 
     def iter_shard(self, shard_name):
+        dataset_path, shard_name = shard_name
         if shard_name.endswith(".wsds"):
             shard_name = shard_name[:-5]
-        return self.sequential_from(WSSample(self, shard_name, 0))
+        return self.sequential_from(WSSample(self, (dataset_path, shard_name), 0))
 
     def __len__(self):
         """Returns the number of samples in the dataset.
@@ -374,16 +379,17 @@ class WSDataset:
         )
 
     def get_shard(self, subdir, shard_name):
-        dir = self.dataset_dir / subdir
+        dataset_path, shard_name = shard_name
+        dir = self.dataset_dir / dataset_path / subdir
 
         shard = self._open_shards.get(dir, None)
-        if shard is not None and shard.shard_name == shard_name:
+        if shard is not None and shard.shard_name == (dataset_path, shard_name):
             return shard
 
         if subdir in self.computed_columns:
-            shard = self.get_linked_shard(self.computed_columns[subdir], shard_name)
+            shard = self.get_linked_shard(self.computed_columns[subdir], (dataset_path, shard_name))
         else:
-            shard = WSShard(self, f"{dir}/{shard_name}.wsds", shard_name=shard_name)
+            shard = WSShard(self, f"{dir}/{shard_name}.wsds", shard_name=(dataset_path, shard_name))
 
         self._open_shards[dir] = shard
         return shard
@@ -427,12 +433,3 @@ class WSDataset:
                 self.random_sample()._display_(),
             ]
         )
-
-
-def format_duration(duration):
-    """Formats a duration in seconds as hours (or kilo-hours)."""
-    hours = duration // 3600
-    if hours > 1000:
-        return f"{hours / 1000:.2f} k hours"
-    else:
-        return f"{hours:.2f} hours"
