@@ -128,9 +128,14 @@ class WSDataset:
         # Figure out the shard name, local offset (wrt shard) and global offset for the given key or index
         shard_name, local_offset, global_offset = None, None, None
 
+        if self.index.has_dataset_path:
+            dataset_path = 's.dataset_path'
+        else:
+            dataset_path = "''"
+
         if isinstance(key_or_index, int):
             r = self.index.query(
-                "SELECT s.shard, global_offset, s.dataset_path FROM shards AS s WHERE s.global_offset <= ? ORDER BY s.global_offset DESC LIMIT 1",
+                f"SELECT s.shard, global_offset, {dataset_path} FROM shards AS s WHERE s.global_offset <= ? ORDER BY s.global_offset DESC LIMIT 1",
                 key_or_index,
             ).fetchone()
             if not r:
@@ -143,7 +148,7 @@ class WSDataset:
             # FIXME: push `parse_key` to the index class
             file_name, offset_of_key_wrt_file = self.parse_key(key_or_index)
             r = self.index.query(
-                "SELECT s.shard, s.global_offset, f.offset, s.dataset_path FROM files AS f, shards AS s WHERE f.name = ? AND s.shard_id == f.shard_id",
+                f"SELECT s.shard, s.global_offset, f.offset, {dataset_path} FROM files AS f, shards AS s WHERE f.name = ? AND s.shard_id == f.shard_id",
                 file_name,
             ).fetchone()
             if not r:
