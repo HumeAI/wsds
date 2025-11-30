@@ -61,6 +61,10 @@ def inspect_dataset(input_path, verbose=True):
     ds = WSDataset(input_path)
     print(ds)
     if verbose:
+        print("Metadata:")
+        for k, v in ds.index.metadata.items():
+            print(f"{k}: {v}")
+        print()
         print("One sample:")
         for x in ds:
             print(x)
@@ -463,29 +467,32 @@ def init_split(
                 shard_extractor = functools.partial(extract_index_for_shard, Path(split) / source_dataset, vad_column=vad_column)
                 all_shards = ds.get_shard_list(ignore_index = True)
 
-                with multiprocessing.Pool(num_workers) as p:
-                    for r in p.imap_unordered(shard_extractor, all_shards):
-                        r["dataset_path"] = Path(split) / new_dataset
-                        try:
-                            index.append(r)
-                        except:
-                            print("Failed to append records to index:", r)
-                            raise
+                try:
+                    with multiprocessing.Pool(num_workers) as p:
+                        for r in p.imap_unordered(shard_extractor, all_shards):
+                            r["dataset_path"] = Path(split) / new_dataset
+                            try:
+                                index.append(r)
+                            except:
+                                print("Failed to append records to index:", r)
+                                raise
+                except KeyError as err:
+                    print(err)
+                    print("Dataset fields:", ds.fields)
 
-                index.append_metadata({"segmented": True if vad_column else False})
-
-    if vad_column:
-        with AtomicFile("audio.wsds-link") as fname:
-            with open(fname, "w") as f:
-                f.write(
-                    json.dumps(
-                        {
-                            "dataset_dir": os.path.relpath(source_dataset, new_dataset),
-                            "loader": ["wsds.ws_shard", "WSSourceAudioShard"],
-                            "vad_column": vad_column,
-                        }
-                    )
-                )
+            index.append_metadata({"segmented": True if vad_column else False})
+            ds = WSDataset(Path(splits[0]) / new_dataset)
+            new_fields = {k:v for k,v in ds.fields.items() if v[1] not in ['sample_source_id', 'src_key']}
+            if vad_column:
+                index.append_metadata({"computed_columns": {
+                    "audio.wsds-computed": {
+                        "dataset_dir": os.path.relpath(source_dataset, new_dataset),
+                        "loader": ["wsds.ws_shard", "WSSourceAudioShard"],
+                        "vad_column": vad_column,
+                    }
+                }})
+                new_fields['audio'] = ("audio.wsds-computed", "audio")
+            index.append_metadata({"fields": new_fields})
 
 def extract_index_for_shard(dataset, shard, vad_column=None):
     from . import WSDataset

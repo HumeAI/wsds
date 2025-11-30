@@ -53,16 +53,25 @@ class WSDataset:
         index_file = self.dataset_dir / "index.sqlite3"
         if index_file.exists():
             self.index = WSIndex(index_file)
-            self.segmented = self.index.metadata.get("segmented", False)
+            meta = self.index.metadata
+            self.segmented = meta.get("segmented", False)
+        else:
+            meta = {}
 
-        dataset_path, shard_name  = next(self.index.shards()) if self.index else ("", None)
-        self.fields = list_all_columns(
-            self.dataset_dir / dataset_path, shard_name, include_in_progress=include_in_progress
-        )
-        self.fields.update(list_all_columns(
-            self.dataset_dir, include_in_progress=include_in_progress
-        ))
-        self.computed_columns = {}
+        if 'fields' in meta:
+            self.fields = meta['fields']
+        else:
+            dataset_path, shard_name  = next(self.index.shards()) if self.index else ("", None)
+            self.fields = list_all_columns(
+                self.dataset_dir / dataset_path, shard_name, include_in_progress=include_in_progress
+            )
+            self.fields.update(list_all_columns(
+                self.dataset_dir, include_in_progress=include_in_progress
+            ))
+        if 'computed_columns' in meta:
+            self.computed_columns = meta['computed_columns']
+        else:
+            self.computed_columns = {}
 
         self._filter_dfs = None  # mapping of "filter name" -> polars dataframe representing the filter
 
