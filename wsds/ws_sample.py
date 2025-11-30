@@ -129,3 +129,7 @@ class WSSample:
         for k, v in special.items():
             html = html.replace(k, v)
         return marimo.Html(html)
+
+    def _ipython_display_(self):
+        from IPython.display import display, Markdown
+        display(Markdown(f"```python\n{self.__repr__()}\n```"))
