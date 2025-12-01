@@ -38,7 +38,7 @@ class WSDSIndexWriter:
             dataset_path TEXT NULL
         );""")
         self.conn.execute("""
-        CREATE UNIQUE INDEX shard_name ON shards (shard);
+        CREATE UNIQUE INDEX shard_name ON shards (shard, dataset_path);
         """)
         self.conn.execute("""
         CREATE UNIQUE INDEX shard_global_offset ON shards (global_offset);
