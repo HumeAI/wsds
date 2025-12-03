@@ -443,6 +443,7 @@ def init_split(
     vad_column: str | None = None,
     num_workers: int = 64,
     include_in_progress: bool = False,
+    index_path: str = ".",
 ):
     """Initialize a new dataset, from scratch or from a segmentation of an existing one."""
     if source_dataset is not None:
@@ -457,7 +458,7 @@ def init_split(
     from . import AtomicFile, WSDataset
     from .ws_index import WSDSIndexWriter
 
-    with AtomicFile("index.sqlite3") as fname:
+    with AtomicFile(Path(index_path)/"index.sqlite3") as fname:
         with WSDSIndexWriter(fname) as index:
 
             splits = [x for x in Path(splits_path).iterdir() if x.is_dir()]
