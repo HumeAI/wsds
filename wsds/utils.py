@@ -10,11 +10,17 @@ import pyarrow as pa
 class WSShardMissingError(Exception):
     fname: str
 
+@dataclass
+class WSShardCorruptedError(Exception):
+    fname: str
 
 def get_columns(fname):
     if isinstance(fname, Path):
         fname = str(fname)
-    reader = pa.RecordBatchFileReader(pa.memory_map(fname))
+    try:
+        reader = pa.RecordBatchFileReader(pa.memory_map(fname))
+    except pa.ArrowInvalid:
+        raise WSShardCorruptedError(fname)
     return reader.schema.names
 
 
@@ -48,7 +54,12 @@ def list_all_columns(ds_path, shard_name=None, include_in_progress=True):
         else:
             fname = (p / shard_name).with_suffix(".wsds")
         if fname and fname.exists():
-            for col in get_columns(fname):
+            try:
+                columns = get_columns(fname)
+            except WSShardCorruptedError as err:
+                print("Got an error listing columns:", repr(err))
+                continue
+            for col in columns:
                 if col == "__key__":
                     if not is_in_progress:
                         # We need a subdir that has all shards but we don't wanna list all of them (that's expensive)
