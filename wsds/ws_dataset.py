@@ -8,7 +8,7 @@ from pathlib import Path
 
 import polars as pl
 
-from .utils import list_all_columns, list_all_shards, parse_key, scan_ipc, format_duration
+from .utils import list_all_columns, list_all_shards, parse_key, scan_ipc, format_duration, WSShardMissingError
 from .ws_index import WSIndex
 from .ws_sample import WSSample
 from .ws_shard import WSShard
@@ -263,7 +263,7 @@ class WSDataset:
                         df = df.drop("__key__")  # ensure only one __key__ column
                     if subdir not in subdir_samples:
                         subdir_samples[subdir] = df.clear().collect()
-                except FileNotFoundError:
+                except WSShardMissingError:
                     # create a fake dataframe with all NULL rows and matching schema
                     n_samples = self.index.query("SELECT n_samples FROM shards WHERE shard=?", shard).fetchone()[0]
                     df = pl.defer(
@@ -280,7 +280,7 @@ class WSDataset:
             for subdir, shards in missing.items():
                 print(f"{subdir}: {shards}")
             if not row_merge:
-                raise FileNotFoundError(
+                raise WSShardMissingError(
                     f"No usable shards found (columns: {', '.join(subdirs)}) for dataset in: {str(self.dataset_dir)}"
                 )
 
