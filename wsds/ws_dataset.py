@@ -45,7 +45,7 @@ class WSDataset:
     # FIXME: this should be overridable with metadata in index.sqlite3
     _audio_file_keys = ["flac", "mp3", "sox", "wav", "m4a", "ogg", "wma", "opus", "audio"]
 
-    def __init__(self, dataset_dir: str | Path, include_in_progress: bool = True):
+    def __init__(self, dataset_dir: str | Path, include_in_progress: bool = True, key_folder: str | None = None):
         self.dataset_dir = self._resolve_path(dataset_dir)
 
         self.index = None
@@ -66,7 +66,7 @@ class WSDataset:
                 self.dataset_dir / dataset_path, shard_name, include_in_progress=include_in_progress
             )
             self.fields.update(list_all_columns(
-                self.dataset_dir, include_in_progress=include_in_progress
+                self.dataset_dir, include_in_progress=include_in_progress, key_folder=key_folder
             ))
         if 'computed_columns' in meta:
             self.computed_columns = meta['computed_columns']
