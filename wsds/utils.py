@@ -1,5 +1,5 @@
-from dataclasses import dataclass
 import re
+from dataclasses import dataclass
 from pathlib import Path
 
 import numpy as np
@@ -31,7 +31,7 @@ def find_first_shard(path):
     return None
 
 
-def list_all_columns(ds_path, shard_name=None, include_in_progress=True):
+def list_all_columns(ds_path, shard_name=None, include_in_progress=True, key_folder=None):
     """Given a dataset path, return a list of all columns.
 
     If you also give a shard name it greatly speeds it up
@@ -61,7 +61,7 @@ def list_all_columns(ds_path, shard_name=None, include_in_progress=True):
                 continue
             for col in columns:
                 if col == "__key__":
-                    if not is_in_progress:
+                    if not is_in_progress or key_folder == fname.parent.name:
                         # We need a subdir that has all shards but we don't wanna list all of them (that's expensive)
                         # so instead we rely on a subdir naming convention (the .in-progress suffix) and never use these
                         key_col.append((fname.stat().st_size, p.name, col))
@@ -77,7 +77,9 @@ def list_all_columns(ds_path, shard_name=None, include_in_progress=True):
                 else:
                     cols[col] = (p.name, col)
     # use the smallest shards for __key__ (should be the fastest)
-    if len(key_col) > 0:
+    if key_folder is not None:
+        cols["__key__"] = next(col for col in key_col if key_folder == col[1])[1:]
+    elif len(key_col) > 0:
         cols["__key__"] = sorted(key_col)[0][1:]
     return dict(sorted(cols.items()))
 
