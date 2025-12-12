@@ -320,12 +320,15 @@ class validate:
             for subdir in subdirs:
                 if not subdir.is_dir():
                     continue
-                shard_fname = (subdir / shard).with_suffix(".wsds")
+                shard_fname = (Path(shard[0]) / subdir / shard[1]).with_suffix(".wsds")
                 if not shard_fname.exists():
                     missing_shards[subdir] += 1
                 else:
-                    if not pl.scan_ipc(shard_fname).select((pl.col("__key__") == expected_keys).all()).collect().item():
-                        tqdm.write(f"Shard {shard} in {subdir} has keys that don't match the index.")
+                    try:
+                        if not pl.scan_ipc(shard_fname).select((pl.col("__key__") == expected_keys).all()).collect().item():
+                            tqdm.write(f"Shard {shard} in {subdir} has keys that don't match the index.")
+                    except pl.exceptions.ShapeError as err:
+                        tqdm.write(f"Shard {shard} in {subdir} has {pl.scan_ipc(shard_fname).select(pl.len()).collect().item()} keys while we expect {len(expected_keys)}.")
                     reader = pa.RecordBatchFileReader(pa.memory_map(str(shard_fname)))
                     batch_size = int(reader.schema.metadata[b'batch_size'])
                     for i in range(reader.num_record_batches - 1):
@@ -370,7 +373,10 @@ def get_shard_schema(fname):
 
 
 def generate_all_keys_for_shard(index, shard):
-    N, shard_id = index.query("SELECT n_samples, shard_id FROM shards WHERE shards.shard = ?", shard).fetchone()
+    if index.has_dataset_path:
+        N, shard_id = index.query("SELECT n_samples, shard_id FROM shards WHERE shards.dataset_path = ? AND shards.shard = ?", *shard).fetchone()
+    else:
+        N, shard_id = index.query("SELECT n_samples, shard_id FROM shards WHERE shards.shard = ?", shard[1]).fetchone()
     files = index.query("SELECT name, offset FROM files WHERE files.shard_id == ?", shard_id).fetchall()
     df = pl.DataFrame(files, schema=["name", "offset"], orient="row")
     if not index.metadata["segmented"]:
