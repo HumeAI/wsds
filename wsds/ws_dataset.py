@@ -257,15 +257,19 @@ class WSDataset:
         for shard in self.get_shard_list():
             col_merge = []
             for subdir in subdirs:
-                try:
-                    df = scan_ipc(self.get_shard(subdir, shard).fname, glob=False)
+                shard_path = self.get_shard_path(subdir, shard)
+                if shard_path.exists():
+                    df = scan_ipc(shard_path, glob=False)
                     if len(col_merge) > 0:
                         df = df.drop("__key__")  # ensure only one __key__ column
                     if subdir not in subdir_samples:
                         subdir_samples[subdir] = df.clear().collect()
-                except WSShardMissingError:
+                else:
                     # create a fake dataframe with all NULL rows and matching schema
-                    n_samples = self.index.query("SELECT n_samples FROM shards WHERE shard=?", shard).fetchone()[0]
+                    if self.index.has_dataset_path:
+                        n_samples, = self.index.query("SELECT n_samples FROM shards WHERE shards.dataset_path = ? AND shards.shard = ?", *shard).fetchone()
+                    else:
+                        n_samples, = self.index.query("SELECT n_samples FROM shards WHERE shards.shard = ?", shard[1]).fetchone()
                     df = pl.defer(
                         lambda subdir=subdir, n_samples=n_samples: subdir_samples[subdir].clear(n=n_samples),
                         schema=lambda subdir=subdir: subdir_samples[subdir].schema,
@@ -365,6 +369,11 @@ class WSDataset:
         else:
             return list_all_shards(self.dataset_dir)
 
+    def get_shard_path(self, subdir, shard_name):
+        dataset_path, shard_name = shard_name
+        dir = self.dataset_dir / dataset_path / subdir
+        return (Path(dir) / shard_name).with_suffix(".wsds")
+
     def _register_wsds_links(self):
         for subdir, _ in self.fields.values():
             if subdir.endswith(".wsds-link"):
@@ -393,19 +402,18 @@ class WSDataset:
         )
 
     def get_shard(self, subdir, shard_name):
-        dataset_path, shard_name = shard_name
-        dir = self.dataset_dir / dataset_path / subdir
+        shard_path = self.get_shard_path(subdir, shard_name)
 
-        shard = self._open_shards.get(dir, None)
-        if shard is not None and shard.shard_name == (dataset_path, shard_name):
+        shard = self._open_shards.get(shard_path.parent, None)
+        if shard is not None and shard.shard_name == shard_name:
             return shard
 
         if subdir in self.computed_columns:
-            shard = self.get_linked_shard(self.computed_columns[subdir], (dataset_path, shard_name))
+            shard = self.get_linked_shard(self.computed_columns[subdir], shard_name)
         else:
-            shard = WSShard(self, f"{dir}/{shard_name}.wsds", shard_name=(dataset_path, shard_name))
+            shard = WSShard(self, shard_path, shard_name=shard_name)
 
-        self._open_shards[dir] = shard
+        self._open_shards[shard_path.parent] = shard
         return shard
 
     def get_sample(self, shard_name, field, offset):
