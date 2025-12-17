@@ -40,7 +40,10 @@ class WSShard(WSShardInterface):
         self.fname = fname
 
         try:
-            self.reader = pa.RecordBatchFileReader(pa.memory_map(fname))
+            if dataset.disable_memory_map:
+                self.reader = pa.RecordBatchFileReader(pa.OSFile(str(fname)))
+            else:
+                self.reader = pa.RecordBatchFileReader(pa.memory_map(str(fname)))
         except FileNotFoundError:
             raise WSShardMissingError(fname) from None
 
