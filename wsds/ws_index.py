@@ -94,6 +94,16 @@ class WSDSIndexWriter:
 
 
 class WSIndex:
+    """SQLite-based index for fast random access to samples in a wsds dataset.
+
+    The index stores:
+    - `shards` table: shard names, sample counts, and global offsets
+    - `files` table: source file names, their shard, offset within shard, and duration info
+    - `metadata` table: JSON-encoded dataset metadata (e.g., segmented flag, fields)
+
+    This enables O(1) lookups by global sample index or by file name.
+    """
+
     def __init__(self, fname: str):
         self.fname = fname
         if not Path(fname).exists():
@@ -102,41 +112,38 @@ class WSIndex:
         self.conn = sqlite3.connect(f"file:{fname}?immutable=1,ro=True", uri=True)
         self.has_dataset_path = self.conn.execute("SELECT COUNT(*) FROM pragma_table_info('shards') WHERE name='dataset_path'").fetchone()[0]
 
+    #
+    # Aggregate properties
+    #
+
     @functools.cached_property
-    def n_shards(self):
+    def n_shards(self) -> int:
+        """Total number of shards in the dataset."""
         return self.conn.execute("SELECT COUNT(*) FROM shards;").fetchone()[0]
 
     @functools.cached_property
-    def n_files(self):
+    def n_files(self) -> int:
+        """Total number of source files in the dataset."""
         return self.conn.execute("SELECT COUNT(*) FROM files;").fetchone()[0]
 
     @functools.cached_property
-    def n_samples(self):
+    def n_samples(self) -> int:
+        """Total number of samples across all shards."""
         return self.conn.execute("SELECT SUM(n_samples) FROM shards;").fetchone()[0]
 
     @functools.cached_property
-    def audio_duration(self):
+    def audio_duration(self) -> float:
+        """Total audio duration in seconds across all files."""
         return self.conn.execute("SELECT SUM(audio_duration) FROM files;").fetchone()[0]
 
     @functools.cached_property
-    def speech_duration(self):
+    def speech_duration(self) -> float:
+        """Total speech duration in seconds (for segmented datasets)."""
         return self.conn.execute("SELECT SUM(speech_duration) FROM files;").fetchone()[0]
 
-    def shards(self):
-        dataset_path = 'dataset_path' if self.has_dataset_path else "''"
-        return self.conn.execute(f"SELECT {dataset_path}, shard FROM shards ORDER BY rowid;")
-
-    def dataframe(self):
-        import polars as pl
-        df = pl.read_database_uri("""
-            SELECT f.name, audio_duration, speech_duration, s.shard, s.n_samples
-            FROM files as f, shards as s
-            WHERE f.shard_id == s.shard_id""", f"sqlite://{self.fname}"
-        )
-        return df
-
     @functools.cached_property
-    def metadata(self):
+    def metadata(self) -> dict:
+        """Dataset metadata dictionary (merged from all metadata rows)."""
         metadata = {}
         try:
             for (metadata_chunk,) in self.conn.execute("SELECT value FROM metadata;"):
@@ -146,7 +153,45 @@ class WSIndex:
                 raise
         return metadata
 
+    #
+    # Shard iteration
+    #
+
+    def shards(self):
+        """Iterate over all shards as (dataset_path, shard_name) tuples.
+
+        Yields tuples in the order shards were added to the index.
+        """
+        dataset_path = 'dataset_path' if self.has_dataset_path else "''"
+        return self.conn.execute(f"SELECT {dataset_path}, shard FROM shards ORDER BY rowid;")
+
+    #
+    # DataFrame export
+    #
+
+    def dataframe(self):
+        """Export the index as a Polars DataFrame.
+
+        Returns:
+            DataFrame with columns: name, audio_duration, speech_duration, shard, n_samples.
+        """
+        import polars as pl
+        df = pl.read_database_uri("""
+            SELECT f.name, audio_duration, speech_duration, s.shard, s.n_samples
+            FROM files as f, shards as s
+            WHERE f.shard_id == s.shard_id""", f"sqlite://{self.fname}"
+        )
+        return df
+
+    #
+    # Low-level query access (prefer using specific methods above)
+    #
+
     def query(self, query, *args):
+        """Execute a raw SQL query on the index database.
+
+        Prefer using the specific lookup methods above when possible.
+        """
         return self.conn.execute(query, args)
 
     def __repr__(self):
