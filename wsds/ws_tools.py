@@ -133,9 +133,7 @@ def dump_index(source_dataset: Path):
     ds = WSDataset(source_dataset)
 
     try:
-        for sample in ds.index.query(
-            "SELECT name,s.shard,offset FROM files AS f, shards AS s WHERE s.shard_id == f.shard_id ORDER BY name,s.shard,offset;"
-        ):
+        for sample in ds.index.iter_files():
             print(*sample)
     except BrokenPipeError:
         pass
