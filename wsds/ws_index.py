@@ -166,6 +166,133 @@ class WSIndex:
         return self.conn.execute(f"SELECT {dataset_path}, shard FROM shards ORDER BY rowid;")
 
     #
+    # Shard lookups
+    #
+
+    def get_shard_by_global_index(self, global_index: int) -> tuple[str, int, str] | None:
+        """Find the shard containing a given global sample index.
+
+        Args:
+            global_index: The global sample index (0-based across the entire dataset).
+
+        Returns:
+            Tuple of (shard_name, shard_global_offset, dataset_path) or None if not found.
+            The local offset within the shard is: global_index - shard_global_offset.
+        """
+        dataset_path = 's.dataset_path' if self.has_dataset_path else "''"
+        r = self.conn.execute(
+            f"SELECT s.shard, global_offset, {dataset_path} FROM shards AS s "
+            "WHERE s.global_offset <= ? ORDER BY s.global_offset DESC LIMIT 1",
+            (global_index,),
+        ).fetchone()
+        return r
+
+    def get_shard_by_file_name(self, file_name: str) -> tuple[str, int, int, str] | None:
+        """Find the shard containing a given source file.
+
+        Args:
+            file_name: The source file name (without segment suffix).
+
+        Returns:
+            Tuple of (shard_name, shard_global_offset, file_offset_in_shard, dataset_path)
+            or None if not found.
+        """
+        dataset_path = 's.dataset_path' if self.has_dataset_path else "''"
+        r = self.conn.execute(
+            f"SELECT s.shard, s.global_offset, f.offset, {dataset_path} "
+            "FROM files AS f, shards AS s WHERE f.name = ? AND s.shard_id == f.shard_id",
+            (file_name,),
+        ).fetchone()
+        return r
+
+    def get_shard_global_offset(self, shard_name: str) -> int | None:
+        """Get the global sample offset for a shard.
+
+        Args:
+            shard_name: The shard name (without .wsds extension).
+
+        Returns:
+            The global offset (first sample index in this shard), or None if not found.
+        """
+        r = self.conn.execute(
+            "SELECT global_offset FROM shards WHERE shard = ?",
+            (shard_name,),
+        ).fetchone()
+        return r[0] if r else None
+
+    def get_shard_n_samples(self, shard: tuple[str, str]) -> int | None:
+        """Get the number of samples in a shard.
+
+        Args:
+            shard: Tuple of (dataset_path, shard_name).
+
+        Returns:
+            The number of samples in the shard, or None if not found.
+        """
+        dataset_path, shard_name = shard
+        if self.has_dataset_path and dataset_path:
+            r = self.conn.execute(
+                "SELECT n_samples FROM shards WHERE dataset_path = ? AND shard = ?",
+                (dataset_path, shard_name),
+            ).fetchone()
+        else:
+            r = self.conn.execute(
+                "SELECT n_samples FROM shards WHERE shard = ?",
+                (shard_name,),
+            ).fetchone()
+        return r[0] if r else None
+
+    def get_shard_info(self, shard: tuple[str, str]) -> tuple[int, int] | None:
+        """Get shard_id and n_samples for a shard.
+
+        Args:
+            shard: Tuple of (dataset_path, shard_name).
+
+        Returns:
+            Tuple of (n_samples, shard_id) or None if not found.
+        """
+        dataset_path, shard_name = shard
+        if self.has_dataset_path and dataset_path:
+            r = self.conn.execute(
+                "SELECT n_samples, shard_id FROM shards WHERE dataset_path = ? AND shard = ?",
+                (dataset_path, shard_name),
+            ).fetchone()
+        else:
+            r = self.conn.execute(
+                "SELECT n_samples, shard_id FROM shards WHERE shard = ?",
+                (shard_name,),
+            ).fetchone()
+        return r
+
+    #
+    # File lookups
+    #
+
+    def get_files_for_shard(self, shard_id: int) -> list[tuple[str, int]]:
+        """Get all files in a shard with their offsets.
+
+        Args:
+            shard_id: The internal shard ID.
+
+        Returns:
+            List of (file_name, offset) tuples.
+        """
+        return self.conn.execute(
+            "SELECT name, offset FROM files WHERE shard_id = ?",
+            (shard_id,),
+        ).fetchall()
+
+    def iter_files(self):
+        """Iterate over all files with their shard and offset info.
+
+        Yields tuples of (file_name, shard_name, offset) ordered by file name.
+        """
+        return self.conn.execute(
+            "SELECT name, s.shard, offset FROM files AS f, shards AS s "
+            "WHERE s.shard_id == f.shard_id ORDER BY name, s.shard, offset;"
+        )
+
+    #
     # DataFrame export
     #
 

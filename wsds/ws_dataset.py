@@ -138,16 +138,8 @@ class WSDataset:
         # Figure out the shard name, local offset (wrt shard) and global offset for the given key or index
         shard_name, local_offset, global_offset = None, None, None
 
-        if self.index.has_dataset_path:
-            dataset_path = 's.dataset_path'
-        else:
-            dataset_path = "''"
-
         if isinstance(key_or_index, int):
-            r = self.index.query(
-                f"SELECT s.shard, global_offset, {dataset_path} FROM shards AS s WHERE s.global_offset <= ? ORDER BY s.global_offset DESC LIMIT 1",
-                key_or_index,
-            ).fetchone()
+            r = self.index.get_shard_by_global_index(key_or_index)
             if not r:
                 return None
 
@@ -155,12 +147,8 @@ class WSDataset:
             global_offset = key_or_index
             local_offset = global_offset - shard_global_offset
         elif isinstance(key_or_index, str):
-            # FIXME: push `parse_key` to the index class
             file_name, offset_of_key_wrt_file = self.parse_key(key_or_index)
-            r = self.index.query(
-                f"SELECT s.shard, s.global_offset, f.offset, {dataset_path} FROM files AS f, shards AS s WHERE f.name = ? AND s.shard_id == f.shard_id",
-                file_name,
-            ).fetchone()
+            r = self.index.get_shard_by_file_name(file_name)
             if not r:
                 return None
 
@@ -186,9 +174,7 @@ class WSDataset:
         shard_global_offset = None
         if self._filter_dfs is not None:
             # We need to know the global shard offset to know what filter values to use for the sample
-            shard_global_offset = self.index.query(
-                "SELECT global_offset FROM shards WHERE shard = ?", shard_name
-            ).fetchone()[0]
+            shard_global_offset = self.index.get_shard_global_offset(shard_name)
 
         while i < max_N:
             sample = WSSample(self, shard_name, i)
@@ -209,10 +195,10 @@ class WSDataset:
     def _shard_n_samples(self, shard_name: (str, str)) -> int:
         if not self.index:
             return sys.maxsize
-        r = self.index.query("SELECT n_samples FROM shards WHERE shard = ?", shard_name[1]).fetchone()
-        if r is None:
+        n_samples = self.index.get_shard_n_samples(shard_name)
+        if n_samples is None:
             raise IndexError(f"Shard not found: {shard_name}")
-        return r[0]
+        return n_samples
 
     def iter_shard(self, shard_name):
         dataset_path, shard_name = shard_name
@@ -267,10 +253,7 @@ class WSDataset:
                         subdir_samples[subdir] = df.clear().collect()
                 else:
                     # create a fake dataframe with all NULL rows and matching schema
-                    if self.index.has_dataset_path:
-                        n_samples, = self.index.query("SELECT n_samples FROM shards WHERE shards.dataset_path = ? AND shards.shard = ?", *shard).fetchone()
-                    else:
-                        n_samples, = self.index.query("SELECT n_samples FROM shards WHERE shards.shard = ?", shard[1]).fetchone()
+                    n_samples = self.index.get_shard_n_samples(shard)
                     df = pl.defer(
                         lambda subdir=subdir, n_samples=n_samples: subdir_samples[subdir].clear(n=n_samples),
                         schema=lambda subdir=subdir: subdir_samples[subdir].schema,
