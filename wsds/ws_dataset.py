@@ -262,7 +262,7 @@ class WSDataset:
                 if shard_path.exists():
                     df = scan_ipc(shard_path, glob=False)
                     if len(col_merge) > 0:
-                        df = df.drop("__key__")  # ensure only one __key__ column
+                        df = df.drop([c for c in ["__key__", "src_key", "sample_source_id"] if c in df.collect_schema().names()])  # drop duplicate columns
                     if subdir not in subdir_samples:
                         subdir_samples[subdir] = df.clear().collect()
                 else:
