@@ -71,6 +71,8 @@ class WSShard(WSShardInterface):
         j = offset % self.batch_size
         if j >= len(self._data):
             raise IndexError(f"{offset} is out of range for shard {self.fname}")
+        if self._data.schema.get_field_index(column) == -1:
+            raise KeyError(f"column {column} not found in shard {self.fname}")
         data = self._data[column][j]
         try:
             # FIXME: implement proper encoders and decoders

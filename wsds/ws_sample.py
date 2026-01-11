@@ -55,7 +55,7 @@ class WSSample:
 
     def __repr_field__(self, field, repr=repr):
         try:
-            _, v = field, self[field]
+            v = self[field]
             if hasattr(v, "shape"):
                 if v.shape:
                     if v.size > 10:
@@ -69,9 +69,11 @@ class WSSample:
                 v = repr(v)
                 if isinstance(v, str) and len(v) > 1000:
                     v = v[:1000] + "…"
+            return v
         except WSShardMissingError as err:
-            _, v = field, f"<missing shard: {err.fname}>"
-        return v
+            return f"<missing shard: {err.fname}>"
+        except KeyError as err:
+            return f"<error: {err.args[0]}>"
 
     def __repr__(self, repr=repr):
         r = [
@@ -85,6 +87,8 @@ class WSSample:
                 v = self[k]
             except WSShardMissingError as err:
                 arrays.append(k)
+            except KeyError as err:
+                other.append(k)
             else:
                 if k == '__key__':
                     other.insert(0, k)
