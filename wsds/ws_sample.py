@@ -82,7 +82,31 @@ class WSSample:
         other = []
         txt = []
         arrays = []
+
+        # Group columns by subdirectory
+        subdir_columns = {}
         for k in self.keys():
+            if k in self.overrides:
+                subdir = "__overrides__"
+            elif k in self.dataset.fields:
+                subdir, _ = self.dataset.fields[k]
+            else:
+                subdir = "__unknown__"
+            if subdir not in subdir_columns:
+                subdir_columns[subdir] = []
+            subdir_columns[subdir].append(k)
+
+        # Identify large subdirectories (>10 columns)
+        large_subdirs = {subdir: cols for subdir, cols in subdir_columns.items()
+                        if len(cols) > 10 and subdir not in ("__overrides__", "__unknown__")}
+
+        # Columns in small subdirectories go through normal classification
+        small_subdir_keys = set()
+        for subdir, cols in subdir_columns.items():
+            if subdir not in large_subdirs:
+                small_subdir_keys.update(cols)
+
+        for k in small_subdir_keys:
             try:
                 v = self[k]
             except WSShardMissingError as err:
@@ -99,8 +123,8 @@ class WSSample:
                 else:
                     other.append(k)
 
-        def print_keys(keys):
-            for k in keys:
+        def print_keys(keys, max_keys=None):
+            for k in keys[:max_keys] if max_keys else keys:
                 r.append(f"  '{k}': {self.__repr_field__(k, repr=repr)},")
 
         print_keys(other)
@@ -110,6 +134,36 @@ class WSSample:
         if arrays:
             r.append("# Arrays:")
             print_keys(arrays)
+
+        # Handle large subdirectories
+        for subdir, cols in sorted(large_subdirs.items()):
+            r.append(f"# {subdir} ({len(cols)} columns, showing top 10):")
+
+            # Try to get float values for sorting by highest value
+            float_values = []
+            for k in cols:
+                try:
+                    v = self[k]
+                    if isinstance(v, (int, float)) and not isinstance(v, bool):
+                        float_values.append((k, float(v)))
+                    elif hasattr(v, "shape") and not v.shape and hasattr(v, "item"):
+                        # scalar numpy array
+                        float_values.append((k, float(v.item())))
+                except (WSShardMissingError, KeyError, TypeError, ValueError):
+                    pass
+
+            if len(float_values) == len(cols):
+                # All columns are floats, sort by value descending
+                float_values.sort(key=lambda x: x[1], reverse=True)
+                top_keys = [k for k, v in float_values[:10]]
+            else:
+                # Not all floats, just show first 10
+                top_keys = sorted(cols)[:10]
+
+            print_keys(top_keys)
+            if len(cols) > 10:
+                r.append(f"  # ... and {len(cols) - 10} more columns")
+
         r.append("})\n")
         return "\n".join(r)
 
