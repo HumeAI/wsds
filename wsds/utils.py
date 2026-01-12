@@ -220,7 +220,9 @@ def scan_ipc(path: str | Path, *args, glob=True, **kwargs):
 def format_duration(duration):
     """Formats a duration in seconds as hours (or minutes or kilo-hours)."""
     hours = duration / 3600
-    if hours > 1000:
+    if hours > 1000000:
+        return f"{hours / 1000000:.2f} M hours"
+    elif hours > 1000:
         return f"{hours / 1000:.2f} k hours"
     elif hours < 1:
         return f"{duration / 60:.1f} minutes"
