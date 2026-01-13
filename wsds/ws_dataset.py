@@ -297,10 +297,7 @@ class WSDataset:
 
         return exprs, pl.concat(row_merge)
 
-    def sql_select(self, *queries, return_as_lazyframe=False, shard_subsample=None, rng=42) -> pl.DataFrame | pl.LazyFrame:
-        """Given a list of SQL expressions, returns a Polars DataFrame/ LazyFrame with the results."""
-        if isinstance(rng, int):
-            rng = random.Random(rng)
+    def _check_for_subsampling(self, shard_subsample):
         if shard_subsample is None:
             if not self.index or self.index.n_shards < 150:
                 shard_subsample = 1
@@ -309,17 +306,25 @@ class WSDataset:
                 if not hasattr(self, '_shown_subsampling_info'):
                     print(f"INFO: to speed things up wsds is loading a random {shard_subsample*100:.2f}% subset of the shards, pass shard_subsample=1 to force it to load the whole dataset")
                     self._shown_subsampling_info = True
-        exprs, df = self._parse_sql_queries_polars(*queries, shard_subsample=shard_subsample, rng=rng)
+        return shard_subsample
+
+    def sql_select(self, *queries, return_as_lazyframe=False, shard_subsample=None, rng=42) -> pl.DataFrame | pl.LazyFrame:
+        """Given a list of SQL expressions, returns a Polars DataFrame/ LazyFrame with the results."""
+        if isinstance(rng, int):
+            rng = random.Random(rng)
+        exprs, df = self._parse_sql_queries_polars(*queries, shard_subsample=self._check_for_subsampling(shard_subsample), rng=rng)
 
         if return_as_lazyframe:
             return df.select(exprs)
 
         return df.select(exprs).collect()
 
-    def sql_filter(self, query):
+    def sql_filter(self, query, shard_subsample=None, rng=42):
         """Given a boolean SQL expression, returns a list of keys for samples that match the query."""
+        if isinstance(rng, int):
+            rng = random.Random(rng)
 
-        exprs, df = self._parse_sql_queries_polars(query)
+        exprs, df = self._parse_sql_queries_polars(query, shard_subsample=self._check_for_subsampling(shard_subsample), rng=rng)
         return df.filter(exprs[0]).select("__key__").filter(pl.col("__key__").is_not_null()).collect()["__key__"]
 
     def filtered(
@@ -329,6 +334,8 @@ class WSDataset:
         shuffle: bool = True,  # shuffle the sample order (otherwise it will return them as they appear in the dataset)
         N: int = None,  # optional maximum number of samples to yield (otherwise it will yield all matching samples)
         seed: int = None,  # optional random seed used shuffling
+        shard_subsample=None,
+        rng=42,
     ):
         """Given an boolean SQL expression, returns an iterator which yields random samples
         that match the query.
@@ -343,7 +350,7 @@ class WSDataset:
         import polars as pl
 
         i = 0
-        keys = self.sql_filter(query)
+        keys = self.sql_filter(query, shard_subsample=shard_subsample, rng=rng)
         self.last_query_n_samples = len(keys)
         while True:
             if N is None:
