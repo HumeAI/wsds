@@ -230,7 +230,7 @@ class WSDataset:
     #
     # SQL support, using Polars
     #
-    def _parse_sql_queries_polars(self, *queries):
+    def _parse_sql_queries_polars(self, *queries, shard_subsample=1, rng=None):
         """Parses SQL queries via Polars to:
         - extract the Polars expressions for each query
         - use the expressions to build a list of subdirs to load shards from"""
@@ -252,10 +252,16 @@ class WSDataset:
                 subdirs.add(self.fields["__key__"][0])
             exprs.append(expr)
 
+        if rng is None:
+            rng = random
+        shard_list = self.get_shard_list()
+        if shard_subsample != 1:
+            shard_list = rng.sample(shard_list, int(len(shard_list) * shard_subsample))
+
         row_merge = []
         subdir_samples = {}
         missing = defaultdict(list)
-        for shard in self.get_shard_list():
+        for shard in shard_list:
             col_merge = []
             for subdir in subdirs:
                 shard_path = self.get_shard_path(subdir, shard)
@@ -291,9 +297,19 @@ class WSDataset:
 
         return exprs, pl.concat(row_merge)
 
-    def sql_select(self, *queries, return_as_lazyframe=False) -> pl.DataFrame | pl.LazyFrame:
+    def sql_select(self, *queries, return_as_lazyframe=False, shard_subsample=None, rng=42) -> pl.DataFrame | pl.LazyFrame:
         """Given a list of SQL expressions, returns a Polars DataFrame/ LazyFrame with the results."""
-        exprs, df = self._parse_sql_queries_polars(*queries)
+        if isinstance(rng, int):
+            rng = random.Random(rng)
+        if shard_subsample is None:
+            if not self.index or self.index.n_shards < 150:
+                shard_subsample = 1
+            else:
+                shard_subsample = 150 / self.index.n_shards
+                if not hasattr(self, '_shown_subsampling_info'):
+                    print(f"INFO: to speed things up wsds is loading a random {shard_subsample*100:.2f}% subset of the shards, pass shard_subsample=1 to force it to load the whole dataset")
+                    self._shown_subsampling_info = True
+        exprs, df = self._parse_sql_queries_polars(*queries, shard_subsample=shard_subsample, rng=rng)
 
         if return_as_lazyframe:
             return df.select(exprs)
