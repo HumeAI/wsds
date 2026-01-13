@@ -237,20 +237,22 @@ class WSDataset:
 
         subdirs = set()
         exprs = []
+        needs_key = False
         for query in queries:
             expr = pl.sql_expr(query)
             for col in expr.meta.root_names():
                 if col == "__key__":
                     # __key__ exists in all shards
+                    needs_key = True
                     continue
                 subdir, field = self.fields[col]
                 assert col == field, "renamed fields are not supported in SQL queries yet"
                 subdirs.add(subdir)
-
-            # If only __key__ is in the query, we need to load shards from at least one subdir
-            if not subdirs and "__key__" in expr.meta.root_names():
-                subdirs.add(self.fields["__key__"][0])
             exprs.append(expr)
+
+        # If only __key__ is in the query, we need to load shards from at least one subdir
+        if not subdirs and needs_key:
+            subdirs.add(self.fields["__key__"][0])
 
         if rng is None:
             rng = random
