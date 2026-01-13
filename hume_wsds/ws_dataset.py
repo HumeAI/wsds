@@ -46,7 +46,7 @@ class WSDataset:
     # FIXME: this should be overridable with metadata in index.sqlite3
     _audio_file_keys = ["flac", "mp3", "sox", "wav", "m4a", "ogg", "wma", "opus", "audio"]
 
-    def __init__(self, dataset_dir: str):
+    def __init__(self, dataset_dir: str, include_in_progress: bool = True):
         self.dataset_dir = self._resolve_path(dataset_dir)
 
         self.index = None
@@ -56,7 +56,9 @@ class WSDataset:
             self.index = WSIndex(index_file)
             self.segmented = self.index.metadata.get("segmented", False)
 
-        self.fields = list_all_columns(self.dataset_dir, next(self.index.shards()) if self.index else None)
+        self.fields = list_all_columns(
+            self.dataset_dir, next(self.index.shards()) if self.index else None, include_in_progress=include_in_progress
+        )
         self.computed_columns = {}
 
         self._filter_dfs = None  # mapping of "filter name" -> polars dataframe representing the filter
@@ -187,6 +189,13 @@ class WSDataset:
             return sys.maxsize
         return self.index.query("SELECT n_samples FROM shards WHERE shard = ?", shard_name).fetchone()[0]
 
+    def __len__(self):
+        """Returns the number of samples in the dataset.
+
+        @public"""
+        assert self.index is not None, "Length is only known for indexed datasets"
+        return self.index.n_samples
+
     #
     # SQL support, using Polars
     #
@@ -209,6 +218,7 @@ class WSDataset:
                 subdir, field = self.fields[col]
                 assert col == field, "renamed fields are not supported in SQL queries yet"
                 subdirs.add(subdir)
+
             # If only __key__ is in the query, we need to load shards from at least one subdir
             if not subdirs and "__key__" in expr.meta.root_names():
                 subdirs.add(self.fields["__key__"][0])
@@ -256,6 +266,7 @@ class WSDataset:
 
     def sql_filter(self, query):
         """Given a boolean SQL expression, returns a list of keys for samples that match the query."""
+
         exprs, df = self._parse_sql_queries_polars(query)
         return df.filter(exprs[0]).select("__key__").filter(pl.col("__key__").is_not_null()).collect()["__key__"]
 
@@ -305,6 +316,7 @@ class WSDataset:
 
         Example:
             WSDS_DATASET_PATH=/path/to/datasets:/another/path/to/datasets"""
+
         path = Path(path_str)
         if path.is_absolute() or path.exists():
             return path
@@ -381,11 +393,21 @@ class WSDataset:
         if self.segmented:
             out += f"    Speech duration: {format_duration(self.index.speech_duration)}\n"
         out += f"   Number of shards: {self.index.n_shards}\n"
-        out += f"Number of samples: {format(self.index.n_samples, ',d').replace(',', ' ')}\n"
+        out += f"  Number of samples: {format(len(self), ',d').replace(',', ' ')}\n"
         return out
 
     def __repr__(self):
         return f"WSDataset({repr(str(self.dataset_dir))}, segmented={self.segmented})"
+
+    def _display_(self):
+        import marimo
+
+        return marimo.vstack(
+            [
+                marimo.md(f"```python\n{self.__str__()}\n```\n### One sample:\n"),
+                self.random_sample()._display_(),
+            ]
+        )
 
 
 def format_duration(duration):

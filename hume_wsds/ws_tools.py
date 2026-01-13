@@ -6,6 +6,7 @@ from collections import defaultdict
 from pathlib import Path
 
 import numpy as np
+import polars as pl
 import pyarrow as pa
 import webdataset as wds
 
@@ -56,11 +57,13 @@ def inspect_dataset(input_path, verbose=True):
             print(x)
             break
 
+
 def inspect_shard(input_path):
     reader = pa.RecordBatchFileReader(pa.memory_map(str(input_path)))
     print(f"Batches: {reader.num_record_batches}")
     print(f"Rows: {int(reader.schema.metadata[b'batch_size']) * reader.num_record_batches}")
     print(f"Schema:\n{reader.schema}")
+
 
 @command
 def inspect(input_path: str):
@@ -76,14 +79,37 @@ def inspect(input_path: str):
             for file in segmentations:
                 inspect_dataset(str(file), verbose=False)
             if not segmentations:
-                for shard in Path(input_path).glob('*.wsds'):
+                for shard in Path(input_path).glob("*.wsds"):
                     print(f"Inspecting first shard: {shard}")
                     inspect_shard(shard)
                     break
                 else:
                     print("Nothing to inspect here...")
-    elif input_path.endswith('.wsds'):
+    elif input_path.endswith(".wsds"):
         inspect_shard(input_path)
+
+
+def print_head(shard: str, n: int = 5):
+    reader = pa.ipc.open_file(shard)
+    batch = reader.get_batch(0)
+    table = batch.to_pandas()
+    print(table.head(n))
+
+
+@command
+def head_shard(input_path: str, n: int = 5):
+    """Displays metadata and schema of a wsds dataset or shard."""
+    import warnings
+
+    warnings.filterwarnings("ignore", category=RuntimeWarning, module="pandas.io.formats.format")
+
+    if Path(input_path).is_dir():
+        for shard in Path(input_path).glob("*.wsds"):
+            print(f"Inspecting first shard: {shard}")
+            print_head(shard, n)
+            break
+    elif input_path.endswith(".wsds"):
+        print_head(input_path, n)
 
 
 @command
@@ -191,6 +217,8 @@ def shard_from_webdataset(
                                 new_s[meta] = tar.extractfile(fields[meta]).read().decode("utf-8", errors="ignore")
                             except Exception:
                                 new_s[meta] = ""
+                        else:
+                            new_s[meta] = ""
 
                     vtts = {}
                     for k, v in fields.items():
@@ -377,7 +405,7 @@ class validate:
         from .utils import list_all_shards
         from .ws_sink import indented
 
-        shard_names = list_all_shards(dataset, verbose)
+        shard_names = list_all_shards(dataset, verbose=True, print_missing=False)
         print()
         for subdir in Path(dataset).iterdir():
             if not subdir.is_dir():
@@ -397,11 +425,133 @@ class validate:
                         print()
 
     @staticmethod
+    def load_test_yaml(test_yaml_path: Path):
+        """Load the expected artifacts, keys, and datatypes from test.yaml"""
+        import yaml
+
+        with open(test_yaml_path, "r") as f:
+            config = yaml.safe_load(f)
+        return config.get("artifacts", {})
+
+    @command("validate_artifacts")
+    @staticmethod
+    def validate_artifacts(dataset: Path, test_yaml: Path, verbose=False, check_index=False, n_shards: int = None):
+        """
+        Validate that:
+        1. The dataset has a valid index and loads correctly.
+        2. All expected artifacts exist as subdirectories.
+        3. Each artifact's .wsds shards contain the correct columns.
+        4. Each column matches the expected datatype defined in test.yaml.
+        """
+        from tqdm import tqdm
+
+        from . import WSDataset
+
+        RED = "\033[0;31m"
+        GREEN = "\033[0;32m"
+        YELLOW = "\033[1;33m"
+        BOLD = "\033[1m"
+        RESET = "\033[0m"
+
+        dataset = Path(dataset)
+        expected_artifacts = validate.load_test_yaml(test_yaml)
+
+        if check_index:
+            print(f"\n{BOLD}Running quick dataset check for:{RESET} {dataset}\n")
+
+            index_path = dataset / "index.sqlite3"
+            if not index_path.exists():
+                print(f"{RED}✗ Missing index.sqlite3 at {index_path}{RESET}")
+            else:
+                print(f"{GREEN}✓ Found index.sqlite3{RESET}")
+
+            try:
+                ds = WSDataset(dataset)
+                sample = ds.random_sample()
+                print(f"{GREEN}✓ WSDataset loaded successfully{RESET}")
+                print(f"Sample keys: {list(sample.keys())[:8]} ...\n")
+                print(sample)
+            except Exception as e:
+                print(f"{RED}✗ Failed to load WSDataset: {e}{RESET}")
+                print(f"{YELLOW}Skipping deeper validation for {dataset}{RESET}\n")
+                return
+
+        existing_subdirs = {d.name for d in dataset.iterdir() if d.is_dir()}
+        expected_subdirs = set(expected_artifacts.keys())
+
+        missing_artifacts = expected_subdirs - existing_subdirs
+        extra_artifacts = existing_subdirs - expected_subdirs
+
+        if missing_artifacts:
+            print(f"{RED}Missing artifacts:{RESET} {', '.join(missing_artifacts)}")
+        if extra_artifacts:
+            print(f"{YELLOW}Extra artifacts found (not in YAML):{RESET} {', '.join(extra_artifacts)}")
+
+        # --- Step 2: Validate keys and datatypes ---
+        for artifact_name, artifact_spec in expected_artifacts.items():
+            artifact_path = dataset / artifact_name
+            if not artifact_path.exists():
+                print(f"{YELLOW}Skipping missing artifact:{RESET} {artifact_name}")
+                continue
+
+            if "columns_data_types" in artifact_spec:
+                expected_types = artifact_spec["columns_data_types"]
+                expected_keys = set(expected_types.keys())
+
+            shard_files = sorted(artifact_path.glob("*.wsds"))
+            if n_shards is not None:
+                shard_files = shard_files[:n_shards]
+
+            artifact_failed = False
+
+            for shard_file in tqdm(shard_files, desc=f"Validating {artifact_name}"):
+                try:
+                    import pyarrow as pa
+
+                    reader = pa.ipc.open_file(shard_file)
+                    schema = reader.schema
+                    columns = {f.name: str(f.type) for f in schema}
+                    actual_keys = set(columns.keys())
+
+                except Exception as e:
+                    artifact_failed = True
+                    print(f"{RED}Could not read schema from {shard_file}: {e}{RESET}")
+                    continue
+
+                # --- Compare keys ---
+                missing_keys = expected_keys - actual_keys
+                extra_keys = actual_keys - expected_keys
+
+                if missing_keys:
+                    artifact_failed = True
+                    print(f"{RED}{shard_file}: Missing keys {missing_keys}{RESET}")
+                if extra_keys and verbose:
+                    print(f"{YELLOW}{shard_file}: Extra keys {extra_keys}{RESET}")
+
+                # --- Compare datatypes ---
+                for key, expected_type in expected_types.items():
+                    if key not in columns:
+                        continue
+                    actual_type = columns[key]
+                    if expected_type.lower() not in actual_type.lower():
+                        artifact_failed = True
+                        print(
+                            f"{RED}{shard_file}: Key '{key}' type mismatch "
+                            f"(expected {expected_type}, got {actual_type}){RESET}"
+                        )
+
+            if artifact_failed:
+                print(f"{RED}{BOLD}✗ {artifact_name} failed validation{RESET}")
+            else:
+                print(f"{GREEN}{BOLD}✓ {artifact_name} passed validation{RESET}")
+
+        print(f"\n{BOLD}Validation complete.{RESET}\n")
+
+    @staticmethod
     def keys(dataset: Path, verbose=False, skip_audio=True):
         """Validate __key__s against the index for all the shards in the dataset."""
         from collections import defaultdict
 
-        import polars as pl
         from tqdm import tqdm
 
         from . import WSDataset
@@ -465,8 +615,6 @@ def get_shard_schema(fname):
 
 
 def generate_all_keys_for_shard(index, shard):
-    import polars as pl
-
     N, shard_id = index.query("SELECT n_samples, shard_id FROM shards WHERE shards.shard = ?", shard).fetchone()
     files = index.query("SELECT name, offset FROM files WHERE files.shard_id == ?", shard_id).fetchall()
     df = pl.DataFrame(files, schema=["name", "offset"], orient="row")
@@ -535,8 +683,9 @@ def init(
 def extract_index_for_shard(dataset, shard, vad_column=None):
     from torchcodec.decoders import AudioDecoder
 
+    from hume_wsds.ws_audio import to_filelike
+
     from . import WSDataset
-    from .ws_audio import to_filelike
 
     ds = WSDataset(dataset)
     index = []
@@ -564,15 +713,10 @@ def extract_index_for_shard(dataset, shard, vad_column=None):
             if vad.size > 0:
                 speech_duration = float((vad[:, -1] - vad[:, -2]).sum())  # tend - tstart
 
+        # import ipdb; ipdb.set_trace()
         try:
-            # decoder = s.get_audio()
-            # audio_duration = decoder.metadata.duration_seconds_from_header
-            import torchaudio
-            import io
-            audio_reader = s.get_audio()
-            audio_data = audio_reader.unwrap()
-            info = torchaudio.info(io.BytesIO(audio_data))
-            audio_duration = info.num_frames / info.sample_rate
+            decoder = AudioDecoder(to_filelike(s.get_audio().unwrap()))
+            audio_duration = decoder.metadata.duration_seconds_from_header
         except Exception as e:
             print("Audio loading error:", e)
             print("         for sample:", s)
@@ -592,27 +736,66 @@ def extract_index_for_shard(dataset, shard, vad_column=None):
 
 
 @command
-def _sort_columns(*fnames, add_prefix : str | None = None, dry_run : bool = False):
+def _sort_columns(*fnames, add_prefix: str | None = None, dry_run: bool = False):
+    import pyarrow as pa
     from tqdm import tqdm
 
     from .ws_sink import AtomicFile
 
-    _renames = {
-        "dtok_level_1_16k.npy": "dtok_v2_ml_50hz_32x16384_graphemes_key16k.dtok_level_1_16k.txt",
+    _renames_general = {
+        "parakeet-tdt-0-6b-v3.txt": "transcription_parakeet-tdt-0-6b-v3_raw.txt",
+        "parakeet_wordlevel.txt": "words_parakeet-tdt-0-6b-v3_raw.txt",
+        "raw.spk_emb.npy": "v4-vad_ws_continuous_mvad.raw.spk_emb.npy",
+        "raw.subvads.pyd": "v4-vad_ws_continuous_mvad.raw.subvads.pyd",
+        "raw.vad.npy": "v4-vad_ws_continuous_mvad.raw.vad.npy",
+        "txt": "transcription_wslang_turbo_raw.txt",
+        "m4a": "audio",
+        "mp3": "audio",
+    }
+    # 16k dtoks
+    _renames_16k = {
+        "dtok_level_1_16k.txt": "dtok_v2_ml_50hz_32x16384_graphemes_key16k.dtok_level_1_16k.npy",
+        "dtok_v2_ml_50hz_32x16384_graphemes_key16k.dtok_level_1_16k.txt": "dtok_v2_ml_50hz_32x16384_graphemes_key16k.dtok_level_1_16k.npy",
+        "source_start_end_time.txt": "dtok_v2_ml_50hz_32x16384_graphemes_key16k.source_start_end_time.npy",
+        "boundary_shift_energy.npy": "dtok_v2_ml_50hz_32x16384_graphemes_key16k.boundary_shift_energy.npy",
+        "dtok_level_1_16k.npy": "dtok_v2_ml_50hz_32x16384_graphemes_key16k.dtok_level_1_16k.npy",
         "source_start_end_time.npy": "dtok_v2_ml_50hz_32x16384_graphemes_key16k.source_start_end_time.npy",
+        "vad_boundary_shift.npy": "dtok_v2_ml_50hz_32x16384_graphemes_key16k.vad_boundary_shift.npy",
+        "vad_original_duration.npy": "dtok_v2_ml_50hz_32x16384_graphemes_key16k.vad_original_duration.npy",
+        "vad_original_gap.npy": "dtok_v2_ml_50hz_32x16384_graphemes_key16k.vad_original_gap.npy",
+    }
+    # 25hz dtoks
+    _renames_25hz = {
+        "boundary_shift_energy.npy": "dtok_v2_ml_25hz_32x16384_graphemes_v2_encoder.boundary_shift_energy.npy",
+        "dtok_level_1.npy": "dtok_v2_ml_25hz_32x16384_graphemes_v2_encoder.dtok_level_1.npy",
+        "dtok_level_2.npy": "dtok_v2_ml_25hz_32x16384_graphemes_v2_encoder.dtok_level_2.npy",
+        "dtok_global.npy": "dtok_v2_ml_25hz_32x16384_graphemes_v2_encoder.dtok_global.npy",
+        "source_start_end_time.npy": "dtok_v2_ml_25hz_32x16384_graphemes_v2_encoder.source_start_end_time.npy",
+        "vad_boundary_shift.npy": "dtok_v2_ml_25hz_32x16384_graphemes_v2_encoder.vad_boundary_shift.npy",
+        "vad_original_duration.npy": "dtok_v2_ml_25hz_32x16384_graphemes_v2_encoder.vad_original_duration.npy",
+        "vad_original_gap.npy": "dtok_v2_ml_25hz_32x16384_graphemes_v2_encoder.vad_original_gap.npy",
     }
 
-    if dry_run: fnames = fnames[:1]
     for fname in tqdm(fnames):
+        if "dtok_v2_ml_25hz" in fname.lower():
+            _renames = _renames_25hz
+        elif "dtok_v2_ml_50hz" in fname.lower():
+            _renames = _renames_16k
+        else:
+            _renames = _renames_general
+
         reader = pa.ipc.open_file(fname)
         table = reader.read_all()
         table2 = table.select(sorted(table.column_names))
         if add_prefix:
-            table2 = table2.rename_columns([f"{add_prefix}{k}" if k != '__key__' else '__key__' for k in table2.column_names])
+            table2 = table2.rename_columns(
+                [f"{add_prefix}{k}" if k != "__key__" else "__key__" for k in table2.column_names]
+            )
         else:
             table2 = table2.rename_columns([k if k not in _renames else _renames[k] for k in table2.column_names])
         if dry_run:
             from .ws_sink import indented
+
             if table.schema != table2.schema:
                 new = "NEW: "
                 tqdm.write(indented("OLD: ", table.schema))
@@ -621,7 +804,340 @@ def _sort_columns(*fnames, add_prefix : str | None = None, dry_run : bool = Fals
             tqdm.write(indented(new, table2.schema))
             # return
         else:
-            if table.schema == table2.schema: return
+            if table.schema == table2.schema:
+                continue
             with AtomicFile(fname) as fname:
                 with pa.ipc.new_file(fname, table2.schema.with_metadata(reader.schema.metadata)) as sink:
                     sink.write_table(table2)
+        # else:
+        #     print(f"No changes needed: {fname}")
+
+
+@command
+def _rename_keys(*fnames, dry_run: bool = False):
+    """Rename keys in wsds shards by stripping '/' or './' prefixes from key names."""
+    import pyarrow as pa
+    from tqdm import tqdm
+
+    from .ws_sink import AtomicFile
+
+    def strip_path_prefix(key):
+        """Strip '/' or './' prefix from key name if present."""
+        if key.startswith("./"):
+            return key[2:]
+        elif key.startswith("/"):
+            return key[1:]
+        return key
+
+    for fname in tqdm(fnames):
+        reader = pa.ipc.open_file(fname)
+        table = reader.read_all()
+
+        # Get the __key__ column and check for changes in one pass
+        key_column = table["__key__"]
+        changes = []
+        new_keys = []
+
+        for key in key_column:
+            old_key = key.as_py()
+            new_key = strip_path_prefix(old_key)
+            new_keys.append(new_key)
+            if old_key != new_key:
+                changes.append((old_key, new_key))
+
+        if dry_run:
+            if changes:
+                tqdm.write(f"{fname}: Would rename {len(changes)} keys")
+                for old_key, new_key in changes[:2]:
+                    tqdm.write(f"  '{old_key}' -> '{new_key}'")
+                tqdm.write("...")
+            else:
+                tqdm.write(f"{fname}: NO CHANGE - no keys need renaming")
+        else:
+            if not changes:
+                continue
+            # Create new table with renamed keys
+            table2 = table.set_column(0, "__key__", pa.array(new_keys))
+            with AtomicFile(fname) as tmp:
+                with pa.ipc.new_file(tmp, table2.schema.with_metadata(reader.schema.metadata)) as sink:
+                    sink.write_table(table2)
+
+
+@command
+def _convert_datatype(*fnames, target_type="string", columns=""):
+    """
+    Convert all or specific columns in the given .wsds files to a specific Arrow datatype
+    (e.g., string, float32, int64, etc.).
+
+    Example:
+        wsds _convert_datatype /path/to/shards/*.wsds --target_type string --columns transcription.txt
+    """
+    import pyarrow as pa
+    import tqdm
+
+    from .ws_sink import AtomicFile
+
+    _type_map = {
+        "string": pa.utf8(),
+        "binary": pa.binary(),
+        "float32": pa.float32(),
+        "float16": pa.float16(),
+        "int32": pa.int32(),
+        "int64": pa.int64(),
+    }
+
+    if target_type not in _type_map:
+        raise ValueError(f"Unsupported target_type: {target_type}. Choose from {list(_type_map)}")
+
+    target_arrow_type = _type_map[target_type]
+    selected_cols = [c.strip() for c in columns.split(",") if c.strip()] if columns else None
+
+    for fname in tqdm.tqdm(fnames, desc=f"Converting to {target_type}"):
+        reader = pa.ipc.open_file(fname)
+        table = reader.read_all()
+        new_cols = {}
+
+        for name in table.column_names:
+            col = table[name]
+            col_type = col.type
+
+            if selected_cols and name not in selected_cols:
+                new_cols[name] = col
+                continue
+
+            if col_type == target_arrow_type:
+                new_cols[name] = col
+                continue
+
+            try:
+                new_cols[name] = col.cast(target_arrow_type)
+            except Exception as e:
+                print(f"Failed to convert column '{name}' in {fname}: {e}")
+                new_cols[name] = col
+
+        table2 = pa.table(new_cols)
+        if table.schema != table2.schema:
+            with AtomicFile(fname) as tmp:
+                with pa.ipc.new_file(tmp, table2.schema.with_metadata(reader.schema.metadata)) as sink:
+                    sink.write_table(table2)
+
+
+@command
+def _remove_columns(*fnames, remove: str = ""):
+    """
+    Remove one or more columns from .wsds shard files if they exist.
+
+    Example:
+        wsds _remove_columns /path/to/shards/*.wsds --remove transcription_parakeet-tdt-0-6b-v3_raw.txt
+        wsds _remove_columns /path/to/shards/*.wsds --remove col1,col2,col3
+    """
+    import pyarrow as pa
+    import tqdm
+
+    from .ws_sink import AtomicFile
+
+    remove_cols = [r.strip() for r in remove.split(",") if r.strip()]
+    if not remove_cols:
+        raise ValueError("You must specify at least one column to remove via --remove")
+
+    for fname in tqdm.tqdm(fnames, desc=f"Removing {remove_cols}"):
+        reader = pa.ipc.open_file(fname)
+        table = reader.read_all()
+
+        cols_to_drop = [c for c in table.column_names if c in remove_cols]
+        if not cols_to_drop:
+            continue
+
+        table2 = table.drop(cols_to_drop)
+
+        if table.schema != table2.schema:
+            with AtomicFile(fname) as tmp:
+                with pa.ipc.new_file(tmp, table2.schema.with_metadata(reader.schema.metadata)) as sink:
+                    sink.write_table(table2)
+
+
+@command
+class check_status:
+    @staticmethod
+    def all_datasets_progress(
+        dataset: Path = None,
+        test_yaml: Path = None,
+        columns: list[str] = None,
+        show_mvad: bool = False,
+        refresh_interval: float = 2.0,
+    ):
+        """Display a live-updating table of shard completion across datasets."""
+        import time
+
+        from rich.console import Console
+        from rich.live import Live
+        from rich.table import Table
+
+        console = Console()
+        base_path = Path(dataset) if dataset else Path("/mnt/weka/data-wsds")
+        artifacts = validate.load_test_yaml(test_yaml)
+        ALLOWED_SHARDS = list(artifacts.keys())
+        if columns:
+            ALLOWED_SHARDS = [a for a in artifacts.keys() if a in columns]
+        if show_mvad:
+            artifacts["mvad"] = {"display_name": "mvad"}
+            ALLOWED_SHARDS = ["mvad"] + ALLOWED_SHARDS
+
+        def generate_table():
+            # Collect dataset info for allowed shards only
+            dataset_info = {}
+
+            for dataset_dir in base_path.iterdir():
+                if not dataset_dir.is_dir():
+                    continue
+
+                # Get ground truth total from source audio
+                source_audio = dataset_dir / "source" / "audio"
+                total_shards = len(list(source_audio.glob("*.wsds"))) if source_audio.exists() else 0
+
+                if total_shards == 0:
+                    continue
+
+                # Look for version folders (v2*, v3*, v4*, etc.)
+                for version_dir in dataset_dir.iterdir():
+                    if not version_dir.is_dir() or not version_dir.name.startswith("v"):
+                        continue
+
+                    for shard_dir in version_dir.iterdir():
+                        if not shard_dir.is_dir() or shard_dir.name not in ALLOWED_SHARDS:
+                            continue
+
+                        completed = len(list(shard_dir.glob("*.wsds")))
+                        if completed > 0:
+                            if dataset_dir.name not in dataset_info:
+                                dataset_info[dataset_dir.name] = {
+                                    "type": version_dir.name,
+                                    "total": total_shards,
+                                    "shards": {},
+                                }
+                            dataset_info[dataset_dir.name]["shards"][shard_dir.name] = completed
+
+            if show_mvad:
+                for dataset_name in dataset_info.keys():
+                    source_dir = base_path / dataset_name / "source"
+                    num_mvad_shards = len(list(source_dir.glob("v*/*.wsds")))
+                    dataset_info[dataset_name]["shards"]["mvad"] = num_mvad_shards
+
+            # Build table
+            table = Table(title="Dataset Shard Validation Status")
+            table.add_column("Dataset", style="cyan", no_wrap=True)
+            table.add_column("Type", style="cyan", width=22, overflow="fold", no_wrap=False)
+
+            for shard_name in ALLOWED_SHARDS:
+                display_name = artifacts[shard_name].get("display_name", shard_name)
+                table.add_column(display_name, justify="center", width=18, overflow="fold", no_wrap=False)
+
+            for dataset_name in sorted(dataset_info.keys()):
+                info = dataset_info[dataset_name]
+                dataset_type = info["type"]
+                total = info["total"]
+                shards = info["shards"]
+                row = [dataset_name, dataset_type]
+
+                for shard_name in ALLOWED_SHARDS:
+                    if shard_name not in shards:
+                        row.append("[red]-[/red]")
+                        continue
+
+                    completed = shards[shard_name]
+                    pct = (completed / total * 100) if total > 0 else 0
+
+                    # Color code based on percentage
+                    if pct == 0 or pct > 100:
+                        color = "red"
+                    elif pct == 100:
+                        color = "green"
+                    else:
+                        color = "yellow"
+
+                    row.append(f"[{color}]{completed}/{total} ({pct:.0f}%)[/{color}]")
+
+                table.add_row(*row)
+
+            return table
+
+        with Live(generate_table(), refresh_per_second=1 / refresh_interval, console=console) as live:
+            try:
+                while True:
+                    time.sleep(refresh_interval)
+                    live.update(generate_table())
+            except KeyboardInterrupt:
+                pass
+
+    @staticmethod
+    def dataset_progress(dataset: Path, refresh_interval: float = 5.0):
+        """Display completion progress for each subdirectory."""
+        import time
+
+        from rich.console import Console
+        from rich.live import Live
+        from rich.table import Table
+
+        from .utils import list_all_shards
+
+        console = Console()
+
+        def generate_table():
+            table = Table(title=f"Dataset Shard Progress: {dataset}")
+            table.add_column("Subdirectory", style="cyan")
+            table.add_column("Completed", justify="right")
+            table.add_column("Total", justify="right")
+            table.add_column("Progress", justify="center")
+            table.add_column("Status", justify="center")
+
+            shard_names = list_all_shards(dataset, verbose=False, print_missing=False)
+            total_shards = len(shard_names)
+
+            for subdir in sorted(Path(dataset).iterdir()):
+                if not subdir.is_dir():
+                    continue
+
+                completed = 0
+                conflicts = False
+                schemas = {}
+
+                for shard_name in shard_names:
+                    shard_path = (subdir / shard_name).with_suffix(".wsds")
+                    if shard_path.exists():
+                        try:
+                            schema = get_shard_schema(shard_path)
+                            if schema:
+                                schemas[shard_name] = schema
+                                completed += 1
+                        except Exception:
+                            pass
+
+                # Check for schema conflicts
+                unique_schemas = set(schemas.values())
+                conflicts = len(unique_schemas) > 1
+
+                progress_pct = (completed / total_shards * 100) if total_shards > 0 else 0
+                progress_bar = f"[{'=' * int(progress_pct / 5):{20}}]"
+
+                status = (
+                    "⚠️ Conflict" if conflicts else ("✓ Complete" if completed == total_shards else "⏳ In Progress")
+                )
+                status_color = "red" if conflicts else ("green" if completed == total_shards else "yellow")
+
+                table.add_row(
+                    subdir.name,
+                    str(completed),
+                    str(total_shards),
+                    f"{progress_bar} {progress_pct:.1f}%",
+                    f"[{status_color}]{status}[/{status_color}]",
+                )
+
+            return table
+
+        with Live(generate_table(), refresh_per_second=1 / refresh_interval, console=console) as live:
+            try:
+                while True:
+                    time.sleep(refresh_interval)
+                    live.update(generate_table())
+            except KeyboardInterrupt:
+                pass

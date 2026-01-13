@@ -1,8 +1,8 @@
+import re
 from pathlib import Path
 
 import numpy as np
 import pyarrow as pa
-import re
 
 
 def get_columns(fname):
@@ -16,7 +16,7 @@ def find_first_shard(path):
     return next(Path(path).iterdir(), None)
 
 
-def list_all_columns(ds_path, shard_name=None):
+def list_all_columns(ds_path, shard_name=None, include_in_progress=True):
     """Given a dataset path, return a list of all columns.
 
     If you also give a shard name it greatly speeds it up
@@ -31,13 +31,18 @@ def list_all_columns(ds_path, shard_name=None):
             continue
         if not p.is_dir():
             continue
-        if shard_name is None:
+        is_in_progress = p.suffix == ".in-progress"
+        if is_in_progress and not include_in_progress:
+            continue
+        if shard_name is None or is_in_progress:
             fname = find_first_shard(p)
         else:
             fname = (p / shard_name).with_suffix(".wsds")
         if fname and fname.exists():
             for col in get_columns(fname):
-                if col == "__key__":
+                if col == "__key__" and not is_in_progress:
+                    # We need a subdir that has all shards but we don't wanna list all of them (that's expensive)
+                    # so instead we rely on a subdir naming convention (the .in-progress suffix)
                     key_col.append((fname.stat().st_size, p.name, col))
                     continue
                 # seems like we should fix this during the original conversion
@@ -52,18 +57,19 @@ def list_all_columns(ds_path, shard_name=None):
                     cols[col] = (p.name, col)
     # use the smallest shards for __key__ (should be the fastest)
     if len(key_col) > 0:
-        cols['__key__'] = sorted(key_col)[0][1:]
+        cols["__key__"] = sorted(key_col)[0][1:]
     return dict(sorted(cols.items()))
 
 
-def list_all_shards(dataset: str, verbose: bool = False):
+def list_all_shards(dataset: str, verbose: bool = False, print_missing: bool = False):
     shards = {}
     for subdir in Path(dataset).iterdir():
         if not subdir.is_dir():
             continue
         shards[subdir] = {file.name for file in subdir.iterdir() if file.suffix == ".wsds"}
         if not shards[subdir]:
-            print(f"error: empty folder {subdir}")
+            if verbose:
+                print(f"error: empty folder {subdir}")
             del shards[subdir]
 
     common_shards = {v for shard_values in shards.values() for v in shard_values}
@@ -78,9 +84,10 @@ def list_all_shards(dataset: str, verbose: bool = False):
         else:
             status = f"[MISSING {n_missing}]"
 
-        print(f"Path {subdir} has {len(files)}/{num_common} shards {status}")
+        if verbose:
+            print(f"Path {subdir} has {len(files)}/{num_common} shards {status}")
 
-        if n_missing > 0 and verbose:
+        if n_missing > 0 and print_missing:
             for m in sorted(missing):
                 print(f"    {m}")
             errors = True
@@ -92,7 +99,8 @@ def list_all_shards(dataset: str, verbose: bool = False):
     audio_dir = Path(dataset) / "../source/audio"
     if audio_dir.exists():
         audio_shards = [f for f in audio_dir.iterdir() if f.suffix == ".wsds"]
-        print(f"\nAudio dir {audio_dir.resolve()} has {len(audio_shards)} shards.")
+        if verbose:
+            print(f"\nAudio dir {audio_dir.resolve()} has {len(audio_shards)} shards.")
 
     return [x.replace(".wsds", "") for x in common_shards]
 
@@ -157,8 +165,10 @@ def parse_key_two_parts(key: str):
     src_file, segmentation_kind, segment_id = key.rsplit("_", 2)
     return src_file, segmentation_kind, int(segment_id)
 
-magic_check = re.compile('([*?[])')
-magic_check_bytes = re.compile(b'([*?[])')
+
+magic_check = re.compile("([*?[])")
+magic_check_bytes = re.compile(b"([*?[])")
+
 
 def has_magic(s):
     """Does the given input contain any shell globbing characters?"""
@@ -168,16 +178,18 @@ def has_magic(s):
         match = magic_check.search(s)
     return match is not None
 
+
 def scan_ipc(path: str | Path, *args, glob=True, **kwargs):
     """Like pl.scan_ipc but with a workaround to disable globbing.
 
     See also: https://github.com/pola-rs/polars/issues/24608"""
     import polars as pl
+
     path = str(path)
     if glob or not has_magic(path):
         return pl.scan_ipc(path, *args, **kwargs)
     else:
         # we open the file manually since scan_ipc always does globbing which does not work on files with square brackets in their names
-        f = open(path, 'rb')
+        f = open(path, "rb")
         # we will leak the file descriptor in this case but there is not a lot we can do about it (GC will close it eventually)
         return pl.scan_ipc(f)

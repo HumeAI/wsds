@@ -1,0 +1,81 @@
+artifacts:
+  transcription_wslang_turbo_raw:
+    display_name: whisper_turbo
+    columns_data_types:
+      "__key__": "String"
+      "language_whisper.txt": "String"
+      "probability_whisper": "halffloat"
+      "transcription_wslang_turbo_raw.txt": "String"
+
+  transcription_parakeet-tdt-0-6b-v3_raw:
+    display_name: parakeet
+    columns_data_types:
+      "__key__": "String"
+      "transcription_parakeet-tdt-0-6b-v3_raw.txt": "String"
+
+  transcription_anime_whisper_raw:
+    display_name: anime_whisper
+    columns_data_types:
+      "__key__": "String"
+      "anime_whisper.txt": "String"
+
+  transcription_wslang_raw:
+    display_name: whisper
+    columns_data_types:
+      "__key__": "String"
+      "transcription_wslang_raw.txt": "String"
+
+  dtok_v2_ml_25hz_32x16384_graphemes_v2_encoder:
+    display_name: dtok_l2
+    columns_data_types:
+      "__key__": "String"
+      "dtok_v2_ml_25hz_32x16384_graphemes_v2_encoder.boundary_shift_energy.npy": "Binary"
+      "dtok_v2_ml_25hz_32x16384_graphemes_v2_encoder.dtok_global.npy": "Binary"
+      "dtok_v2_ml_25hz_32x16384_graphemes_v2_encoder.dtok_level_1.npy": "Binary"
+      "dtok_v2_ml_25hz_32x16384_graphemes_v2_encoder.dtok_level_2.npy": "Binary"
+      "dtok_v2_ml_25hz_32x16384_graphemes_v2_encoder.source_start_end_time.npy": "Binary"
+      "dtok_v2_ml_25hz_32x16384_graphemes_v2_encoder.vad_boundary_shift.npy": "Binary"
+      "dtok_v2_ml_25hz_32x16384_graphemes_v2_encoder.vad_original_duration.npy": "Binary"
+      "dtok_v2_ml_25hz_32x16384_graphemes_v2_encoder.vad_original_gap.npy": "Binary"
+
+  pquality_wmusic_scores_raw:
+    display_name: pquality
+    columns_data_types:
+      "__key__": "String"
+      "music_qual": "Int32"
+      "pq": "halffloat"
+
+  acoustic_scores_raw:
+    display_name: acoustic
+    columns_data_types:
+      "__key__": "String"
+      "c50": "halffloat"
+      "dbu": "halffloat"
+      "snr": "halffloat"
+
+  dtok_v2_ml_50hz_32x16384_graphemes_key16k:
+    display_name: dtok_l1
+    columns_data_types:
+      "__key__": "String"
+      "dtok_v2_ml_50hz_32x16384_graphemes_key16k.boundary_shift_energy.npy": "Binary"
+      "dtok_v2_ml_50hz_32x16384_graphemes_key16k.dtok_level_1_16k.npy": "Binary"
+      "dtok_v2_ml_50hz_32x16384_graphemes_key16k.source_start_end_time.npy": "Binary"
+      "dtok_v2_ml_50hz_32x16384_graphemes_key16k.vad_boundary_shift.npy": "Binary"
+      "dtok_v2_ml_50hz_32x16384_graphemes_key16k.vad_original_duration.npy": "Binary"
+      "dtok_v2_ml_50hz_32x16384_graphemes_key16k.vad_original_gap.npy": "Binary"
+
+  segment_metadata:
+    display_name: metadata
+    columns_data_types:
+      "__key__": "String"
+      "tstart": "halffloat"
+      "tend": "halffloat"
+      "tmin": "halffloat"
+      "tmax": "halffloat"
+
+  tagger_raw_v0:
+    display_name: tagger
+    columns_data_types:
+      "__key__": "String"
+      "embed.npy": "Binary"
+      "tag_dict": "Struct"

@@ -1,0 +1,28 @@
+flags:
+  convert_audio: false
+  convert_mvad: false
+  convert_isolated_audio: false
+  convert_diarization: false
+  convert_artifacts: false
+  run_cleanup: true
+  create_index: true
+  cleanup_dry_run: false
+  yt_data_specific: true
+  audio_requires_sorting: true
+  mixed_audio: true
+  mvad_dir_name: "vad_silero_diarized_continuous"
+
+paths:
+  audio_base: /mnt/weka/data2/multimodal/hq_anneal/v0/youtube-hume/raw/audio/
+  input_base: /mnt/weka/data2/multimodal/hq_anneal/v0/youtube-hume/processed-v5-pipeline-diarized/
+  output_base: /mnt/weka/data-wsds/hq_annealed/youtube-hume/
+
+segmentation_type: v5-diarized_continuous
+
+subdirs:
+  - acoustic_scores_continuous
+  - transcription_wslang_continuous
+  - pquality_scores_continuous
+  - dtok_v2_ml_25hz_32x16384_graphemes_v2_encoder
+  - dtok_v2_ml_50hz_32x16384_graphemes_key16k
+  - speaker_labels_continuous

@@ -349,7 +349,7 @@ def _(
         return filtered_df, samples, duration
 
     def plot_stats(pre_df, post_df):
-        fig = sp.make_subplots(rows=2, cols=2, 
+        fig = sp.make_subplots(rows=2, cols=2,
                                subplot_titles=("SNR", "PQ", "Duration", "CPS"),
                                specs=[[{"type": "scatter"}, {"type": "scatter"}],
                                       [{"type": "scatter"}, {"type": "scatter"}]])
@@ -370,16 +370,16 @@ def _(
                 else:
                     x = np.linspace(data.min(), data.max(), 200)
                 y = kde(x)
-                fig.add_trace(go.Scatter(x=x, y=y, name=name, fill='tozeroy', 
-                                        line_color=color, opacity=0.6, 
-                                        showlegend=(row==1 and c==1)), 
+                fig.add_trace(go.Scatter(x=x, y=y, name=name, fill='tozeroy',
+                                        line_color=color, opacity=0.6,
+                                        showlegend=(row==1 and c==1)),
                              row=row, col=c)
 
         fig.update_layout(height=600)
         return fig
 
     def lang_comparison(pre_df, post_df):
-        fig = make_subplots(rows=1, cols=2, specs=[[{"type": "pie"}, {"type": "pie"}]], 
+        fig = make_subplots(rows=1, cols=2, specs=[[{"type": "pie"}, {"type": "pie"}]],
                             subplot_titles=("Pre-filter", "Post-filter"))
 
         pre_counts = pre_df['language'].value_counts()
@@ -613,7 +613,7 @@ def _(
             .sql(accept_query)    # filter by metrics
             .sample(10000)
             .with_columns(
-                cer = pl.col('t1').dist_str.levenshtein(pl.col('t2')) 
+                cer = pl.col('t1').dist_str.levenshtein(pl.col('t2'))
                     / (pl.col('t1').str.len_chars() + pl.col('t2').str.len_chars())
             )
             .filter(pl.col('cer').is_finite())

@@ -1,8 +1,9 @@
 import io
 import pickle
-from dataclasses import dataclass
 import re
 import typing
+from dataclasses import dataclass
+from typing import TYPE_CHECKING
 
 import numpy as np
 import pyarrow as pa
@@ -10,21 +11,27 @@ import pyarrow as pa
 from hume_wsds.ws_audio import AudioReader, WSAudio
 from hume_wsds.ws_sample import WSSample
 
+if TYPE_CHECKING:
+    from hume_wsds.ws_dataset import WSDataset
+
+
 class WSShardInterface:
     shard_name: str
     """Used by WSDataset to invalidate cached shards."""
 
-    def get_sample(self, column:str, offset:int) -> typing.Any:
+    def get_sample(self, column: str, offset: int) -> typing.Any:
         raise NotImplementedError
+
 
 class WSShard(WSShardInterface):
     """Represents a single open data shard (`.wsds` file).
 
     Caches one batch worth of data for efficient sequential access to samples."""
+
     fname: str
     reader: pa.RecordBatchFileReader
     batch_size: int
-    dataset: 'WSDataset'
+    dataset: "WSDataset"
 
     def __init__(self, dataset, fname, shard_name=None):
         self.dataset = dataset
@@ -39,7 +46,7 @@ class WSShard(WSShardInterface):
         self._end = None
         self._data = None
 
-    def get_sample(self, column:str, offset:int) -> typing.Any:
+    def get_sample(self, column: str, offset: int) -> typing.Any:
         if self._data is None or offset < self._start or offset >= self._end:
             i = offset // self.batch_size
             if i >= self.reader.num_record_batches:
@@ -80,6 +87,7 @@ class WSSourceAudioShard(WSShardInterface):
     """A proxy shard class (does not correspond to an actual `.wsds` file) to access audio data from a source dataset.
 
     It is used via the `WSDataset.add_computed` method or the `.wsds-link` file mechanism."""
+
     shard_name: str
     source_dataset: "WSDataset"  # noqa: F821
     derived_dataset: "WSDataset"  # noqa: F821
@@ -99,7 +107,7 @@ class WSSourceAudioShard(WSShardInterface):
 
     def get_sample(self, _column, offset):
         file_name, segment_offset = self.derived_dataset.parse_key(
-            WSSample(self.derived_dataset, self.shard_name, offset)['__key__']
+            WSSample(self.derived_dataset, self.shard_name, offset)["__key__"]
         )
 
         if self._source_file_name != file_name:
@@ -110,29 +118,33 @@ class WSSourceAudioShard(WSShardInterface):
         tstart, tend = self.get_timestamps(segment_offset)
         return WSAudio(self._source_reader, tstart, tend)
 
+
 class WSYoutubeVideoShard(WSSourceAudioShard):
-    re_pattern : re.Pattern[str]
+    re_pattern: re.Pattern[str]
 
     @classmethod
     def from_link(cls, link, source_dataset, derived_dataset, shard_name):
         self = super().from_link(link, source_dataset, derived_dataset, shard_name)
-        self.re_pattern = re.compile(link['youtube_id_regexp'])
+        self.re_pattern = re.compile(link["youtube_id_regexp"])
         return self
 
     def get_sample(self, _column, offset):
         sample = super().get_sample(_column, offset)
         match = self.re_pattern.search(self._source_file_name)
         if not match:
-            raise ValueError(f'No Youtube ID found in file name: {self._source_file_name} (using pattern: {self.re_pattern.pattern})')
+            raise ValueError(
+                f"No Youtube ID found in file name: {self._source_file_name} (using pattern: {self.re_pattern.pattern})"
+            )
         return WSYouTubeVideo(match[1], sample.tstart)
+
 
 @dataclass
 class WSYouTubeVideo:
-    id : str
-    tstart : float
+    id: str
+    tstart: float
 
     def get_url(self):
-        return f'https://www.youtube.com/embed/{self.id}?start={int(self.tstart)}'
+        return f"https://www.youtube.com/embed/{self.id}?start={int(self.tstart)}"
 
     def _repr_html_(self):
         return f'<iframe width="560" height="315" src="{self.get_url()}" title="YouTube video player" frameborder="0" allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share" referrerpolicy="strict-origin-when-cross-origin" allowfullscreen></iframe>'

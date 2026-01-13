@@ -10,8 +10,9 @@ import pyarrow
 
 
 def indented(prefix, obj):
-    lines = str(obj).split('\n')
-    return "\n".join(p + ln for p,ln in zip([prefix] + [" "*len(prefix)] * (len(lines)-1), lines))
+    lines = str(obj).split("\n")
+    return "\n".join(p + ln for p, ln in zip([prefix] + [" " * len(prefix)] * (len(lines) - 1), lines))
+
 
 @dataclass(frozen=True)
 class SampleFormatChanged(BaseException):
@@ -19,9 +20,12 @@ class SampleFormatChanged(BaseException):
     new_schema: pyarrow.Schema
 
     def __str__(self):
-        return (f'The dataset format changed:\n\n'
-                f'{indented("  OLD: ", self.old_schema)}\n\n'
-                f'{indented("  NEW: ", self.new_schema)}')
+        return (
+            f"The dataset format changed:\n\n"
+            f"{indented('  OLD: ', self.old_schema)}\n\n"
+            f"{indented('  NEW: ', self.new_schema)}"
+        )
+
 
 class WSBatchedSink:
     """A helper for writing data to a PyArrow feather file.
@@ -31,13 +35,14 @@ class WSBatchedSink:
     Example:
     >>> with WSBatchedSink('output.feather', batch_size=2, throwaway=True) as sink: sink.write({'a': 1, 'b': 'x'})
     """
+
     def __init__(
         self,
         fname,  # final output file name, intermediate output goes into a temporary file
-        batch_size = 16,
+        batch_size=16,
         min_batch_size_bytes: int = 0,
-        compression: str | None = 'zstd',
-        throwaway = False,  # discard the temp file, useful for testing and benchmarking
+        compression: str | None = "zstd",
+        throwaway=False,  # discard the temp file, useful for testing and benchmarking
     ):
         self.fname = fname
         self.batch_size = batch_size
@@ -98,6 +103,7 @@ class AtomicFile:
             f.write('Hello, World!')
     ```
     """
+
     def __init__(self, fname, ephemeral=False):
         self.fname = Path(fname)
         self.ephemeral = ephemeral
@@ -120,7 +126,7 @@ class AtomicFile:
 def WSSink(
     fname: str,  # final output file name, intermediate output goes into a temporary file
     batch_size: int = 16,  # batch size (see also `min_batch_size_bytes`)
-    compression: str | None = 'zstd',  # pass None to disable compression
+    compression: str | None = "zstd",  # pass None to disable compression
     min_batch_size_bytes: int = 0,  # auto-increase the batch size until it's at least this size in bytes
     ephemeral: bool = False,  # discard the temp file, useful for testing and benchmarking
 ):
