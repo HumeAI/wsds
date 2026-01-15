@@ -187,7 +187,7 @@ class WSDataset:
         if self._filter_dfs is not None:
             # We need to know the global shard offset to know what filter values to use for the sample
             shard_global_offset = self.index.query(
-                "SELECT global_offset FROM shards WHERE shard = ?", shard_name
+                "SELECT global_offset FROM shards WHERE shard = ?", shard_name[1]
             ).fetchone()[0]
 
         while i < max_N:
