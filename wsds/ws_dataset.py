@@ -94,11 +94,6 @@ class WSDataset:
 
         self._filter_dfs[filter_name] = filter_df
 
-        rows_satisfying_filter = filter_df.sum().item()
-        print(
-            f"Filter enabled on dataset {repr(self)}. Rows satisfying the filter: {rows_satisfying_filter} / {len(filter_df)}"
-        )
-
     #
     # Accessing samples randomly and sequentially
     #
@@ -257,12 +252,16 @@ class WSDataset:
         missing = defaultdict(list)
         for shard in self.get_shard_list():
             col_merge = []
+            cols_seen: set[str] = set()
             for subdir in subdirs:
                 shard_path = self.get_shard_path(subdir, shard)
                 if shard_path.exists():
                     df = scan_ipc(shard_path, glob=False)
-                    if len(col_merge) > 0:
-                        df = df.drop("__key__")  # ensure only one __key__ column
+                    # Drop duplicate columns (including __key__ from all but first)
+                    drop_cols = [c for c in df.collect_schema().names() if c in cols_seen]
+                    if drop_cols:
+                        df = df.drop(drop_cols)
+                    cols_seen.update(df.collect_schema().names())
                     if subdir not in subdir_samples:
                         subdir_samples[subdir] = df.clear().collect()
                 else:
@@ -289,7 +288,7 @@ class WSDataset:
                     f"No usable shards found (columns: {', '.join(subdirs)}) for dataset in: {str(self.dataset_dir)}"
                 )
 
-        return exprs, pl.concat(row_merge)
+        return exprs, pl.concat(row_merge, how="diagonal")
 
     def sql_select(self, *queries, return_as_lazyframe=False) -> pl.DataFrame | pl.LazyFrame:
         """Given a list of SQL expressions, returns a Polars DataFrame/ LazyFrame with the results."""
