@@ -1,6 +1,6 @@
 import unittest
 import doctest
-from . import ws_dataset, ws_shard, ws_sink
+from wsds import ws_dataset, ws_shard, ws_sink
 
 def load_tests(loader, tests, ignore):
     tests.addTests(doctest.DocTestSuite(ws_dataset))
