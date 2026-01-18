@@ -288,6 +288,47 @@ class WSDataset:
                     f"No usable shards found (columns: {', '.join(subdirs)}) for dataset in: {str(self.dataset_dir)}"
                 )
 
+        def _common_dtype(col_name: str, a: pl.DataType, b: pl.DataType) -> pl.DataType:
+            if a == b:
+                return a
+            if a == pl.Null:
+                return b
+            if b == pl.Null:
+                return a
+
+            if a.is_numeric() and b.is_numeric():
+                # Make numeric dtypes consistent across shards so diagonal concat doesn't fail.
+                if a.is_float() or b.is_float():
+                    return pl.Float64
+                if a.is_unsigned_integer() and b.is_unsigned_integer():
+                    return pl.UInt64
+                return pl.Int64
+
+            raise TypeError(f"Cannot reconcile dtypes for column {col_name!r}: {a} vs {b}")
+
+        def _cast_lazyframe_to_schema(lf: pl.LazyFrame, target_dtypes: dict[str, pl.DataType]) -> pl.LazyFrame:
+            schema = lf.collect_schema()
+            exprs = []
+            for col_name, target_dtype in target_dtypes.items():
+                if col_name not in schema:
+                    continue
+                if schema[col_name] == target_dtype:
+                    continue
+                exprs.append(pl.col(col_name).cast(target_dtype).alias(col_name))
+            if not exprs:
+                return lf
+            return lf.with_columns(exprs)
+
+        if row_merge:
+            target_dtypes: dict[str, pl.DataType] = {}
+            for lf in row_merge:
+                for col_name, dtype in lf.collect_schema().items():
+                    if col_name not in target_dtypes:
+                        target_dtypes[col_name] = dtype
+                        continue
+                    target_dtypes[col_name] = _common_dtype(col_name, target_dtypes[col_name], dtype)
+            row_merge = [_cast_lazyframe_to_schema(lf, target_dtypes) for lf in row_merge]
+
         return exprs, pl.concat(row_merge, how="diagonal")
 
     def sql_select(self, *queries, return_as_lazyframe=False) -> pl.DataFrame | pl.LazyFrame:
