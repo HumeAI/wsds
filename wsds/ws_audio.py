@@ -125,7 +125,7 @@ class AudioReader:
         if self.reader is None or sample_rate_switch:
             try:
                 from torchcodec.decoders import AudioDecoder
-            except ImportError:
+            except Exception:
                 AudioDecoder = CompatAudioDecoder
 
             reader = AudioDecoder(to_filelike(self.src), sample_rate=sample_rate)
@@ -169,7 +169,7 @@ class AudioReader:
     def _ipython_display_(self):
         from IPython.display import Audio, display
 
-        samples = self.read_full()
+        samples = self.load()
         display(Audio(samples.numpy(), rate=samples.sample_rate))
 
 
