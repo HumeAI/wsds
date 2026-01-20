@@ -38,13 +38,14 @@ class WSBatchedSink:
 
     def __init__(
         self,
-        fname,  # final output file name, intermediate output goes into a temporary file
+        fname: str,  # final output file name, intermediate output goes into a temporary file
+        batch_size: int=1,
         min_batch_size_bytes: int = 1024*1024, # minimum size of a batch in bytes (1MB by default)
         compression: str | None = "zstd",
         throwaway=False,  # discard the temp file, useful for testing and benchmarking
     ):
         self.fname = fname
-        self.batch_size = 1
+        self.batch_size = batch_size
         self.min_batch_size_bytes = min_batch_size_bytes
         self.max_batch_size = 16384
         self.compression = compression
