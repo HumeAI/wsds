@@ -149,5 +149,10 @@ class WSIndex:
     def query(self, query, *args):
         return self.conn.execute(query, args)
 
+    def close(self):
+        if self.conn:
+            self.conn.close()
+            self.conn = None
+
     def __repr__(self):
         return f"WSIndex({repr(self.fname)})"

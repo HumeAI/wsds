@@ -39,14 +39,14 @@ class WSBatchedSink:
     def __init__(
         self,
         fname,  # final output file name, intermediate output goes into a temporary file
-        batch_size=16,
-        min_batch_size_bytes: int = 0,
+        min_batch_size_bytes: int = 1024*1024, # minimum size of a batch in bytes (1MB by default)
         compression: str | None = "zstd",
         throwaway=False,  # discard the temp file, useful for testing and benchmarking
     ):
         self.fname = fname
-        self.batch_size = batch_size
+        self.batch_size = 1
         self.min_batch_size_bytes = min_batch_size_bytes
+        self.max_batch_size = 16384
         self.compression = compression
         self.throwaway = throwaway
 
@@ -64,12 +64,12 @@ class WSBatchedSink:
 
         try:
             record = pyarrow.RecordBatch.from_pylist(b, self._sink_schema if self._sink else None)
-        except Exception as err:
+        except Exception:
             print(f"Error while serializing: {repr(b)}")
             raise
         if self._sink is None:
             if not flush and self.min_batch_size_bytes:
-                if record.nbytes < self.min_batch_size_bytes and self.batch_size < 16384:
+                if record.nbytes < self.min_batch_size_bytes and self.batch_size < self.max_batch_size:
                     self.batch_size *= 2
                     return
             schema = record.schema.with_metadata({"batch_size": str(len(b))})
@@ -143,5 +143,8 @@ def WSSink(
     ```
     """
     with AtomicFile(fname, ephemeral) as fname:
-        with WSBatchedSink(fname, batch_size, min_batch_size_bytes, compression) as sink:
+        with WSBatchedSink(
+            fname, min_batch_size_bytes=min_batch_size_bytes, compression=compression
+        ) as sink:
+            sink.batch_size = batch_size
             yield sink

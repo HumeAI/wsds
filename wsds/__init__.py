@@ -12,12 +12,14 @@ Usage example:
 from .ws_dataset import WSDataset
 from .ws_sample import WSSample
 from .ws_shard import WSSourceAudioShard
+from .ws_audio import extract_segment_ffmpeg
 from .ws_sink import AtomicFile, SampleFormatChanged, WSSink
 
 __all__ = [
     WSDataset,
     WSSample,
     WSSourceAudioShard,
+    extract_segment_ffmpeg,
     AtomicFile,
     SampleFormatChanged,
     WSSink,

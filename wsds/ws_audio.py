@@ -2,6 +2,10 @@ from __future__ import annotations
 
 import io
 import typing
+import os
+import shutil
+import subprocess
+import tempfile
 from dataclasses import dataclass
 
 import pyarrow as pa
@@ -26,6 +30,90 @@ def load_segment(src, start, end, sample_rate=None):
     - a byte string
     - a PyArrow binary buffer in memory"""
     return AudioReader(src).read_segment(start, end, sample_rate=sample_rate)
+
+
+def extract_segment_ffmpeg(
+    src,
+    tstart: float | None = None,
+    tend: float | None = None,
+    out_path: str | None = None,
+    sample_rate: int = 16000,
+    channels: int = 1,
+    bitrate: str = "32k",
+    fmt: str = "mp3",
+    overwrite: bool = True,
+):
+    """Extract a short audio segment using ffmpeg (safe fallback when decoders crash).
+
+    Args:
+        src: WSAudio, WSSample-like (has get_audio), AudioReader, or raw audio bytes.
+        tstart/tend: segment time range in seconds (not needed if src is WSAudio).
+        out_path: optional output path; temp file if None.
+        sample_rate/channels/bitrate/fmt: ffmpeg output settings.
+    Returns:
+        Path to the extracted audio file.
+    """
+    if shutil.which("ffmpeg") is None:
+        raise RuntimeError("ffmpeg not found on PATH")
+
+    # WSAudio: use its timestamps and reader
+    if hasattr(src, "audio_reader") and hasattr(src, "tstart") and hasattr(src, "tend"):
+        if tstart is None:
+            tstart = src.tstart
+        if tend is None:
+            tend = src.tend
+        src = src.audio_reader
+
+    # WSSample-like: resolve to AudioReader
+    if hasattr(src, "get_audio"):
+        src = src.get_audio()
+
+    # AudioReader -> raw bytes
+    if hasattr(src, "unwrap"):
+        audio_bytes = src.unwrap()
+    else:
+        audio_bytes = src
+
+    if tstart is None or tend is None:
+        raise ValueError("tstart/tend must be provided unless src is WSAudio")
+
+    if out_path is None:
+        out_fd, out_path = tempfile.mkstemp(suffix=f".{fmt}")
+        os.close(out_fd)
+    elif not overwrite and os.path.exists(out_path):
+        raise FileExistsError(f"Output already exists: {out_path}")
+
+    in_fd, in_path = tempfile.mkstemp(suffix=".audio")
+    try:
+        with os.fdopen(in_fd, "wb") as f:
+            f.write(audio_bytes)
+
+        cmd = [
+            "ffmpeg",
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-ss",
+            str(float(tstart)),
+            "-to",
+            str(float(tend)),
+            "-i",
+            in_path,
+            "-ac",
+            str(int(channels)),
+            "-ar",
+            str(int(sample_rate)),
+            "-b:a",
+            bitrate,
+            out_path,
+        ]
+        subprocess.run(cmd, check=True)
+        return out_path
+    finally:
+        try:
+            os.unlink(in_path)
+        except OSError:
+            pass
 
 
 class CompatAudioDecoder:
@@ -83,16 +171,18 @@ class CompatAudioDecoder:
         return samples
 
 
-def marimo_audio_mp3(samples):
+def _audio_to_mp3(samples):
     from io import BytesIO
 
-    import marimo
-    from torchcodec.encoders import AudioEncoder
-
     out = BytesIO()
-    AudioEncoder(samples, sample_rate=samples.sample_rate).to_file_like(out, "mp3")
+    try:
+        from torchcodec.encoders import AudioEncoder
+        AudioEncoder(samples, sample_rate=int(samples.sample_rate)).to_file_like(out, "mp3")
+    except ImportError:
+        import torchaudio
+        torchaudio.save(out, samples, int(samples.sample_rate), format="mp3")
 
-    return marimo.audio(out.getvalue())
+    return out.getvalue()
 
 
 @dataclass(slots=True)
@@ -163,14 +253,19 @@ class AudioReader:
         return samples
 
     def _display_(self):
+        import marimo
+
         samples = self.read_segment()
-        return marimo_audio_mp3(samples)
+        return marimo.audio(_audio_to_mp3(samples))
 
     def _ipython_display_(self):
-        from IPython.display import Audio, display
+        import base64
 
-        samples = self.load()
-        display(Audio(samples.numpy(), rate=samples.sample_rate))
+        from IPython.display import HTML, display
+
+        samples = self.read_segment()
+        mp3_data = base64.b64encode(_audio_to_mp3(samples)).decode("ascii")
+        display(HTML(f'<audio controls src="data:audio/mp3;base64,{mp3_data}"/>'))
 
 
 @dataclass(frozen=True, slots=True)
@@ -197,11 +292,16 @@ class WSAudio:
         return self.audio_reader.metadata
 
     def _display_(self):
+        import marimo
+
         samples = self.load()
-        return marimo_audio_mp3(samples)
+        return marimo.audio(_audio_to_mp3(samples))
 
     def _ipython_display_(self):
-        from IPython.display import Audio, display
+        import base64
+
+        from IPython.display import HTML, display
 
         samples = self.load()
-        display(Audio(samples.numpy(), rate=samples.sample_rate))
+        mp3_data = base64.b64encode(_audio_to_mp3(samples)).decode("ascii")
+        display(HTML(f'<audio controls src="data:audio/mp3;base64,{mp3_data}"/>'))

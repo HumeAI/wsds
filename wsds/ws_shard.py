@@ -90,6 +90,11 @@ class WSShard(WSShardInterface):
         except Exception as e:
             raise ValueError(f"Failed to decode column {column} in shard {self.fname} (offset {offset}): {e}")
 
+    def close(self):
+        """Close the shard and release file handles."""
+        self._data = None
+        self.reader = None
+
     def __repr__(self):
         r = f"WSShard({repr(self.fname)})"
         if self._data:

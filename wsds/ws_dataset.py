@@ -81,6 +81,15 @@ class WSDataset:
 
         self._register_wsds_links()
 
+    def close(self):
+        """Close the dataset and release any open file handles."""
+        if self.index:
+            self.index.close()
+            self.index = None
+        for shard in self._open_shards.values():
+            shard.close()
+        self._open_shards.clear()
+
     def enable_filter(self, filter_name: str, filter_df: pl.DataFrame):
         """
         Enabling a filter adds extra columns to the dataset, each column representing a filter.
@@ -230,39 +239,50 @@ class WSDataset:
     #
     # SQL support, using Polars
     #
-    def _parse_sql_queries_polars(self, *queries):
+    def _parse_sql_queries_polars(self, *queries, shard_subsample=1, rng=None):
         """Parses SQL queries via Polars to:
         - extract the Polars expressions for each query
         - use the expressions to build a list of subdirs to load shards from"""
 
-        subdirs = set()
+        subdirs = defaultdict(list)
         exprs = []
+        needs_key = False
         for query in queries:
             expr = pl.sql_expr(query)
             for col in expr.meta.root_names():
                 if col == "__key__":
                     # __key__ exists in all shards
+                    needs_key = True
                     continue
                 subdir, field = self.fields[col]
                 assert col == field, "renamed fields are not supported in SQL queries yet"
-                subdirs.add(subdir)
-
-            # If only __key__ is in the query, we need to load shards from at least one subdir
-            if not subdirs and "__key__" in expr.meta.root_names():
-                subdirs.add(self.fields["__key__"][0])
+                subdirs[subdir].append(field)
             exprs.append(expr)
+
+        # If only __key__ is in the query, we need to load shards from at least one subdir
+        if needs_key:
+            if not subdirs:
+                subdirs[self.fields["__key__"][0]].append('__key__')
+            else:
+                for f in subdirs.values():
+                    f.append('__key__')
+                    break
+
+        if rng is None:
+            rng = random
+        shard_list = self.get_shard_list()
+        if shard_subsample != 1:
+            shard_list = rng.sample(shard_list, int(len(shard_list) * shard_subsample))
 
         row_merge = []
         subdir_samples = {}
         missing = defaultdict(list)
-        for shard in self.get_shard_list():
+        for shard in shard_list:
             col_merge = []
-            for subdir in subdirs:
+            for subdir, fields in subdirs.items():
                 shard_path = self.get_shard_path(subdir, shard)
                 if shard_path.exists():
-                    df = scan_ipc(shard_path, glob=False)
-                    if len(col_merge) > 0:
-                        df = df.drop("__key__")  # ensure only one __key__ column
+                    df = scan_ipc(shard_path, glob=False).select(fields)
                     if subdir not in subdir_samples:
                         subdir_samples[subdir] = df.clear().collect()
                 else:
@@ -289,21 +309,36 @@ class WSDataset:
                     f"No usable shards found (columns: {', '.join(subdirs)}) for dataset in: {str(self.dataset_dir)}"
                 )
 
-        return exprs, pl.concat(row_merge)
+        return exprs, pl.concat(row_merge).select(exprs)
 
-    def sql_select(self, *queries, return_as_lazyframe=False) -> pl.DataFrame | pl.LazyFrame:
+    def _check_for_subsampling(self, shard_subsample):
+        if shard_subsample is None:
+            if not self.index or self.index.n_shards < 150:
+                shard_subsample = 1
+            else:
+                shard_subsample = 150 / self.index.n_shards
+                if not hasattr(self, '_shown_subsampling_info'):
+                    print(f"INFO: to speed things up wsds is loading a random {shard_subsample*100:.2f}% subset of the shards, pass shard_subsample=1 to force it to load the whole dataset")
+                    self._shown_subsampling_info = True
+        return shard_subsample
+
+    def sql_select(self, *queries, return_as_lazyframe=False, shard_subsample=None, rng=42) -> pl.DataFrame | pl.LazyFrame:
         """Given a list of SQL expressions, returns a Polars DataFrame/ LazyFrame with the results."""
-        exprs, df = self._parse_sql_queries_polars(*queries)
+        if isinstance(rng, int):
+            rng = random.Random(rng)
+        exprs, df = self._parse_sql_queries_polars(*queries, shard_subsample=self._check_for_subsampling(shard_subsample), rng=rng)
 
         if return_as_lazyframe:
-            return df.select(exprs)
+            return df
 
-        return df.select(exprs).collect()
+        return df.collect()
 
-    def sql_filter(self, query):
+    def sql_filter(self, query, shard_subsample=None, rng=42):
         """Given a boolean SQL expression, returns a list of keys for samples that match the query."""
+        if isinstance(rng, int):
+            rng = random.Random(rng)
 
-        exprs, df = self._parse_sql_queries_polars(query)
+        exprs, df = self._parse_sql_queries_polars(query, '__key__', shard_subsample=self._check_for_subsampling(shard_subsample), rng=rng)
         return df.filter(exprs[0]).select("__key__").filter(pl.col("__key__").is_not_null()).collect()["__key__"]
 
     def filtered(
@@ -313,6 +348,8 @@ class WSDataset:
         shuffle: bool = True,  # shuffle the sample order (otherwise it will return them as they appear in the dataset)
         N: int = None,  # optional maximum number of samples to yield (otherwise it will yield all matching samples)
         seed: int = None,  # optional random seed used shuffling
+        shard_subsample=None,
+        rng=42,
     ):
         """Given an boolean SQL expression, returns an iterator which yields random samples
         that match the query.
@@ -327,7 +364,7 @@ class WSDataset:
         import polars as pl
 
         i = 0
-        keys = self.sql_filter(query)
+        keys = self.sql_filter(query, shard_subsample=shard_subsample, rng=rng)
         self.last_query_n_samples = len(keys)
         while True:
             if N is None:
