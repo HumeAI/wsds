@@ -90,7 +90,7 @@ class WSDSIndexWriter:
     def __exit__(self, exc_type, exc_value, traceback):
         if exc_type is None:
             self.conn.commit()
-            self.conn.close()
+        self.conn.close()
 
 
 class WSIndex:
@@ -101,6 +101,15 @@ class WSIndex:
         # immutable=1,ro=True greatly speeds up all queries when the database is on a remote/cluster file system
         self.conn = sqlite3.connect(f"file:{fname}?immutable=1,ro=True", uri=True)
         self.has_dataset_path = self.conn.execute("SELECT COUNT(*) FROM pragma_table_info('shards') WHERE name='dataset_path'").fetchone()[0]
+
+    def close(self):
+        self.conn.close()
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc_value, traceback):
+        self.close()
 
     @functools.cached_property
     def n_shards(self):
