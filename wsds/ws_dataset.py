@@ -8,7 +8,15 @@ from pathlib import Path
 
 import polars as pl
 
-from .utils import list_all_columns, list_all_shards, parse_key, scan_ipc, format_duration, WSShardMissingError
+from .utils import (
+    WSShardMissingError,
+    format_duration,
+    list_all_columns,
+    list_all_shards,
+    parse_key,
+    prefetch_shard_tails,
+    scan_ipc,
+)
 from .ws_index import WSIndex
 from .ws_sample import WSSample
 from .ws_shard import WSShard
@@ -264,6 +272,9 @@ class WSDataset:
         shard_list = self.get_shard_list()
         if shard_subsample != 1:
             shard_list = rng.sample(shard_list, int(len(shard_list) * shard_subsample))
+
+        # Prefetch shard tails concurrently to warm up the filesystem cache
+        prefetch_shard_tails(self, shard_list, list(subdirs.keys()))
 
         row_merge = []
         subdir_samples = {}
