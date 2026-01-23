@@ -83,16 +83,18 @@ class CompatAudioDecoder:
         return samples
 
 
-def marimo_audio_mp3(samples):
+def _audio_to_mp3(samples):
     from io import BytesIO
 
-    import marimo
-    from torchcodec.encoders import AudioEncoder
-
     out = BytesIO()
-    AudioEncoder(samples, sample_rate=samples.sample_rate).to_file_like(out, "mp3")
+    try:
+        from torchcodec.encoders import AudioEncoder
+        AudioEncoder(samples, sample_rate=int(samples.sample_rate)).to_file_like(out, "mp3")
+    except ImportError:
+        import torchaudio
+        torchaudio.save(out, samples, int(samples.sample_rate), format="mp3")
 
-    return marimo.audio(out.getvalue())
+    return out.getvalue()
 
 
 @dataclass(slots=True)
@@ -163,14 +165,19 @@ class AudioReader:
         return samples
 
     def _display_(self):
+        import marimo
+
         samples = self.read_segment()
-        return marimo_audio_mp3(samples)
+        return marimo.audio(_audio_to_mp3(samples))
 
     def _ipython_display_(self):
-        from IPython.display import Audio, display
+        import base64
 
-        samples = self.read_full()
-        display(Audio(samples.numpy(), rate=samples.sample_rate))
+        from IPython.display import HTML, display
+
+        samples = self.read_segment()
+        mp3_data = base64.b64encode(_audio_to_mp3(samples)).decode("ascii")
+        display(HTML(f'<audio controls src="data:audio/mp3;base64,{mp3_data}"/>'))
 
 
 @dataclass(frozen=True, slots=True)
@@ -197,11 +204,16 @@ class WSAudio:
         return self.audio_reader.metadata
 
     def _display_(self):
+        import marimo
+
         samples = self.load()
-        return marimo_audio_mp3(samples)
+        return marimo.audio(_audio_to_mp3(samples))
 
     def _ipython_display_(self):
-        from IPython.display import Audio, display
+        import base64
+
+        from IPython.display import HTML, display
 
         samples = self.load()
-        display(Audio(samples.numpy(), rate=samples.sample_rate))
+        mp3_data = base64.b64encode(_audio_to_mp3(samples)).decode("ascii")
+        display(HTML(f'<audio controls src="data:audio/mp3;base64,{mp3_data}"/>'))

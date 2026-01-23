@@ -225,43 +225,61 @@ class WSDataset:
     #
     # SQL support, using Polars
     #
-    def _parse_sql_queries_polars(self, *queries):
+    def _parse_sql_queries_polars(self, *queries, shard_subsample=1, rng=None):
         """Parses SQL queries via Polars to:
         - extract the Polars expressions for each query
         - use the expressions to build a list of subdirs to load shards from"""
 
-        subdirs = set()
+        subdirs = defaultdict(list)
         exprs = []
+        needs_key = False
         for query in queries:
             expr = pl.sql_expr(query)
             for col in expr.meta.root_names():
                 if col == "__key__":
                     # __key__ exists in all shards
+                    needs_key = True
                     continue
                 subdir, field = self.fields[col]
                 assert col == field, "renamed fields are not supported in SQL queries yet"
-                subdirs.add(subdir)
-
-            # If only __key__ is in the query, we need to load shards from at least one subdir
-            if not subdirs and "__key__" in expr.meta.root_names():
-                subdirs.add(self.fields["__key__"][0])
+                subdirs[subdir].append(field)
             exprs.append(expr)
+
+        # If only __key__ is in the query, we need to load shards from at least one subdir
+        if needs_key:
+            if not subdirs:
+                subdirs[self.fields["__key__"][0]].append('__key__')
+            else:
+                for f in subdirs.values():
+                    f.append('__key__')
+                    break
+
+        if rng is None:
+            rng = random
+        shard_list = self.get_shard_list()
+        if shard_subsample != 1:
+            shard_list = rng.sample(shard_list, int(len(shard_list) * shard_subsample))
+
+        # TODO: Not sure if we want to drop the columns. I think previously we
+        # did some renaming, but that might also be confusing. Maybe we can put
+        # this behind a flag.
+        cols_seen: set[str] = set()
+        deduplicated_subdirs: dict[str, list[str]] = {}
+        for subdir, fields in subdirs.items():
+            unique_fields = [f for f in fields if f not in cols_seen]
+            if unique_fields:
+                deduplicated_subdirs[subdir] = unique_fields
+                cols_seen.update(unique_fields)
 
         row_merge = []
         subdir_samples = {}
         missing = defaultdict(list)
-        for shard in self.get_shard_list():
+        for shard in shard_list:
             col_merge = []
-            cols_seen: set[str] = set()
-            for subdir in subdirs:
+            for subdir, fields in deduplicated_subdirs.items():
                 shard_path = self.get_shard_path(subdir, shard)
                 if shard_path.exists():
-                    df = scan_ipc(shard_path, glob=False)
-                    # Drop duplicate columns (including __key__ from all but first)
-                    drop_cols = [c for c in df.collect_schema().names() if c in cols_seen]
-                    if drop_cols:
-                        df = df.drop(drop_cols)
-                    cols_seen.update(df.collect_schema().names())
+                    df = scan_ipc(shard_path, glob=False).select(fields)
                     if subdir not in subdir_samples:
                         subdir_samples[subdir] = df.clear().collect()
                 else:
@@ -296,15 +314,21 @@ class WSDataset:
             if b == pl.Null:
                 return a
 
-            if a.is_numeric() and b.is_numeric():
+            if not (a.is_numeric() and b.is_numeric()):
+                raise TypeError(f"Cannot reconcile dtypes for column {col_name!r}: {a} vs {b}.")
                 # Make numeric dtypes consistent across shards so diagonal concat doesn't fail.
-                if a.is_float() or b.is_float():
-                    return pl.Float64
-                if a.is_unsigned_integer() and b.is_unsigned_integer():
-                    return pl.UInt64
+            if a.is_float() or b.is_float():
+                return pl.Float64
+            if a.is_unsigned_integer() and b.is_unsigned_integer():
+                return pl.UInt64
+            if a.is_signed_integer() and b.is_signed_integer():
                 return pl.Int64
 
-            raise TypeError(f"Cannot reconcile dtypes for column {col_name!r}: {a} vs {b}")
+            if a == pl.UInt64 or b == pl.UInt64:
+                raise TypeError(f"Cannot safely coerce column {col_name!r}: mixing UInt64 with signed integer ({a} vs {b})")
+
+            return pl.Int64
+
 
         def _cast_lazyframe_to_schema(lf: pl.LazyFrame, target_dtypes: dict[str, pl.DataType]) -> pl.LazyFrame:
             schema = lf.collect_schema()
@@ -329,21 +353,36 @@ class WSDataset:
                     target_dtypes[col_name] = _common_dtype(col_name, target_dtypes[col_name], dtype)
             row_merge = [_cast_lazyframe_to_schema(lf, target_dtypes) for lf in row_merge]
 
-        return exprs, pl.concat(row_merge, how="diagonal")
+        return exprs, pl.concat(row_merge, how="diagonal").select(exprs)
 
-    def sql_select(self, *queries, return_as_lazyframe=False) -> pl.DataFrame | pl.LazyFrame:
+    def _check_for_subsampling(self, shard_subsample):
+        if shard_subsample is None:
+            if not self.index or self.index.n_shards < 150:
+                shard_subsample = 1
+            else:
+                shard_subsample = 150 / self.index.n_shards
+                if not hasattr(self, '_shown_subsampling_info'):
+                    print(f"INFO: to speed things up wsds is loading a random {shard_subsample*100:.2f}% subset of the shards, pass shard_subsample=1 to force it to load the whole dataset")
+                    self._shown_subsampling_info = True
+        return shard_subsample
+
+    def sql_select(self, *queries, return_as_lazyframe=False, shard_subsample=None, rng=42) -> pl.DataFrame | pl.LazyFrame:
         """Given a list of SQL expressions, returns a Polars DataFrame/ LazyFrame with the results."""
-        exprs, df = self._parse_sql_queries_polars(*queries)
+        if isinstance(rng, int):
+            rng = random.Random(rng)
+        exprs, df = self._parse_sql_queries_polars(*queries, shard_subsample=self._check_for_subsampling(shard_subsample), rng=rng)
 
         if return_as_lazyframe:
-            return df.select(exprs)
+            return df
 
-        return df.select(exprs).collect()
+        return df.collect()
 
-    def sql_filter(self, query):
+    def sql_filter(self, query, shard_subsample=None, rng=42):
         """Given a boolean SQL expression, returns a list of keys for samples that match the query."""
+        if isinstance(rng, int):
+            rng = random.Random(rng)
 
-        exprs, df = self._parse_sql_queries_polars(query)
+        exprs, df = self._parse_sql_queries_polars(query, '__key__', shard_subsample=self._check_for_subsampling(shard_subsample), rng=rng)
         return df.filter(exprs[0]).select("__key__").filter(pl.col("__key__").is_not_null()).collect()["__key__"]
 
     def filtered(
@@ -353,6 +392,8 @@ class WSDataset:
         shuffle: bool = True,  # shuffle the sample order (otherwise it will return them as they appear in the dataset)
         N: int = None,  # optional maximum number of samples to yield (otherwise it will yield all matching samples)
         seed: int = None,  # optional random seed used shuffling
+        shard_subsample=None,
+        rng=42,
     ):
         """Given an boolean SQL expression, returns an iterator which yields random samples
         that match the query.
@@ -367,7 +408,7 @@ class WSDataset:
         import polars as pl
 
         i = 0
-        keys = self.sql_filter(query)
+        keys = self.sql_filter(query, shard_subsample=shard_subsample, rng=rng)
         self.last_query_n_samples = len(keys)
         while True:
             if N is None:
