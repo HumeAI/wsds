@@ -343,15 +343,15 @@ class WSDataset:
                 return lf
             return lf.with_columns(exprs)
 
-        if row_merge:
-            target_dtypes: dict[str, pl.DataType] = {}
-            for lf in row_merge:
-                for col_name, dtype in lf.collect_schema().items():
-                    if col_name not in target_dtypes:
-                        target_dtypes[col_name] = dtype
-                        continue
-                    target_dtypes[col_name] = _common_dtype(col_name, target_dtypes[col_name], dtype)
-            row_merge = [_cast_lazyframe_to_schema(lf, target_dtypes) for lf in row_merge]
+        target_dtypes: dict[str, pl.DataType] = {}
+        for lf in row_merge:
+            for col_name, dtype in lf.collect_schema().items():
+                target_dtypes[col_name] = (
+                    _common_dtype(col_name, target_dtypes[col_name], dtype)
+                    if col_name in target_dtypes else
+                    dtype
+                )
+        row_merge = [_cast_lazyframe_to_schema(lf, target_dtypes) for lf in row_merge]
 
         return exprs, pl.concat(row_merge, how="diagonal").select(exprs)
 
