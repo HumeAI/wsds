@@ -94,11 +94,6 @@ class WSDataset:
 
         self._filter_dfs[filter_name] = filter_df
 
-        rows_satisfying_filter = filter_df.sum().item()
-        print(
-            f"Filter enabled on dataset {repr(self)}. Rows satisfying the filter: {rows_satisfying_filter} / {len(filter_df)}"
-        )
-
     #
     # Accessing samples randomly and sequentially
     #
@@ -187,7 +182,7 @@ class WSDataset:
         if self._filter_dfs is not None:
             # We need to know the global shard offset to know what filter values to use for the sample
             shard_global_offset = self.index.query(
-                "SELECT global_offset FROM shards WHERE shard = ?", shard_name
+                "SELECT global_offset FROM shards WHERE shard = ?", shard_name[1]
             ).fetchone()[0]
 
         while i < max_N:
@@ -265,12 +260,23 @@ class WSDataset:
         if shard_subsample != 1:
             shard_list = rng.sample(shard_list, int(len(shard_list) * shard_subsample))
 
+        # TODO: Not sure if we want to drop the columns. I think previously we
+        # did some renaming, but that might also be confusing. Maybe we can put
+        # this behind a flag.
+        cols_seen: set[str] = set()
+        deduplicated_subdirs: dict[str, list[str]] = {}
+        for subdir, fields in subdirs.items():
+            unique_fields = [f for f in fields if f not in cols_seen]
+            if unique_fields:
+                deduplicated_subdirs[subdir] = unique_fields
+                cols_seen.update(unique_fields)
+
         row_merge = []
         subdir_samples = {}
         missing = defaultdict(list)
         for shard in shard_list:
             col_merge = []
-            for subdir, fields in subdirs.items():
+            for subdir, fields in deduplicated_subdirs.items():
                 shard_path = self.get_shard_path(subdir, shard)
                 if shard_path.exists():
                     df = scan_ipc(shard_path, glob=False).select(fields)
@@ -300,7 +306,54 @@ class WSDataset:
                     f"No usable shards found (columns: {', '.join(subdirs)}) for dataset in: {str(self.dataset_dir)}"
                 )
 
-        return exprs, pl.concat(row_merge).select(exprs)
+        def _common_dtype(col_name: str, a: pl.DataType, b: pl.DataType) -> pl.DataType:
+            if a == b:
+                return a
+            if a == pl.Null:
+                return b
+            if b == pl.Null:
+                return a
+
+            if not (a.is_numeric() and b.is_numeric()):
+                raise TypeError(f"Cannot reconcile dtypes for column {col_name!r}: {a} vs {b}.")
+                # Make numeric dtypes consistent across shards so diagonal concat doesn't fail.
+            if a.is_float() or b.is_float():
+                return pl.Float64
+            if a.is_unsigned_integer() and b.is_unsigned_integer():
+                return pl.UInt64
+            if a.is_signed_integer() and b.is_signed_integer():
+                return pl.Int64
+
+            if a == pl.UInt64 or b == pl.UInt64:
+                raise TypeError(f"Cannot safely coerce column {col_name!r}: mixing UInt64 with signed integer ({a} vs {b})")
+
+            return pl.Int64
+
+
+        def _cast_lazyframe_to_schema(lf: pl.LazyFrame, target_dtypes: dict[str, pl.DataType]) -> pl.LazyFrame:
+            schema = lf.collect_schema()
+            exprs = []
+            for col_name, target_dtype in target_dtypes.items():
+                if col_name not in schema:
+                    continue
+                if schema[col_name] == target_dtype:
+                    continue
+                exprs.append(pl.col(col_name).cast(target_dtype).alias(col_name))
+            if not exprs:
+                return lf
+            return lf.with_columns(exprs)
+
+        target_dtypes: dict[str, pl.DataType] = {}
+        for lf in row_merge:
+            for col_name, dtype in lf.collect_schema().items():
+                target_dtypes[col_name] = (
+                    _common_dtype(col_name, target_dtypes[col_name], dtype)
+                    if col_name in target_dtypes else
+                    dtype
+                )
+        row_merge = [_cast_lazyframe_to_schema(lf, target_dtypes) for lf in row_merge]
+
+        return exprs, pl.concat(row_merge, how="diagonal").select(exprs)
 
     def _check_for_subsampling(self, shard_subsample):
         if shard_subsample is None:
