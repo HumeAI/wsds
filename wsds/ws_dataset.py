@@ -476,7 +476,13 @@ class WSDataset:
         loader_class = link["loader"]
         if isinstance(loader_class, list):
             loader_mod, loader = loader_class
-            loader_module = importlib.import_module(loader_mod)
+
+            try:
+                loader_module = importlib.import_module(loader_mod)
+            except ImportError:
+                loader_mod = loader_mod.replace("hume_wsds", "wsds")
+                loader_module = importlib.import_module(loader_mod)
+
             loader_class = getattr(loader_module, loader)
 
         return loader_class.from_link(
