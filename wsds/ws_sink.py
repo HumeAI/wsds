@@ -33,12 +33,12 @@ class WSBatchedSink:
     Automatically batches data and infers the schema from the first batch.
 
     Example:
-    >>> with WSBatchedSink('output.feather', batch_size=2, throwaway=True) as sink: sink.write({'a': 1, 'b': 'x'})
+    >>> with WSBatchedSink('output.feather', throwaway=True) as sink: sink.write({'a': 1, 'b': 'x'})
     """
 
     def __init__(
         self,
-        fname,  # final output file name, intermediate output goes into a temporary file
+        fname: str,  # final output file name, intermediate output goes into a temporary file
         min_batch_size_bytes: int = 1024*1024, # minimum size of a batch in bytes (1MB by default)
         compression: str | None = "zstd",
         throwaway=False,  # discard the temp file, useful for testing and benchmarking
@@ -129,7 +129,6 @@ class AtomicFile:
 @contextmanager
 def WSSink(
     fname: str,  # final output file name, intermediate output goes into a temporary file
-    batch_size: int = 16,  # batch size (see also `min_batch_size_bytes`)
     compression: str | None = "zstd",  # pass None to disable compression
     min_batch_size_bytes: int = 0,  # auto-increase the batch size until it's at least this size in bytes
     ephemeral: bool = False,  # discard the temp file, useful for testing and benchmarking
@@ -143,5 +142,5 @@ def WSSink(
     ```
     """
     with AtomicFile(fname, ephemeral) as fname:
-        with WSBatchedSink(fname, batch_size, min_batch_size_bytes, compression) as sink:
+        with WSBatchedSink(fname, min_batch_size_bytes, compression) as sink:
             yield sink
