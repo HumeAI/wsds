@@ -90,7 +90,7 @@ def _audio_to_mp3(samples):
     try:
         from torchcodec.encoders import AudioEncoder
         AudioEncoder(samples, sample_rate=int(samples.sample_rate)).to_file_like(out, "mp3")
-    except ImportError:
+    except (ImportError, RuntimeError):
         import torchaudio
         torchaudio.save(out, samples, int(samples.sample_rate), format="mp3")
 
@@ -127,7 +127,7 @@ class AudioReader:
         if self.reader is None or sample_rate_switch:
             try:
                 from torchcodec.decoders import AudioDecoder
-            except ImportError:
+            except (ImportError, RuntimeError):
                 AudioDecoder = CompatAudioDecoder
 
             reader = AudioDecoder(to_filelike(self.src), sample_rate=sample_rate)
