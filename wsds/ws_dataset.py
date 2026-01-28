@@ -238,7 +238,7 @@ class WSDataset:
     #
     # SQL support, using Polars
     #
-    def _parse_sql_queries_polars(self, *queries, shard_subsample=1, rng=None):
+    def _parse_sql_queries_polars(self, *queries, shard_subsample=1, rng=None, shard_pipe=None):
         """Parses SQL queries via Polars to:
         - extract the Polars expressions for each query
         - use the expressions to build a list of subdirs to load shards from"""
@@ -300,7 +300,10 @@ class WSDataset:
                     missing[subdir].append(shard)
                 col_merge.append(df)
             if col_merge:
-                row_merge.append(pl.concat(col_merge, how="horizontal"))
+                merged = pl.concat(col_merge, how="horizontal").select(exprs)
+                if shard_pipe:
+                    merged = merged.pipe(shard_pipe)
+                row_merge.append(merged)
 
         if missing:
             print("WARNING: You are missing shards for some of the columns (filled them with NULLs):")
@@ -311,7 +314,7 @@ class WSDataset:
                     f"No usable shards found (columns: {', '.join(subdirs)}) for dataset in: {str(self.dataset_dir)}"
                 )
 
-        return exprs, pl.concat(row_merge).select(exprs)
+        return exprs, pl.concat(row_merge)
 
     def _check_for_subsampling(self, shard_subsample):
         if shard_subsample is None:
@@ -324,11 +327,16 @@ class WSDataset:
                     self._shown_subsampling_info = True
         return shard_subsample
 
-    def sql_select(self, *queries, return_as_lazyframe=False, shard_subsample=None, rng=42) -> pl.DataFrame | pl.LazyFrame:
+    def sql_select(
+        self, *queries, return_as_lazyframe=False, shard_subsample=None, rng=42, shard_pipe=None,
+    ) -> pl.DataFrame | pl.LazyFrame:
         """Given a list of SQL expressions, returns a Polars DataFrame/ LazyFrame with the results."""
         if isinstance(rng, int):
             rng = random.Random(rng)
-        exprs, df = self._parse_sql_queries_polars(*queries, shard_subsample=self._check_for_subsampling(shard_subsample), rng=rng)
+        exprs, df = self._parse_sql_queries_polars(
+            *queries, shard_subsample=self._check_for_subsampling(shard_subsample), rng=rng,
+            shard_pipe=shard_pipe,
+        )
 
         if return_as_lazyframe:
             return df

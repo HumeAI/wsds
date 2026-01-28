@@ -222,7 +222,8 @@ def scan_ipc(path: str | Path, *args, glob=True, **kwargs):
         # we open the file manually since scan_ipc always does globbing which does not work on files with square brackets in their names
         f = open(path, "rb")
         # we will leak the file descriptor in this case but there is not a lot we can do about it (GC will close it eventually)
-        return pl.scan_ipc(f)
+        return pl.scan_ipc(f, *args, **kwargs)
+
 
 def format_duration(duration):
     """Formats a duration in seconds as hours (or minutes or kilo-hours)."""
