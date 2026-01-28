@@ -164,6 +164,13 @@ class AudioReader:
         sample_rate = samples.sample_rate
         return samples
 
+    def _repr_html_(self):
+        import base64
+
+        samples = self.read_segment()
+        mp3_data = base64.b64encode(_audio_to_mp3(samples)).decode("ascii")
+        return f'<audio controls src="data:audio/mp3;base64,{mp3_data}"></audio>'
+
     def _display_(self):
         import marimo
 
@@ -171,13 +178,9 @@ class AudioReader:
         return marimo.audio(_audio_to_mp3(samples))
 
     def _ipython_display_(self):
-        import base64
-
         from IPython.display import HTML, display
 
-        samples = self.read_segment()
-        mp3_data = base64.b64encode(_audio_to_mp3(samples)).decode("ascii")
-        display(HTML(f'<audio controls src="data:audio/mp3;base64,{mp3_data}"/>'))
+        display(HTML(self._repr_html_()))
 
 
 @dataclass(frozen=True, slots=True)
@@ -203,6 +206,13 @@ class WSAudio:
     def metadata(self):
         return self.audio_reader.metadata
 
+    def _repr_html_(self):
+        import base64
+
+        samples = self.load()
+        mp3_data = base64.b64encode(_audio_to_mp3(samples)).decode("ascii")
+        return f'<audio controls src="data:audio/mp3;base64,{mp3_data}"></audio>'
+
     def _display_(self):
         import marimo
 
@@ -210,10 +220,6 @@ class WSAudio:
         return marimo.audio(_audio_to_mp3(samples))
 
     def _ipython_display_(self):
-        import base64
-
         from IPython.display import HTML, display
 
-        samples = self.load()
-        mp3_data = base64.b64encode(_audio_to_mp3(samples)).decode("ascii")
-        display(HTML(f'<audio controls src="data:audio/mp3;base64,{mp3_data}"/>'))
+        display(HTML(self._repr_html_()))
