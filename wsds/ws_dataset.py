@@ -534,3 +534,13 @@ class WSDataset:
                 self.random_sample()._display_(),
             ]
         )
+
+    def _ipython_display_(self):
+        from IPython.display import Markdown, display
+
+        if self.index is None:
+            display(Markdown(f"```python\n{self.__str__()}\n```"))
+            return
+
+        display(Markdown(f"```python\n{self.__str__()}\n```\n### One sample:"))
+        self.random_sample()._ipython_display_()
