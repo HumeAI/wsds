@@ -89,7 +89,8 @@ class WSSample:
             if k in self.overrides:
                 subdir = "__overrides__"
             elif k in self.dataset.fields:
-                subdir, _ = self.dataset.fields[k]
+                value = self.dataset.fields[k]
+                subdir = value[0] if isinstance(value[0], str) else value[0][0]
             else:
                 subdir = "__unknown__"
             if subdir not in subdir_columns:
