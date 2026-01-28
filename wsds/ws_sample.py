@@ -1,7 +1,7 @@
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
-from .utils import WSShardMissingError, prefetch_shard_tails
+from .utils import WSShardMissingError, validate_shards
 
 if TYPE_CHECKING:
     from .ws_dataset import WSDataset
@@ -99,7 +99,7 @@ class WSSample:
         # Prefetch shard tails concurrently for all subdirs that will be accessed
         subdirs_to_prefetch = [s for s in subdir_columns.keys() if s not in ("__overrides__", "__unknown__")]
         if subdirs_to_prefetch:
-            prefetch_shard_tails(self.dataset, [self.shard_name], subdirs_to_prefetch)
+            validate_shards(self.dataset, [self.shard_name], subdirs_to_prefetch)
 
         # Identify large subdirectories (>10 columns)
         large_subdirs = {subdir: cols for subdir, cols in subdir_columns.items()
