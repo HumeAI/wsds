@@ -289,16 +289,24 @@ class WSDataset:
                         subdir_samples[subdir] = df.clear().collect()
                 else:
                     # create a fake dataframe with all NULL rows and matching schema
-                    if self.index.has_dataset_path:
-                        n_samples, = self.index.query("SELECT n_samples FROM shards WHERE shards.dataset_path = ? AND shards.shard = ?", *shard).fetchone()
+                    if self.index:
+                        if self.index.has_dataset_path:
+                            (n_samples,) = self.index.query(
+                                "SELECT n_samples FROM shards WHERE shards.dataset_path = ? AND shards.shard = ?", *shard
+                            ).fetchone()
+                        else:
+                            (n_samples,) = self.index.query(
+                                "SELECT n_samples FROM shards WHERE shards.shard = ?", shard[1]
+                            ).fetchone()
+                        df = pl.defer(
+                            lambda subdir=subdir, n_samples=n_samples: subdir_samples[subdir].clear(n=n_samples),
+                            schema=lambda subdir=subdir: subdir_samples[subdir].schema,
+                        )
                     else:
-                        n_samples, = self.index.query("SELECT n_samples FROM shards WHERE shards.shard = ?", shard[1]).fetchone()
-                    df = pl.defer(
-                        lambda subdir=subdir, n_samples=n_samples: subdir_samples[subdir].clear(n=n_samples),
-                        schema=lambda subdir=subdir: subdir_samples[subdir].schema,
-                    )
+                        df = None
                     missing[subdir].append(shard)
-                col_merge.append(df)
+                if df is not None:
+                    col_merge.append(df)
             if col_merge:
                 merged = pl.concat(col_merge, how="horizontal").select(exprs)
                 if shard_pipe:
@@ -306,9 +314,13 @@ class WSDataset:
                 row_merge.append(merged)
 
         if missing:
-            print("WARNING: You are missing shards for some of the columns (filled them with NULLs):")
+            filled = " (filled them with NULLs)" if self.index else " (skipped them)"
+            print(f"WARNING: You are missing or invalid shards for some of the columns{filled}:")
             for subdir, shards in missing.items():
-                print(f"{subdir}: {shards}")
+                msg = f"{subdir}: {shards[:10]}"
+                if len(shards) > 10:
+                    msg += f" ... ({len(shards) - 10} more)"
+                print(msg)
             if not row_merge:
                 raise WSShardMissingError(
                     f"No usable shards found (columns: {', '.join(subdirs)}) for dataset in: {str(self.dataset_dir)}"
