@@ -674,7 +674,7 @@ def extract_index_for_shard(dataset, shard, vad_column=None, require_audio_durat
             try:
                 audio_reader = s.get_audio()
                 meta = audio_reader.metadata
-                audio_duration = _duration_seconds_from_metadata(meta)
+                audio_duration = _duration_seconds_from_metadata(meta, audio_reader)
                 if audio_duration is None:
                     raise ValueError("could not infer duration from audio metadata")
             except Exception as e:
@@ -696,7 +696,7 @@ def extract_index_for_shard(dataset, shard, vad_column=None, require_audio_durat
     }
 
 
-def _duration_seconds_from_metadata(meta):
+def _duration_seconds_from_metadata(meta, audio_reader=None):
     for attr in ("duration_seconds_from_header", "duration", "duration_seconds"):
         val = getattr(meta, attr, None)
         if val is not None:
@@ -705,6 +705,22 @@ def _duration_seconds_from_metadata(meta):
     sample_rate = getattr(meta, "sample_rate", None)
     if num_frames is not None and sample_rate:
         return float(num_frames) / float(sample_rate)
+    # For WAV files via StreamReader, compute from byte size
+    if audio_reader is not None and sample_rate:
+        try:
+            raw_bytes = audio_reader.unwrap()
+            # WAV header is typically 44 bytes, data follows
+            # bits_per_sample from metadata, or assume 16-bit
+            bits_per_sample = getattr(meta, "bits_per_sample", None) or 16
+            num_channels = getattr(meta, "num_channels", None) or 1
+            bytes_per_sample = (bits_per_sample // 8) * num_channels
+            # Rough estimate: total bytes minus ~44 byte header
+            data_bytes = len(raw_bytes) - 44
+            if data_bytes > 0 and bytes_per_sample > 0:
+                num_samples = data_bytes // bytes_per_sample
+                return float(num_samples) / float(sample_rate)
+        except Exception:
+            pass
     return None
 
 
