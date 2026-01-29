@@ -125,9 +125,26 @@ class WSSourceAudioShard(WSShardInterface):
     def get_timestamps(self, segment_offset):
         return self._source_sample[self.vad_column][segment_offset]
 
+    def _get_key(self, offset):
+        """Get the key for this sample, either from a shard or from the index."""
+        # Try to get from shard first (if __key__ column exists)
+        if "__key__" in self.derived_dataset.fields:
+            return WSSample(self.derived_dataset, self.shard_name, offset)["__key__"]
+        # Fallback: get from index (for segmented datasets without __key__ shard)
+        if self.derived_dataset.index:
+            dataset_path, shard_name = self.shard_name
+            row = self.derived_dataset.index.query(
+                "SELECT f.name FROM files AS f, shards AS s "
+                "WHERE s.shard = ? AND s.dataset_path = ? AND f.shard_id = s.shard_id AND f.offset = ?",
+                shard_name, dataset_path, offset
+            ).fetchone()
+            if row:
+                return row[0]
+        raise KeyError("__key__")
+
     def get_sample(self, _column, offset):
         file_name, segment_offset = self.derived_dataset.parse_key(
-            WSSample(self.derived_dataset, self.shard_name, offset)["__key__"]
+            self._get_key(offset)
         )
 
         if self._source_file_name != file_name:
