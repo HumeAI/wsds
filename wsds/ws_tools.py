@@ -627,7 +627,7 @@ def init(
                         json.dumps(
                             {
                                 "dataset_dir": os.path.relpath(source_dataset, new_dataset),
-                                "loader": ["hume_wsds.ws_shard", "WSSourceAudioShard"],
+                                "loader": ["wsds.ws_shard", "WSSourceAudioShard"],
                                 "vad_column": vad_column,
                             }
                         )
@@ -1152,6 +1152,7 @@ def shard_from_audio_dir(
     require_audio_duration: bool = True,
     key_fn: Callable[[str], str] | None = None,
     write_key_mapping: bool = False,
+    key_prefix: str = "",
 ):
     """Write batched Feather (.wsds) shards with up to N audio files each.
     Note: could change to max_size instead of n file.
@@ -1161,6 +1162,9 @@ def shard_from_audio_dir(
                 E.g., a hash function for obfuscation.
         write_key_mapping: If True and key_fn is provided, writes a JSON file
                            mapping transformed keys back to original stems.
+        key_prefix: Optional prefix to prepend to keys before hashing. Useful to
+                    avoid collisions when processing multiple directories with
+                    files that share the same names (e.g., "egyptian", "saudi").
     """
 
     from tqdm import tqdm
@@ -1190,7 +1194,12 @@ def shard_from_audio_dir(
         batch = []
 
     for i, path in enumerate(tqdm(all_files, ncols=90, desc="Writing WSDS shards")):
-        stem = path.stem
+        # Use relative path from input_dir (without extension) to handle nested directories
+        # e.g., "subdir/episode1" instead of just "episode1"
+        rel_path = path.relative_to(input_dir).with_suffix('')
+        stem = str(rel_path)
+        if key_prefix:
+            stem = f"{key_prefix}/{stem}"
         key = key_fn(stem) if key_fn else stem
         if key_fn and write_key_mapping:
             key_mapping[key] = stem
