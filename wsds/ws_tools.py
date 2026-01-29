@@ -670,6 +670,8 @@ def extract_index_for_shard(dataset, shard, vad_column=None, require_audio_durat
         # import ipdb; ipdb.set_trace()
         if not require_audio_duration:
             audio_duration = -1.0
+        elif "inspected_duration" in s:
+            audio_duration = float(s["inspected_duration"])
         else:
             try:
                 audio_reader = s.get_audio()
