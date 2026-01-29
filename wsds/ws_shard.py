@@ -125,27 +125,37 @@ class WSSourceAudioShard(WSShardInterface):
     def get_timestamps(self, segment_offset):
         return self._source_sample[self.vad_column][segment_offset]
 
-    def _get_key(self, offset):
-        """Get the key for this sample, either from a shard or from the index."""
+    def _get_source_key_and_segment(self, offset):
+        """Get the source file key and segment offset for this sample.
+
+        Returns (source_key, segment_offset) tuple.
+        """
         # Try to get from shard first (if __key__ column exists)
         if "__key__" in self.derived_dataset.fields:
-            return WSSample(self.derived_dataset, self.shard_name, offset)["__key__"]
-        # Fallback: get from index (for segmented datasets without __key__ shard)
+            key = WSSample(self.derived_dataset, self.shard_name, offset)["__key__"]
+            return self.derived_dataset.parse_key(key)
+
+        # Fallback: compute from index (for segmented datasets without __key__ shard)
+        # The index stores: source_key -> (shard, local_starting_offset)
+        # We need to find which source file contains this offset
         if self.derived_dataset.index:
             dataset_path, shard_name = self.shard_name
+            # Find the source file where offset falls within [file.offset, next_file.offset)
+            # Get the file with the largest offset that's <= target offset
             row = self.derived_dataset.index.query(
-                "SELECT f.name FROM files AS f, shards AS s "
-                "WHERE s.shard = ? AND s.dataset_path = ? AND f.shard_id = s.shard_id AND f.offset = ?",
+                "SELECT f.name, f.offset FROM files AS f, shards AS s "
+                "WHERE s.shard = ? AND s.dataset_path = ? AND f.shard_id = s.shard_id AND f.offset <= ? "
+                "ORDER BY f.offset DESC LIMIT 1",
                 shard_name, dataset_path, offset
             ).fetchone()
             if row:
-                return row[0]
+                source_key, file_start_offset = row
+                segment_offset = offset - file_start_offset
+                return source_key, segment_offset
         raise KeyError("__key__")
 
     def get_sample(self, _column, offset):
-        file_name, segment_offset = self.derived_dataset.parse_key(
-            self._get_key(offset)
-        )
+        file_name, segment_offset = self._get_source_key_and_segment(offset)
 
         if self._source_file_name != file_name:
             self._source_sample = self.source_dataset[file_name]
