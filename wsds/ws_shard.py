@@ -20,6 +20,17 @@ class WSShardInterface:
     shard_name: str
     """Used by WSDataset to invalidate cached shards."""
 
+    @classmethod
+    def get_columns(
+        cls, link: dict, source_dataset: "WSDataset", derived_dataset: "WSDataset"
+    ) -> dict[str, str] | None:
+        """Return columns this link provides: {column_name: column_name}.
+
+        Override this to provide multiple columns from a single link.
+        Return None to use the default behavior (link file stem as single column).
+        """
+        return None
+
     def get_sample(self, column: str, offset: int) -> typing.Any:
         raise NotImplementedError
 
@@ -154,6 +165,61 @@ class WSYoutubeVideoShard(WSSourceAudioShard):
                 f"No Youtube ID found in file name: {self._source_file_name} (using pattern: {self.re_pattern.pattern})"
             )
         return WSYouTubeVideo(match[1], sample.tstart)
+
+
+@dataclass(slots=True)
+class WSSourceLink(WSShardInterface):
+    """A proxy shard class to access all fields from a linked source dataset.
+
+    It is used via the `.wsds-link` file mechanism with a `key_prefix` to expose
+    all source dataset fields with a prefix (e.g., `source.audio`, `source.vad`).
+
+    The link file format:
+    {"dataset_dir": "../source", "loader": ["wsds.ws_shard", "WSSourceLink"], "key_prefix": "source."}
+    """
+
+    shard_name: str
+    source_dataset: "WSDataset"
+    derived_dataset: "WSDataset"
+    key_prefix: str
+
+    # cache
+    _source_file_name: str = None
+    _source_sample: WSSample = None
+
+    @classmethod
+    def get_columns(cls, link, source_dataset, derived_dataset):
+        """Return all source dataset fields with the configured prefix."""
+        key_prefix = link.get("key_prefix", "source.")
+        columns = {}
+        for field_name in source_dataset.fields:
+            if field_name == "__key__":
+                continue
+            prefixed = f"{key_prefix}{field_name}"
+            columns[prefixed] = prefixed
+        return columns
+
+    @classmethod
+    def from_link(cls, link, source_dataset, derived_dataset, shard_name):
+        key_prefix = link.get("key_prefix", "source.")
+        return cls(shard_name, source_dataset, derived_dataset, key_prefix)
+
+    def get_sample(self, column: str, offset: int):
+        # Parse the derived dataset's key to get the source file name
+        derived_key = WSSample(self.derived_dataset, self.shard_name, offset)["__key__"]
+        file_name, _segment_offset = self.derived_dataset.parse_key(derived_key)
+
+        if self._source_file_name != file_name:
+            self._source_sample = self.source_dataset[file_name]
+            self._source_file_name = file_name
+
+        # Strip prefix to get the actual source field name
+        if column.startswith(self.key_prefix):
+            source_field = column[len(self.key_prefix) :]
+        else:
+            source_field = column
+
+        return self._source_sample[source_field]
 
 
 @dataclass

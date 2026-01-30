@@ -271,6 +271,12 @@ class WSDataset:
                     subdir, field = value
                 else:
                     subdir, field = value[0]
+                # Check if this is a computed column (e.g., source-linked field)
+                if subdir in self.computed_columns:
+                    raise ValueError(
+                        f"Column '{col}' is from a linked dataset and cannot be used in SQL queries. "
+                        f"Use sample['{col}'] to access it instead."
+                    )
                 assert col == field, "renamed fields are not supported in SQL queries yet"
                 subdirs[subdir].append(field)
             exprs.append(expr)
@@ -454,12 +460,35 @@ class WSDataset:
         dir = self.dataset_dir / dataset_path / subdir
         return (Path(dir) / shard_name).with_suffix(".wsds")
 
+    def _get_loader_class(self, spec: dict):
+        """Get the loader class from a link spec."""
+        loader_class = spec["loader"]
+        if isinstance(loader_class, list):
+            loader_mod, loader_name = loader_class
+            loader_module = importlib.import_module(loader_mod)
+            return getattr(loader_module, loader_name)
+        return loader_class
+
     def _register_wsds_links(self):
+        # Collect links first to avoid modifying dict during iteration
+        links_to_register = []
         for value in self.fields.values():
             subdir = value[0] if isinstance(value[0], str) else value[0][0]
             if subdir.endswith(".wsds-link"):
                 spec = json.loads((self.dataset_dir / subdir).read_text())
                 self.computed_columns[subdir] = spec
+                links_to_register.append((subdir, spec))
+
+        # Ask each loader class what columns it provides
+        for link_file, spec in links_to_register:
+            loader_class = self._get_loader_class(spec)
+            source_dataset = self.get_linked_dataset(self.dataset_dir / spec["dataset_dir"])
+            columns = loader_class.get_columns(spec, source_dataset, self)
+
+            if columns:
+                # Loader provides multiple columns - register them all
+                for col_name in columns:
+                    self.fields[col_name] = (link_file, col_name)
 
     def add_computed(self, name, **link):
         subdir = name + ".wsds-computed"
@@ -472,12 +501,7 @@ class WSDataset:
         return self._linked_datasets[dataset_dir]
 
     def get_linked_shard(self, link, shard_name):
-        loader_class = link["loader"]
-        if isinstance(loader_class, list):
-            loader_mod, loader = loader_class
-            loader_module = importlib.import_module(loader_mod)
-            loader_class = getattr(loader_module, loader)
-
+        loader_class = self._get_loader_class(link)
         return loader_class.from_link(
             link, self.get_linked_dataset(self.dataset_dir / link["dataset_dir"]), self, shard_name
         )
