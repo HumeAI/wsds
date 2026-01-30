@@ -191,6 +191,43 @@ class WSAudio:
     tstart: float
     tend: float
 
+    @property
+    def duration(self) -> float:
+        """Duration of the audio segment in seconds."""
+        return self.tend - self.tstart
+
+    def with_context(self, before: float = 0, after: float = 0) -> "WSAudio":
+        """Return a new WSAudio with expanded timestamps to include surrounding context.
+
+        Args:
+            before: Seconds of context to add before the segment start (will not go below 0)
+            after: Seconds of context to add after the segment end
+
+        Returns:
+            A new WSAudio instance with adjusted timestamps
+        """
+        return WSAudio(
+            audio_reader=self.audio_reader,
+            tstart=max(0, self.tstart - before),
+            tend=self.tend + after,
+        )
+
+    def with_timestamps(self, tstart: float | None = None, tend: float | None = None) -> "WSAudio":
+        """Return a new WSAudio with modified timestamps.
+
+        Args:
+            tstart: New start time in seconds (None to keep current)
+            tend: New end time in seconds (None to keep current)
+
+        Returns:
+            A new WSAudio instance with the specified timestamps
+        """
+        return WSAudio(
+            audio_reader=self.audio_reader,
+            tstart=tstart if tstart is not None else self.tstart,
+            tend=tend if tend is not None else self.tend,
+        )
+
     def load(self, sample_rate=None, pad_to_seconds=None):
         samples = self.audio_reader.read_segment(self.tstart, self.tend, sample_rate)
         sample_rate = samples.sample_rate
