@@ -76,6 +76,7 @@ def inspect_shard(input_path):
     print(f"Batches: {reader.num_record_batches}")
     print(f"Rows: {int(reader.schema.metadata[b'batch_size']) * reader.num_record_batches}")
     print(f"Schema:\n{reader.schema}")
+    print_head(input_path)
 
 
 @command
