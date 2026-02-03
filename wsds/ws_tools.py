@@ -395,6 +395,7 @@ def init(
     source_dataset: Path | None = None,
     vad_column: str | None = None,
     num_workers: int = 32,
+    key_folder: str | None = None,
 ):
     """Initialize a new dataset, from scratch or from a segmentation of an existing one."""
     import multiprocessing
@@ -411,8 +412,8 @@ def init(
     else:
         source_dataset = new_dataset
 
-    ds = WSDataset(source_dataset)
-    shard_extractor = functools.partial(extract_index_for_shard, source_dataset, vad_column=vad_column)
+    ds = WSDataset(source_dataset, key_folder=key_folder)
+    shard_extractor = functools.partial(extract_index_for_shard, source_dataset, vad_column=vad_column, key_folder=key_folder)
     all_shards = ds.get_shard_list(ignore_index = True)
 
     with AtomicFile(new_dataset / "index.sqlite3") as fname:
@@ -501,10 +502,10 @@ def init_split(
                 new_fields['audio'] = ("audio.wsds-computed", "audio")
             index.append_metadata({"fields": new_fields})
 
-def extract_index_for_shard(dataset, shard, vad_column=None):
+def extract_index_for_shard(dataset, shard, vad_column=None, key_folder=None):
     from . import WSDataset
 
-    ds = WSDataset(dataset)
+    ds = WSDataset(dataset, key_folder=key_folder)
     index = []
     i = 0
 
@@ -521,7 +522,7 @@ def extract_index_for_shard(dataset, shard, vad_column=None):
             if vad.size > 0:
                 speech_duration = float((vad[:, -1] - vad[:, -2]).sum())  # tend - tstart
 
-        audio_duration = s['load_duration'] or s['est_duration'] or -1
+        audio_duration = s.get('load_duration') or s.get('est_duration') or -1
 
         if (
             n > 0

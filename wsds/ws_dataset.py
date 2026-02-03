@@ -45,8 +45,9 @@ class WSDataset:
     # FIXME: this should be overridable with metadata in index.sqlite3
     _audio_file_keys = ["flac", "mp3", "sox", "wav", "m4a", "ogg", "wma", "opus", "audio"]
 
-    def __init__(self, dataset_dir: str | Path, include_in_progress: bool = True, key_folder: str | None = None, disable_memory_map: bool = False):
+    def __init__(self, dataset_dir: str | Path, include_in_progress: bool = True, key_folder: str | None = None, disable_memory_map: bool = False, skip_links: bool = False):
         self.dataset_dir = self._resolve_path(dataset_dir)
+        self.skip_links = skip_links
 
         self.index = None
         self.segmented = False
@@ -79,7 +80,8 @@ class WSDataset:
         self._open_shards = {}
         self._linked_datasets = {}
 
-        self._register_wsds_links()
+        if not skip_links:
+            self._register_wsds_links()
 
     def enable_filter(self, filter_name: str, filter_df: pl.DataFrame):
         """
