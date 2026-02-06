@@ -90,7 +90,7 @@ class WSSample:
                 subdir = "__overrides__"
             elif k in self.dataset.fields:
                 value = self.dataset.fields[k]
-                subdir = value[0] if isinstance(value[0], str) else value[0][0]
+                (subdir, _column) = value[0]
             else:
                 subdir = "__unknown__"
             if subdir not in subdir_columns:
@@ -103,8 +103,11 @@ class WSSample:
             validate_shards(self.dataset, [self.shard_name], subdirs_to_prefetch)
 
         # Identify large subdirectories (>10 columns)
-        large_subdirs = {subdir: cols for subdir, cols in subdir_columns.items()
-                        if len(cols) > 10 and subdir not in ("__overrides__", "__unknown__")}
+        large_subdirs = {
+            subdir: cols
+            for subdir, cols in subdir_columns.items()
+            if len(cols) > 10 and subdir not in ("__overrides__", "__unknown__")
+        }
 
         # Columns in small subdirectories go through normal classification
         small_subdir_keys = set()

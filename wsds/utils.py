@@ -49,7 +49,7 @@ def list_all_columns(ds_path, shard_name=None):
     for p in Path(ds_path).iterdir():
         if p.suffix == ".wsds-link":
             col = p.with_suffix("").name
-            cols[col] = (p.name, col)
+            cols[col] = [(p.name, col)]
             continue
         if not p.is_dir():
             continue
@@ -74,14 +74,15 @@ def list_all_columns(ds_path, shard_name=None):
                 if col in cols or col in dupes:
                     dupes[col] = True
                     if col in cols:
-                        dirname = cols[col][0]
-                        cols[f"{dirname}.{col}"] = (dirname, col)
+                        (dirname, _colname) = cols[col][0]
+                        cols[f"{dirname}.{col}"] = [(dirname, col)]
                         del cols[col]
-                    cols[f"{p.name}.{col}"] = (p.name, col)
+                    cols[f"{p.name}.{col}"] = [(p.name, col)]
                 else:
-                    cols[col] = (p.name, col)
+                    cols[col] = [(p.name, col)]
     # use the smallest shards for __key__ (should be the fastest)
-    cols["__key__"] = [x[1:] for x in sorted(key_col)]
+    if key_col:
+        cols["__key__"] = [x[1:] for x in sorted(key_col)]
     return dict(sorted(cols.items()))
 
 

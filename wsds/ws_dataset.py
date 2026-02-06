@@ -83,6 +83,11 @@ class WSDataset:
         else:
             self.computed_columns = {}
 
+        # Normalize old-style single-tuple fields to list-of-tuples
+        for k, v in self.fields.items():
+            if v and isinstance(v[0], str):
+                self.fields[k] = [v]
+
         self._filter_dfs = None  # mapping of "filter name" -> polars dataframe representing the filter
 
         self._open_shards = {}
@@ -265,13 +270,8 @@ class WSDataset:
                     # __key__ exists in all shards
                     needed_special_columns.append(col)
                     continue
-                value = self.fields[col]
-                # FIXME: figure out a way to handle all candidates for __key__
-                if isinstance(value[0], str):
-                    subdir, field = value
-                else:
-                    subdir, field = value[0]
-                # Check if this is a computed column (e.g., source-linked field)
+                subdir, field = self.fields[col][0]
+                # Check if this is a computed/remote column (e.g., source-linked or S3-backed field)
                 if subdir in self.computed_columns:
                     raise ValueError(
                         f"Column '{col}' is from a linked dataset and cannot be used in SQL queries. "
@@ -282,8 +282,7 @@ class WSDataset:
             exprs.append(expr)
 
         # If only __key__ is in the query, we need to load shards from at least one subdir
-        key_value = self.fields["__key__"]
-        key_subdir = key_value[0] if isinstance(key_value[0], str) else key_value[0][0]
+        (key_subdir, _column) = self.fields["__key__"][0]
         if needed_special_columns:
             if subdirs:
                 key_subdir = list(subdirs.keys())[0]
@@ -490,7 +489,7 @@ class WSDataset:
         # Collect links first to avoid modifying dict during iteration
         links_to_register = []
         for value in self.fields.values():
-            subdir = value[0] if isinstance(value[0], str) else value[0][0]
+            (subdir, _column) = value[0]
             if subdir.endswith(".wsds-link"):
                 spec = json.loads((self.dataset_dir / subdir).read_text())
                 self.computed_columns[subdir] = spec
@@ -505,12 +504,12 @@ class WSDataset:
             if columns:
                 # Loader provides multiple columns - register them all
                 for col_name in columns:
-                    self.fields[col_name] = (link_file, col_name)
+                    self.fields[col_name] = [(link_file, col_name)]
 
     def add_computed(self, name, **link):
         subdir = name + ".wsds-computed"
         self.computed_columns[subdir] = link
-        self.fields[name] = (subdir, name)
+        self.fields[name] = [(subdir, name)]
 
     def get_linked_dataset(self, dataset_dir):
         if dataset_dir not in self._linked_datasets:
@@ -539,8 +538,7 @@ class WSDataset:
         return shard
 
     def get_sample(self, shard_name, field, offset):
-        value = self.fields[field]
-        alternatives = [value] if isinstance(value[0], str) else value
+        alternatives = self.fields[field]
         last_err = None
         for subdir, column in alternatives:
             try:

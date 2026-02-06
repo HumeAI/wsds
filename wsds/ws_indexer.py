@@ -145,7 +145,6 @@ def extract_batch_index(
             if isinstance(v[0], str) and v[1] in ["sample_source_id", "src_key"]:
                 continue
             fields[k] = v
-        fields['__key__'] = ('audio_metadata.in-progress', '__key__')
         with AtomicFile(ds_path / 'fields.json') as fname:
             with open(fname, 'w') as f:
                 json.dump(fields, f)
@@ -191,7 +190,6 @@ def extract_batch_index(
             if isinstance(v[0], str) and v[1] in ["sample_source_id", "src_key"]:
                 continue
             fields[k] = v
-        fields['__key__'] = ('segment_metadata.in-progress', '__key__')
         with AtomicFile(ds_path / 'fields.json') as fname:
             with open(fname, 'w') as f:
                 json.dump(fields, f)

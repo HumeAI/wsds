@@ -489,7 +489,12 @@ def init_split(
 
             index.append_metadata({"segmented": True if vad_column else False})
             ds = WSDataset(Path(splits[0]) / new_dataset)
-            new_fields = {k:v for k,v in ds.fields.items() if v[1] not in ['sample_source_id', 'src_key']}
+            new_fields = {
+                k: v
+                for k, v in ds.fields.items()
+                for (_subdir, col) in [v[0]]
+                if col not in ["sample_source_id", "src_key"]
+            }
             if vad_column:
                 index.append_metadata({"computed_columns": {
                     "audio.wsds-computed": {
@@ -497,8 +502,8 @@ def init_split(
                         "loader": ["wsds.ws_shard", "WSSourceAudioShard"],
                         "vad_column": vad_column,
                     }
-                }})
-                new_fields['audio'] = ("audio.wsds-computed", "audio")
+                )
+                new_fields["audio"] = [("audio.wsds-computed", "audio")]
             index.append_metadata({"fields": new_fields})
 
 def extract_index_for_shard(dataset, shard, vad_column=None):
