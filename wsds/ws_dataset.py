@@ -53,7 +53,14 @@ class WSDataset:
     # FIXME: this should be overridable with metadata in index.sqlite3
     _audio_file_keys = ["flac", "mp3", "sox", "wav", "m4a", "ogg", "wma", "opus", "audio"]
 
-    def __init__(self, dataset_dir: str | Path, include_in_progress: bool = True, key_folder: str | None = None, disable_memory_map: bool = False):
+    def __init__(
+        self,
+        dataset_dir: str | Path,
+        include_in_progress: bool = True,
+        key_folder: str | None = None,
+        disable_memory_map: bool = False,
+        ignore_index: bool = False,
+    ):
         self.dataset_dir = self._resolve_path(dataset_dir)
 
         if include_in_progress is not True:
@@ -65,7 +72,7 @@ class WSDataset:
         self.segmented = False
         self.disable_memory_map = disable_memory_map
         index_file = self.dataset_dir / "index.sqlite3"
-        if index_file.exists():
+        if not ignore_index and index_file.exists():
             self.index = WSIndex(index_file)
             meta = self.index.metadata
             self.segmented = meta.get("segmented", False)
