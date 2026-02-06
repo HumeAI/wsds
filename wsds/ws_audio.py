@@ -101,7 +101,7 @@ def _audio_to_mp3(samples):
     return out.getvalue()
 
 
-@dataclass(slots=True)
+@dataclass()
 class AudioReader:
     """A lazy seeking-capable audio reader for random-access to recordings stored in wsds shards."""
 
@@ -187,7 +187,7 @@ class AudioReader:
         display(HTML(self._repr_html_()))
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(frozen=True)
 class WSAudio:
     """A lazy reference to a single sample from a segmented audio file."""
 
