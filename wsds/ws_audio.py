@@ -35,7 +35,11 @@ class CompatAudioDecoder:
         if not hasattr(torchaudio, "io"):
             raise ImportError("You need either torchaudio<2.9 or torchcodec installed")
         self.src = src
-        self.reader = torchaudio.io.StreamReader(src=to_filelike(self.src), buffer_size=128*1024)
+        if hasattr(src, "_optimal_read_size"):
+            buffer_size = src._optimal_read_size
+        else:
+            buffer_size = 128 * 1024
+        self.reader = torchaudio.io.StreamReader(src=to_filelike(self.src), buffer_size=buffer_size)
         self.metadata = self.reader.get_src_stream_info(0)
 
         if sample_rate is None:

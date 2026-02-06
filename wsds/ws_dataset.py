@@ -277,7 +277,7 @@ class WSDataset:
                 # Check if this is a computed/remote column (e.g., source-linked or S3-backed field)
                 if subdir in self.computed_columns:
                     raise ValueError(
-                        f"Column '{col}' is from a linked dataset and cannot be used in SQL queries. "
+                        f"Column '{col}' is a computed/remote column and cannot be used in SQL queries. "
                         f"Use sample['{col}'] to access it instead."
                     )
                 assert col == field, "renamed fields are not supported in SQL queries yet"

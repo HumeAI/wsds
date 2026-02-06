@@ -17,6 +17,11 @@ if TYPE_CHECKING:
 class WSShardMissingError(Exception):
     fname: str
 
+    @classmethod
+    def from_s3(cls, s3_client, key, bucket, err):
+        return cls(f"{s3_client._endpoint}://{bucket}/{key} [error: {err}]")
+
+
 @dataclass
 class WSShardCorruptedError(Exception):
     fname: str
