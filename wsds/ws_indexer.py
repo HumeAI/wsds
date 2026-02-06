@@ -3,10 +3,13 @@ Core wsds/Polars indexing logic for extracting and merging episode indices.
 """
 
 import json
+import os
 import time
+import traceback
 from pathlib import Path
 
 import polars as pl
+
 from wsds import AtomicFile, WSDataset
 from wsds.ws_index import WSDSIndexWriter
 
@@ -104,7 +107,7 @@ def write_index(
 def extract_batch_index(
     batch_path: Path | str,
     overwrite: bool = False
-) -> tuple[str, str | None, str | None]:
+) -> tuple[str, str | None, str | None, str | None]:
     """
     Extract episode indices from a single batch directory.
 
@@ -116,7 +119,7 @@ def extract_batch_index(
         overwrite: If True, regenerate indices even if they exist
 
     Returns:
-        Tuple of (batch_path, error_message, exception_repr) - error fields are None on success
+        Tuple of (batch_path, error_message, exception_repr, traceback_str) - error fields are None on success
     """
     batch = Path(batch_path)
 
@@ -126,16 +129,19 @@ def extract_batch_index(
 
     if out_file.exists() and not overwrite:
         print(f"Skipping, {out_file} already exists")
-        source_idx = pl.read_ipc(out_file, memory_map=False)
+        try:
+            source_idx = pl.read_ipc(out_file, memory_map=False)
+        except Exception as e:
+            return str(batch), "error reading source index:", repr(e), traceback.format_exc()
     else:
         if not ds_path.exists():
-            return str(batch), "error: source not found", None
+            return str(batch), "error: source not found", None, None
 
         try:
             start = time.perf_counter()
-            source_ds = WSDataset(ds_path)
+            source_ds = WSDataset(ds_path, ignore_index=True)
         except Exception as e:
-            return str(batch), "error initializing source dataset", repr(e)
+            return str(batch), "error initializing source dataset", repr(e), traceback.format_exc()
 
         print(f"Loaded dataset {source_ds.dataset_dir} in {time.perf_counter() - start:.1f}s")
 
@@ -164,7 +170,7 @@ def extract_batch_index(
 
             print(f"Extracted {len(source_idx)} episodes from {source_ds.dataset_dir} in {time.perf_counter() - start:.1f}s")
         except Exception as e:
-            return str(batch), "error extracting source episodes", repr(e)
+            return str(batch), "error extracting source episodes", repr(e), traceback.format_exc()
 
     # Process filtered_vad dataset
     ds_path = batch / 'filtered_vad'
@@ -175,12 +181,11 @@ def extract_batch_index(
     else:
         try:
             start = time.perf_counter()
-            vad_ds = WSDataset(ds_path)
+            vad_ds = WSDataset(ds_path, ignore_index=True)
         except Exception as e:
-            import traceback
             traceback.print_exc()
             print(f"Error initializing WSDataset at {batch / 'filtered_vad'}: {e}")
-            return str(batch), "error initializing filtered_vad dataset", repr(e)
+            return str(batch), "error initializing filtered_vad dataset", repr(e), traceback.format_exc()
 
         print(f"Loaded dataset {vad_ds.dataset_dir} in {time.perf_counter() - start:.1f}s")
 
@@ -206,16 +211,16 @@ def extract_batch_index(
 
             print(f"Extracted {len(vad_idx)} episodes from {vad_ds.dataset_dir} in {time.perf_counter() - start:.1f}s")
         except Exception as e:
-            return str(batch), "error extracting filtered_vad episodes", repr(e)
+            return str(batch), "error extracting filtered_vad episodes", repr(e), traceback.format_exc()
 
-    return str(batch), None, None
+    return str(batch), None, None, None
 
 
 def merge_batch_indices(
     batches: list[Path | str],
     dataset_kind: str,
     dest_path: Path | str,
-) -> tuple[str, str | None, str | None]:
+) -> tuple[str, list[tuple[str, str, str | None, str | None]]]:
     """
     Merge episode indices from multiple batches into a single wsds index.
 
@@ -225,7 +230,8 @@ def merge_batch_indices(
         dest_path: Destination directory for merged index
 
     Returns:
-        Tuple of (dest_path, error_message, exception_repr) - error fields are None on success
+        Tuple of (dest_path, errors) where errors is a list of
+        (file_path, error_message, exception_repr, traceback_str) tuples.
     """
     start = time.perf_counter()
     print(f"Merging to {dest_path}:")
@@ -243,7 +249,12 @@ def merge_batch_indices(
         if idx_file.exists():
             size += idx_file.stat().st_size
 
-            episode_idx = pl.read_ipc(idx_file, memory_map=False)
+            try:
+                episode_idx = pl.read_ipc(idx_file, memory_map=False)
+            except Exception as e:
+                errors.append((str(idx_file), "read error", repr(e), traceback.format_exc()))
+                continue
+
             # create shard index
             shard_idx = make_shard_idx(
                 episode_idx,
@@ -260,19 +271,18 @@ def merge_batch_indices(
             episode_idxs.append(episode_idx)
             shard_idxs.append(shard_idx)
 
+            merge_field_errors = []
             with open(ds_path / 'fields.json') as f:
                 for k, v in json.load(f).items():
                     if k not in merged_fields:
                         merged_fields[k] = v
                     else:
                         if v != merged_fields[k]:
-                            print(f"Error merging field {k}, so far I had:")
-                            print(f"    - {repr(merged_fields[k])}")
-                            print(f"from {ds_path} I got:")
-                            print(f"    - {repr(v)}")
-                            errors.append((idx_file, f"error merging field: {k}"))
+                            merge_field_errors.append(k)
+            if merge_field_errors:
+                errors.append((str(idx_file), f"error merging fields", None, ', '.join(merge_field_errors)))
         else:
-            errors.append((idx_file, "missing file"))
+            errors.append((str(idx_file), "missing file", None, None))
 
     merged_episode_idx = (
         pl.concat(episode_idxs)
@@ -297,15 +307,28 @@ def merge_batch_indices(
     merged_shard_idx.write_ipc(dst / 'shard-index.feather')
     print(f"Saved feather indices to {dst} in {time.perf_counter() - start:.2f} s")
 
-    start = time.perf_counter()
-    write_index(
-        dst, merged_shard_idx, merged_episode_idx, merged_fields,
-        vad_column='vad.npy' if dataset_kind == 'filtered_vad' else None,
-        source_path='../source')
-    print(f"Saved index to {dst} in {time.perf_counter() - start:.2f} s")
+    try:
+        start = time.perf_counter()
+        write_index(
+            dst, merged_shard_idx, merged_episode_idx, merged_fields,
+            vad_column='vad.npy' if dataset_kind == 'filtered_vad' else None,
+            source_path='../source')
+        print(f"Saved index to {dst} in {time.perf_counter() - start:.2f} s")
 
-    print(f"Skipped these indices due to errors:")
-    for idx_file, error in errors:
-        print("    ", idx_file, "-", error)
+    except Exception as e:
+        errors.append((str(dst), "error saving index", repr(e), traceback.format_exc()))
 
-    return str(dst), None, None
+    print("Skipped these indices due to errors:")
+    for path, error, exc_repr, tb in errors:
+        print("    ", path, "-", error, exc_repr or "")
+
+    with open(dst / 'indexing.log', 'w') as f:
+        for path, error, exc_repr, tb in errors:
+            f.write(f"{path} - {error}")
+            if exc_repr:
+                f.write(f" {exc_repr}")
+            f.write("\n")
+            if tb:
+                f.write(tb + "\n")
+
+    return str(dst), errors
