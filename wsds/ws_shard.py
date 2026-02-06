@@ -125,8 +125,9 @@ class WSSourceAudioShard(WSShardInterface):
     _source_reader: AudioReader = None
 
     @classmethod
-    def from_link(cls, link, source_dataset, derived_dataset, shard_name):
-        return cls(shard_name, source_dataset, derived_dataset, link["vad_column"])
+    def from_link(cls, link, dataset, shard_name):
+        source_dataset = dataset.get_linked_dataset(link["dataset_dir"])
+        return cls(shard_name, source_dataset, dataset, link["vad_column"])
 
     def get_timestamps(self, segment_offset):
         return self._source_sample[self.vad_column][segment_offset]
@@ -152,8 +153,8 @@ class WSYoutubeVideoShard(WSSourceAudioShard):
     re_pattern: re.Pattern[str]
 
     @classmethod
-    def from_link(cls, link, source_dataset, derived_dataset, shard_name):
-        self = super().from_link(link, source_dataset, derived_dataset, shard_name)
+    def from_link(cls, link, dataset, shard_name):
+        self = super().from_link(link, dataset, shard_name)
         self.re_pattern = re.compile(link["youtube_id_regexp"])
         return self
 
@@ -188,8 +189,9 @@ class WSSourceLink(WSShardInterface):
     _source_sample: WSSample = None
 
     @classmethod
-    def get_columns(cls, link, source_dataset, derived_dataset):
+    def get_columns(cls, link, dataset):
         """Return all source dataset fields with the configured prefix."""
+        source_dataset = dataset.get_linked_dataset(link["dataset_dir"])
         key_prefix = link.get("key_prefix", "source.")
         columns = {}
         for field_name in source_dataset.fields:
@@ -200,9 +202,10 @@ class WSSourceLink(WSShardInterface):
         return columns
 
     @classmethod
-    def from_link(cls, link, source_dataset, derived_dataset, shard_name):
+    def from_link(cls, link, dataset, shard_name):
+        source_dataset = dataset.get_linked_dataset(link["dataset_dir"])
         key_prefix = link.get("key_prefix", "source.")
-        return cls(shard_name, source_dataset, derived_dataset, key_prefix)
+        return cls(shard_name, source_dataset, dataset, key_prefix)
 
     def get_sample(self, column: str, offset: int):
         # Parse the derived dataset's key to get the source file name

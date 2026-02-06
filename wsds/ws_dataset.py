@@ -501,8 +501,7 @@ class WSDataset:
         # Ask each loader class what columns it provides
         for link_file, spec in links_to_register:
             loader_class = self._get_loader_class(spec)
-            source_dataset = self.get_linked_dataset(self.dataset_dir / spec["dataset_dir"])
-            columns = loader_class.get_columns(spec, source_dataset, self)
+            columns = loader_class.get_columns(spec, self)
 
             if columns:
                 # Loader provides multiple columns - register them all
@@ -515,15 +514,14 @@ class WSDataset:
         self.fields[name] = [(subdir, name)]
 
     def get_linked_dataset(self, dataset_dir):
+        dataset_dir = self.dataset_dir / dataset_dir
         if dataset_dir not in self._linked_datasets:
             self._linked_datasets[dataset_dir] = WSDataset(dataset_dir)
         return self._linked_datasets[dataset_dir]
 
     def get_linked_shard(self, link, shard_name):
         loader_class = self._get_loader_class(link)
-        return loader_class.from_link(
-            link, self.get_linked_dataset(self.dataset_dir / link["dataset_dir"]), self, shard_name
-        )
+        return loader_class.from_link(link, self, shard_name)
 
     def get_shard(self, subdir, shard_name):
         shard_path = self.get_shard_path(subdir, shard_name)
