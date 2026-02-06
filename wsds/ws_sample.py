@@ -7,12 +7,15 @@ if TYPE_CHECKING:
     from .ws_dataset import WSDataset
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(frozen=True)
 class WSSample:
     dataset: "WSDataset"
     shard_name: str
     offset: int
     overrides: dict = field(default_factory=dict)
+    # Key verification state (mutable containers to work with frozen dataclass)
+    _verified_subdirs: set = field(default_factory=set, repr=False, compare=False)
+    _reference_key: list = field(default_factory=list, repr=False, compare=False)
 
     def get_audio(self, audio_columns=None):
         candidates = audio_columns or self.dataset._audio_file_keys
@@ -33,9 +36,46 @@ class WSSample:
     def values(self):
         yield from (v for _, v in self.items())
 
+    def _verify_key_for_field(self, field: str):
+        """Verify __key__ in this field's subdir matches the reference key."""
+        value = self.dataset.fields.get(field)
+        if value is None:
+            return
+        (subdir, _column) = value[0]
+
+        if subdir in self._verified_subdirs:
+            return
+
+        # Skip computed columns (they don't have their own __key__)
+        if subdir in self.dataset.computed_columns:
+            self._verified_subdirs.add(subdir)
+            return
+
+        # Get __key__ from this subdir
+        try:
+            key = self.dataset.get_shard(subdir, self.shard_name).get_sample("__key__", self.offset)
+        except (WSShardMissingError, KeyError):
+            # Can't verify if shard or key is missing
+            self._verified_subdirs.add(subdir)
+            return
+
+        if not self._reference_key:
+            # First subdir accessed - store as reference
+            self._reference_key.append((subdir, key))
+        else:
+            ref_subdir, ref_key = self._reference_key[0]
+            if key != ref_key:
+                raise ValueError(
+                    f"Key mismatch at offset {self.offset} in shard {self.shard_name}: "
+                    f"{ref_subdir} has '{ref_key}' but {subdir} has '{key}'"
+                )
+
+        self._verified_subdirs.add(subdir)
+
     def __getitem__(self, field):
         if field in self.overrides:
             return self.overrides[field]
+        self._verify_key_for_field(field)
         return self.dataset.get_sample(self.shard_name, field, self.offset)
 
     def __setitem__(self, field, value):
