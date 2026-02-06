@@ -77,11 +77,14 @@ class WSDataset:
         else:
             dataset_path, shard_name  = next(self.index.shards()) if self.index else ("", None)
             self.fields = list_all_columns(self.dataset_dir / dataset_path, shard_name)
-            self.fields.update(list_all_columns(self.dataset_dir))
-        if 'computed_columns' in meta:
-            self.computed_columns = meta['computed_columns']
+
+        if "computed_columns" in meta:
+            self.computed_columns = meta["computed_columns"]
         else:
             self.computed_columns = {}
+
+        # look for additional columns that are not in the index (like a wsds-link to S3 storage)
+        self.fields.update(list_all_columns(self.dataset_dir))
 
         # Normalize old-style single-tuple fields to list-of-tuples
         for k, v in self.fields.items():
