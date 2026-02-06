@@ -235,6 +235,7 @@ def merge_batch_indices(
     """
     start = time.perf_counter()
     print(f"Merging to {dest_path}:")
+    dst = Path(dest_path) / dataset_kind
 
     episode_idxs = []
     shard_idxs = []
@@ -259,7 +260,7 @@ def merge_batch_indices(
             shard_idx = make_shard_idx(
                 episode_idx,
                 n_samples_expr=pl.len().alias('n_samples') if dataset_kind == 'source' else pl.sum('segments').alias('n_samples'),
-                dataset_path=ds_path,
+                dataset_path=os.path.relpath(ds_path, dst),
                 shard_id_offset=n_shards,
             )
             n_shards += len(shard_idx)
@@ -300,7 +301,6 @@ def merge_batch_indices(
     print(f"Merged {len(merged_episode_idx)} {dataset_kind} episodes ({size/1024/1024:.1f} MB) for {dest_path} in {time.perf_counter() - start:.2f} s")
 
     start = time.perf_counter()
-    dst = Path(dest_path) / dataset_kind
     dst.mkdir(exist_ok=True, parents=True)
 
     merged_episode_idx.write_ipc(dst / 'episode-index.feather')
