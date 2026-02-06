@@ -155,15 +155,16 @@ class WSSample:
             if subdir not in large_subdirs:
                 small_subdir_keys.update(cols)
 
+        missing = []
         for k in small_subdir_keys:
             try:
                 v = self[k]
-            except WSShardMissingError as err:
-                arrays.append(k)
-            except KeyError as err:
+            except WSShardMissingError:
+                missing.append(k)
+            except KeyError:
                 other.append(k)
             else:
-                if k == '__key__':
+                if k == "__key__":
                     other.insert(0, k)
                 elif hasattr(v, "shape") and v.shape:
                     arrays.append(k)
@@ -212,6 +213,10 @@ class WSSample:
             print_keys(top_keys)
             if len(cols) > 10:
                 r.append(f"  # ... and {len(cols) - 10} more columns")
+
+        if missing:
+            r.append("# Missing shards:")
+            print_keys(missing)
 
         r.append("})\n")
         return "\n".join(r)
