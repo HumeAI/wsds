@@ -65,6 +65,8 @@ class WSBatchedSink:
         try:
             record = pyarrow.RecordBatch.from_pylist(b, self._sink_schema if self._sink else None)
         except Exception:
+            print(f"Batch data causing serialization error: {repr(b)}")
+            print(f"Schema: {self._sink_schema}")
             print(f"Error while serializing: {repr(b)}")
             raise
         if self._sink is None:
@@ -73,6 +75,8 @@ class WSBatchedSink:
                     self.batch_size *= 2
                     return
             schema = record.schema.with_metadata({"batch_size": str(len(b))})
+            print(f"Initializing WSBatchedSink with batch size {self.batch_size} and schema:\n{schema}")
+            print(f"First batch data:\n{repr(b)}")
             self._sink = pyarrow.RecordBatchFileWriter(
                 self.fname, schema, options=pyarrow.ipc.IpcWriteOptions(compression=self.compression)
             )
