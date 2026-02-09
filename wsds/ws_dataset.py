@@ -214,7 +214,7 @@ class WSDataset:
             raise IndexError(f"Shard not found: {shard_name}")
         return r[0]
 
-    def iter_shard(self, shard_name):
+    def iter_shard(self, shard_name: (str, str)):
         dataset_path, shard_name = shard_name
         if shard_name.endswith(".wsds"):
             shard_name = shard_name[:-5]
