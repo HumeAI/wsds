@@ -1,5 +1,4 @@
 import struct
-from pathlib import Path
 
 import pyarrow as pa
 import pyarrow.ipc
@@ -202,3 +201,31 @@ class TestShardFromAudioDir:
 
         shard_names = sorted(p.name for p in output_dir.glob("*.wsds"))
         assert shard_names == ["audio-00000.wsds", "audio-00001.wsds"]
+
+    def test_sort_files_parameter(self, tmp_path):
+        """sort_files=True produces deterministic ordering."""
+        input_dir = tmp_path / "in"
+        output_dir_sorted = tmp_path / "out_sorted"
+        output_dir_unsorted = tmp_path / "out_unsorted"
+        input_dir.mkdir()
+
+        # Create files with names that would sort differently than filesystem order
+        stems = ["zebra", "alpha", "beta", "gamma"]
+        for stem in stems:
+            make_wav(input_dir / f"{stem}.wav")
+
+        # Run with sort_files=True
+        shard_from_audio_dir(str(input_dir), str(output_dir_sorted), sort_files=True)
+
+        # Verify sorted output has keys in alphabetical order
+        shards_sorted = _collect_shards(output_dir_sorted)
+        keys_sorted = [k for keys, _, _ in shards_sorted for k in keys]
+        assert keys_sorted == sorted(stems)
+
+        # Run without sorting (default)
+        shard_from_audio_dir(str(input_dir), str(output_dir_unsorted), sort_files=False)
+
+        # Verify unsorted output has same keys (but possibly different order)
+        shards_unsorted = _collect_shards(output_dir_unsorted)
+        keys_unsorted = [k for keys, _, _ in shards_unsorted for k in keys]
+        assert sorted(keys_unsorted) == sorted(stems)

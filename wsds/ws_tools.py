@@ -6,7 +6,7 @@ import os
 import sys
 from collections.abc import Callable
 from pathlib import Path
-import numpy as np
+
 import polars as pl
 import pyarrow as pa
 
@@ -327,7 +327,7 @@ class validate:
                     try:
                         if not pl.scan_ipc(shard_fname).select((pl.col("__key__") == expected_keys).all()).collect().item():
                             tqdm.write(f"Shard {shard} in {subdir} has keys that don't match the index.")
-                    except pl.exceptions.ShapeError as err:
+                    except pl.exceptions.ShapeError:
                         tqdm.write(f"Shard {shard} in {subdir} has {pl.scan_ipc(shard_fname).select(pl.len()).collect().item()} keys while we expect {len(expected_keys)}.")
                     reader = pa.RecordBatchFileReader(pa.memory_map(str(shard_fname)))
                     batch_size = int(reader.schema.metadata[b'batch_size'])
@@ -611,6 +611,7 @@ def shard_from_audio_dir(
     key_fn: Callable[[str], str] | None = None,
     write_key_mapping: bool = False,
     key_prefix: str = "",
+    sort_files: bool = False,
 ):
     """Write batched Feather (.wsds) shards with up to N audio files each.
 
@@ -622,6 +623,9 @@ def shard_from_audio_dir(
         key_prefix: Optional prefix to prepend to keys before hashing. Useful to
                     avoid collisions when processing multiple directories with
                     files that share the same names (e.g., "egyptian", "saudi").
+        sort_files: If True, sorts all files before processing (loads full list
+                    into memory). If False (default), iterates without sorting for
+                    better performance with large corpora.
     """
     from tqdm import tqdm
 
@@ -629,8 +633,13 @@ def shard_from_audio_dir(
     output_dir.mkdir(parents=True, exist_ok=True)
 
     exts = (".wav", ".flac", ".mp3", ".m4a", ".ogg", ".opus")
-    all_files = sorted(p for p in input_dir.rglob("*") if p.suffix.lower() in exts)
-    print(f"[INFO] Found {len(all_files):,} audio files under {input_dir}")
+    file_iter = (p for p in input_dir.rglob("*") if p.suffix.lower() in exts)
+    if sort_files:
+        all_files = sorted(file_iter)
+        print(f"[INFO] Found {len(all_files):,} audio files under {input_dir}")
+    else:
+        all_files = file_iter
+        print(f"[INFO] Processing audio files under {input_dir}")
 
     MAX_ARROW_BYTES = 2_140_000_000  # ~2.1 GB Arrow cell limit
 
