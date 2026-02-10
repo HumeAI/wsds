@@ -1,14 +1,17 @@
+from __future__ import annotations
+
 import functools
 import json
 import os
+import sys
 from collections.abc import Callable
 from pathlib import Path
-
 import numpy as np
 import polars as pl
 import pyarrow as pa
 
 from . import WSSample, WSSink
+from .ws_audio import AudioReader
 
 commands = {}
 
@@ -34,13 +37,21 @@ def _list(input_shard: str):
         # FIXME: implement keys
         pass
     else:
+        has_invalid_batches = False
         reader = pa.RecordBatchFileReader(pa.memory_map(input_shard))
+        batch_size = int(reader.schema.metadata[b'batch_size'])
         try:
             for i in range(reader.num_record_batches):
-                for key in reader.get_batch(i)["__key__"]:
+                b = reader.get_batch(i)
+                if b.num_rows != batch_size and i != reader.num_record_batches - 1:
+                    sys.stderr.write(f"Batch {i} has {b.num_rows} rows instead of {batch_size}\n")
+                    has_invalid_batches = True
+                for key in b["__key__"]:
                     print(key)
         except BrokenPipeError:
             pass
+        if has_invalid_batches:
+            sys.exit(1)
 
 
 def inspect_dataset(input_path, verbose=True):
@@ -505,7 +516,12 @@ def init_split(
                 new_fields["audio"] = [("audio.wsds-computed", "audio")]
             index.append_metadata({"fields": new_fields})
 
-def extract_index_for_shard(dataset, shard, vad_column=None, require_audio_duration=True):
+def extract_index_for_shard(
+    dataset: str | Path,
+    shard: tuple[str, str] | list[str] | str,
+    vad_column: str | None = None,
+    require_audio_duration: bool = True,
+) -> dict:
     from . import WSDataset
 
     ds = WSDataset(dataset)
@@ -564,7 +580,7 @@ def extract_index_for_shard(dataset, shard, vad_column=None, require_audio_durat
     }
 
 
-def _duration_seconds_from_metadata(meta, audio_reader=None):
+def _duration_seconds_from_metadata(meta, audio_reader: AudioReader | None = None) -> float | None:
     for attr in ("duration_seconds_from_header", "duration", "duration_seconds"):
         val = getattr(meta, attr, None)
         if val is not None:
