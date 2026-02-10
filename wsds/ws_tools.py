@@ -635,10 +635,10 @@ def shard_from_audio_dir(
     exts = (".wav", ".flac", ".mp3", ".m4a", ".ogg", ".opus")
     file_iter = (p for p in input_dir.rglob("*") if p.suffix.lower() in exts)
     if sort_files:
-        all_files = sorted(file_iter)
-        print(f"[INFO] Found {len(all_files):,} audio files under {input_dir}")
+        files = sorted(file_iter)
+        print(f"[INFO] Found {len(files):,} audio files under {input_dir}")
     else:
-        all_files = file_iter
+        files = file_iter
         print(f"[INFO] Processing audio files under {input_dir}")
 
     MAX_ARROW_BYTES = 2_140_000_000  # ~2.1 GB Arrow cell limit
@@ -656,7 +656,7 @@ def shard_from_audio_dir(
         shard_idx += 1
         batch = []
 
-    for path in tqdm(all_files, ncols=90, desc="Writing WSDS shards"):
+    for path in tqdm(files, ncols=90, desc="Writing WSDS shards"):
         rel_path = path.relative_to(input_dir).with_suffix('')
         stem = str(rel_path)
         if key_prefix:
