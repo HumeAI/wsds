@@ -127,7 +127,7 @@ class AudioReader:
         if self.reader is None or sample_rate_switch:
             try:
                 from torchcodec.decoders import AudioDecoder
-            except ImportError:
+            except Exception:
                 AudioDecoder = CompatAudioDecoder
 
             reader = AudioDecoder(to_filelike(self.src), sample_rate=sample_rate)
