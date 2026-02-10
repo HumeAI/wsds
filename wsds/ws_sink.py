@@ -142,12 +142,5 @@ def WSSink(
     ```
     """
     with AtomicFile(fname, ephemeral) as fname:
-<<<<<<< HEAD
-        with WSBatchedSink(
-            fname, min_batch_size_bytes=min_batch_size_bytes, compression=compression
-        ) as sink:
-            sink.batch_size = batch_size
-=======
         with WSBatchedSink(fname, min_batch_size_bytes, compression) as sink:
->>>>>>> origin/main
             yield sink
