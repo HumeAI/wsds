@@ -1,15 +1,12 @@
 import os
-import pickle
 import typing
 from typing import TYPE_CHECKING
 from urllib.parse import urlparse
 
-import numpy as np
-
 from .pupyarrow.file_reader import S3FileReader
-from .pupyarrow.pupyarrow import FeatherFile
+from .pupyarrow.pupyarrow import FeatherFile, LazyBinaryArray
 from .utils import WSShardMissingError
-from .ws_audio import AudioReader
+from .ws_decode import decode_sample
 from .ws_shard import WSShardInterface
 
 if TYPE_CHECKING:
@@ -124,19 +121,12 @@ class WSS3Shard(WSShardInterface):
             raise KeyError(f"column {column} not found in shard {self._s3_path()}")
         data = col[j]
         try:
-            if column.endswith("npy"):
-                return np.load(data)
-            elif column.endswith("pyd"):
-                return pickle.load(data)
-            elif column.endswith("txt"):
-                return data if isinstance(data, str) else data.decode("utf-8")
-            elif column in self.dataset._audio_file_keys:
+            if isinstance(col, LazyBinaryArray):
                 data._optimal_read_size = 2 * 1024 * 1024
-                return AudioReader(data)
-            else:
-                return data
+                return decode_sample(column, data)
         except Exception as e:
             raise ValueError(f"Failed to decode column {column} in shard {self._s3_path()} (offset {offset}): {e}")
+        return data
 
     def __repr__(self):
         r = f"WSS3Shard('{self._s3_path()}')"

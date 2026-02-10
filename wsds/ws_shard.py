@@ -1,16 +1,15 @@
 import io
-import pickle
 import re
 import typing
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
-import numpy as np
 import pyarrow as pa
 
-from .ws_audio import AudioReader, WSAudio
-from .ws_sample import WSSample
 from .utils import WSShardMissingError
+from .ws_audio import AudioReader, WSAudio
+from .ws_decode import decode_sample
+from .ws_sample import WSSample
 
 if TYPE_CHECKING:
     from .ws_dataset import WSDataset
@@ -85,19 +84,11 @@ class WSShard(WSShardInterface):
         if self._data.schema.get_field_index(column) == -1:
             raise KeyError(f"column {column} not found in shard {self.fname}")
         data = self._data[column][j]
+        col_type = self._data.schema.field(column).type
         try:
-            # FIXME: implement proper encoders and decoders
-            if column.endswith("npy"):
-                return np.load(io.BytesIO(data.as_buffer()))
-            elif column.endswith("pyd"):
-                return pickle.load(io.BytesIO(data.as_buffer()))
-            elif column.endswith("txt"):
-                return data.as_buffer().to_pybytes().decode("utf-8")
-            elif column in self.dataset._audio_file_keys:
-                return AudioReader(data)
-            else:
-                # FIXME: we need to handle audio decoding here to avoid copying the entire audio buffer
-                return data.as_py(maps_as_pydicts="strict")
+            if pa.types.is_binary(col_type) or pa.types.is_large_binary(col_type):
+                return decode_sample(column, io.BytesIO(data.as_buffer()))
+            return data.as_py(maps_as_pydicts="strict")
         except Exception as e:
             raise ValueError(f"Failed to decode column {column} in shard {self.fname} (offset {offset}): {e}")
 
@@ -141,7 +132,7 @@ class WSSourceAudioShard(WSShardInterface):
             self._source_sample = self.source_dataset[file_name]
             try:
                 self._source_reader = self._source_sample.get_audio()
-            except KeyError as err:
+            except KeyError:
                 raise WSShardMissingError("no audio shards found")
             self._source_file_name = file_name
 

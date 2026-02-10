@@ -50,8 +50,6 @@ class WSDataset:
     computed_columns: dict
     """List of computed columns (e.g. the source audio or video link). @private"""
 
-    # FIXME: this should be overridable with metadata in index.sqlite3
-    _audio_file_keys = ["flac", "mp3", "sox", "wav", "m4a", "ogg", "wma", "opus", "audio"]
 
     def __init__(
         self,
