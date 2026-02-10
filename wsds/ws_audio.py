@@ -1,10 +1,13 @@
 from __future__ import annotations
 
 import io
+import logging
 import typing
 from dataclasses import dataclass
 
 import pyarrow as pa
+
+logger = logging.getLogger(__name__)
 
 
 def to_filelike(src: typing.Any) -> typing.BinaryIO:
@@ -127,7 +130,8 @@ class AudioReader:
         if self.reader is None or sample_rate_switch:
             try:
                 from torchcodec.decoders import AudioDecoder
-            except Exception:
+            except (ImportError, OSError, RuntimeError) as e:
+                logger.warning("Failed to import torchcodec AudioDecoder, falling back to torchaudio: %s", e)
                 AudioDecoder = CompatAudioDecoder
 
             reader = AudioDecoder(to_filelike(self.src), sample_rate=sample_rate)
