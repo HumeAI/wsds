@@ -69,6 +69,7 @@ def inspect_dataset(input_path, verbose=True):
         for x in ds:
             print(x)
             break
+    ds.close()
 
 
 def inspect_shard(input_path):
@@ -139,6 +140,7 @@ def dump_index(source_dataset: Path):
             print(*sample)
     except BrokenPipeError:
         pass
+    ds.close()
 
 
 @command
@@ -218,6 +220,7 @@ class validate:
                 print(f"{GREEN}✓ WSDataset loaded successfully{RESET}")
                 print(f"Sample keys: {list(sample.keys())[:8]} ...\n")
                 print(sample)
+                ds.close()
             except Exception as e:
                 print(f"{RED}✗ Failed to load WSDataset: {e}{RESET}")
                 print(f"{YELLOW}Skipping deeper validation for {dataset}{RESET}\n")
@@ -335,9 +338,13 @@ class validate:
                         batch = reader.get_batch(i)
                         if len(batch) != batch_size:
                             tqdm.write(f"Batch {i} in shard {shard} in {subdir} has incorrect length.")
+                    reader.close()
+            shard.close()
         for subdir, count in missing_shards.items():
             tqdm.write("")
             tqdm.write(f"{subdir}: missing {count} shards")
+
+        ds.close()
 
     @staticmethod
     def all(base_path, skip_audio=True):
@@ -440,6 +447,9 @@ def init(
                             }
                         )
                     )
+    for shard in all_shards:
+        shard.close()
+    ds.close()
 
 @command
 def init_split(
@@ -529,6 +539,8 @@ def extract_index_for_shard(dataset, shard, vad_column=None):
             index.append((key, i, audio_duration, speech_duration))
 
         i += n
+    
+    ds.close()
     return {
         "shard_name": shard[1],
         "index": index,

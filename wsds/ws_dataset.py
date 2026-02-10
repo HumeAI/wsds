@@ -484,3 +484,16 @@ class WSDataset:
                 self.random_sample()._display_(),
             ]
         )
+    
+    def close(self):
+        """Close all cached shard file handles."""
+        for shard in self._open_shards.values():
+            if hasattr(shard, "close"):
+                shard.close()
+        self._open_shards.clear()
+
+        # Also close any linked datasets
+        for linked_ds in self._linked_datasets.values():
+            if hasattr(linked_ds, "close"):
+                linked_ds.close()
+        self._linked_datasets.clear()

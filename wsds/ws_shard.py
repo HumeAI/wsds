@@ -95,6 +95,16 @@ class WSShard(WSShardInterface):
         if self._data:
             r += f" # cached_region = [{self._start, self._end}]"
         return r
+    
+    def close(self):
+        """Close the underlying memory-mapped file handle."""
+        if hasattr(self, "reader") and self.reader is not None:
+            # PyArrow's RecordBatchFileReader doesn't have a close method,
+            # but setting it to None releases the reference to the memory-mapped file
+            self.reader = None
+        self._data = None
+        self._start = None
+        self._end = None
 
 
 @dataclass(slots=True)
