@@ -590,7 +590,6 @@ def shard_from_audio_dir(
     input_dir: str,
     output_dir: str,
     max_files_per_shard: int = 300,
-    resume=True,
     init_index: bool = False,
     require_audio_duration: bool = True,
     key_fn: Callable[[str], str] | None = None,
@@ -632,7 +631,7 @@ def shard_from_audio_dir(
         shard_idx += 1
         batch = []
 
-    for i, path in enumerate(tqdm(all_files, ncols=90, desc="Writing WSDS shards")):
+    for path in tqdm(all_files, ncols=90, desc="Writing WSDS shards"):
         rel_path = path.relative_to(input_dir).with_suffix('')
         stem = str(rel_path)
         if key_prefix:
@@ -662,15 +661,15 @@ def shard_from_audio_dir(
 
     print(f"[DONE] Wrote {shard_idx} WSDS shards -> {output_dir}")
 
+    dataset_root = output_dir.parent if output_dir.name == "audio" else output_dir
+
     if key_mapping:
-        dataset_root = output_dir.parent if output_dir.name == "audio" else output_dir
         mapping_path = dataset_root / "key_mapping.json"
         with open(mapping_path, "w") as f:
             json.dump(key_mapping, f, indent=2)
         print(f"[INFO] Wrote key mapping ({len(key_mapping):,} entries) -> {mapping_path}")
 
     if init_index:
-        dataset_root = output_dir.parent if output_dir.name == "audio" else output_dir
         init(dataset_root, require_audio_duration=require_audio_duration)
 
 
