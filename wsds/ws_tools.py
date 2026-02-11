@@ -626,6 +626,15 @@ def shard_from_audio_dir(
     from tqdm import tqdm
 
     input_dir, output_dir = Path(input_dir), Path(output_dir)
+    
+    # When init_index=True, ensure shards are written to audio/ subdirectory
+    # so that list_all_shards() can find them (it only looks in subdirectories)
+    if init_index and output_dir.name != "audio":
+        dataset_root = output_dir
+        output_dir = output_dir / "audio"
+    else:
+        dataset_root = output_dir.parent if output_dir.name == "audio" else output_dir
+    
     output_dir.mkdir(parents=True, exist_ok=True)
 
     exts = (".wav", ".flac", ".mp3", ".m4a", ".ogg", ".opus")
@@ -676,8 +685,6 @@ def shard_from_audio_dir(
         flush_batch()
 
     print(f"[DONE] Wrote {shard_idx} WSDS shards -> {output_dir}")
-
-    dataset_root = output_dir.parent if output_dir.name == "audio" else output_dir
 
     if key_mapping:
         mapping_path = dataset_root / "key_mapping.json"
