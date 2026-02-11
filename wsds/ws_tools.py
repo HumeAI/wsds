@@ -620,6 +620,7 @@ def shard_from_audio_dir(
     key_fn: Callable[[str], str] | None = None,
     write_key_mapping: bool = False,
     key_prefix: str = "",
+    sort_files: bool = False,
 ):
     """Write batched Feather (.wsds) shards with up to N audio files each.
 
@@ -631,16 +632,21 @@ def shard_from_audio_dir(
         key_prefix: Optional prefix to prepend to keys before hashing. Useful to
                     avoid collisions when processing multiple directories with
                     files that share the same names (e.g., "egyptian", "saudi").
+        sort_files: If True, sorts files by name before processing. 
+                    This can be memory intensive for large datasets, but ensures deterministic shard assignment.
     """
-    from tqdm import tqdm
 
     input_dir, output_dir = Path(input_dir), Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
     exts = (".wav", ".flac", ".mp3", ".m4a", ".ogg", ".opus")
-    all_files = sorted(p for p in input_dir.rglob("*") if p.suffix.lower() in exts)
-    print(f"[INFO] Found {len(all_files):,} audio files under {input_dir}")
-
+    file_iter = (p for p in input_dir.rglob("*") if p.suffix.lower() in exts)
+    if sort_files:
+        files = sorted(file_iter)
+        print(f"[INFO] Found {len(files):,} audio files under {input_dir}")
+    else:
+        files = file_iter
+        print(f"[INFO] Processing audio files under {input_dir}")
     MAX_ARROW_BYTES = 2_140_000_000  # ~2.1 GB Arrow cell limit
 
     shard_idx = 0
@@ -656,7 +662,7 @@ def shard_from_audio_dir(
         shard_idx += 1
         batch = []
 
-    for path in tqdm(all_files, ncols=90, desc="Writing WSDS shards"):
+    for path in tqdm(files, ncols=90, desc="Writing WSDS shards"):
         rel_path = path.relative_to(input_dir).with_suffix('')
         stem = str(rel_path)
         if key_prefix:
