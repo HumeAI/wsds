@@ -202,3 +202,63 @@ class TestShardFromAudioDir:
 
         shard_names = sorted(p.name for p in output_dir.glob("*.wsds"))
         assert shard_names == ["audio-00000.wsds", "audio-00001.wsds"]
+
+    def test_init_index_creates_audio_subdir(self, tmp_path):
+        """When init_index=True, shards are written to audio/ subdirectory and index is created."""
+        input_dir = tmp_path / "in"
+        output_dir = tmp_path / "dataset"
+        input_dir.mkdir()
+
+        # Create some test audio files
+        for i in range(3):
+            make_wav(input_dir / f"file{i}.wav")
+
+        shard_from_audio_dir(
+            str(input_dir),
+            str(output_dir),
+            max_files_per_shard=2,
+            init_index=True,
+            require_audio_duration=False,  # Skip audio duration requirement for test
+        )
+
+        # Shards should be in output_dir/audio/
+        audio_dir = output_dir / "audio"
+        assert audio_dir.exists()
+        assert audio_dir.is_dir()
+
+        # Check shards are in the audio subdirectory
+        shard_files = sorted(audio_dir.glob("*.wsds"))
+        assert len(shard_files) == 2  # 3 files / 2 per shard = 2 shards
+
+        # Check index was created at dataset root
+        index_file = output_dir / "index.sqlite3"
+        assert index_file.exists()
+
+    def test_init_index_with_audio_named_output(self, tmp_path):
+        """When init_index=True and output_dir is already named 'audio', don't create nested audio/audio/."""
+        input_dir = tmp_path / "in"
+        dataset_root = tmp_path / "dataset"
+        output_dir = dataset_root / "audio"
+        input_dir.mkdir()
+
+        make_wav(input_dir / "test.wav")
+
+        shard_from_audio_dir(
+            str(input_dir),
+            str(output_dir),
+            init_index=True,
+            require_audio_duration=False,
+        )
+
+        # Shards should be in output_dir (which is already named 'audio')
+        shard_files = sorted(output_dir.glob("*.wsds"))
+        assert len(shard_files) == 1
+
+        # Check we didn't create audio/audio/
+        nested_audio = output_dir / "audio"
+        assert not nested_audio.exists()
+
+        # Index should be at dataset_root (parent of audio/)
+        index_file = dataset_root / "index.sqlite3"
+        assert index_file.exists()
+
