@@ -623,9 +623,10 @@ def shard_from_audio_dir(
         key_prefix: Optional prefix to prepend to keys before hashing. Useful to
                     avoid collisions when processing multiple directories with
                     files that share the same names (e.g., "egyptian", "saudi").
-        sort_files: If True, sorts files by name before processing. 
+        sort_files: If True, sorts files by name before processing.
                     This can be memory intensive for large datasets, but ensures deterministic shard assignment.
     """
+    from tqdm import tqdm
 
     input_dir, output_dir = Path(input_dir), Path(output_dir)
     
