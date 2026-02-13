@@ -2,6 +2,7 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
 from .utils import WSShardMissingError, validate_shards
+from .ws_decode import get_audio as _get_audio
 
 if TYPE_CHECKING:
     from .ws_dataset import WSDataset
@@ -18,14 +19,7 @@ class WSSample:
     _reference_key: list = field(default_factory=list, repr=False, compare=False)
 
     def get_audio(self, audio_columns=None):
-        candidates = audio_columns or self.dataset._audio_file_keys
-
-        r = self.get_one_of(*candidates)
-
-        if not r:
-            raise KeyError(f"No audio column (tried {candidates}) found among: {list(self.keys())}")
-
-        return r
+        return _get_audio(self, audio_columns)
 
     def keys(self):
         return self.dataset.fields.keys() | (self.overrides.keys() if self.overrides else set())

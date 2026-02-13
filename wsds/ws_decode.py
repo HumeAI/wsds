@@ -34,3 +34,23 @@ def decode_sample(column: str, data):
     elif column in AUDIO_FILE_KEYS:
         return AudioReader(data)
     raise ValueError(f"Unknown binary column type: {column}")
+
+
+def get_audio(sample, audio_columns=None):
+    """Find and return the first audio column value from a dict-like sample.
+
+    Args:
+        sample: A dict-like object (e.g. WSSample) supporting `keys()` and `__getitem__`.
+        audio_columns: Optional list of column names to try. Defaults to AUDIO_FILE_KEYS.
+
+    Returns:
+        The audio value (typically an AudioReader or WSAudio).
+
+    Raises:
+        KeyError: If no audio column is found in the sample.
+    """
+    candidates = audio_columns or AUDIO_FILE_KEYS
+    for col in candidates:
+        if col in sample:
+            return sample[col]
+    raise KeyError(f"No audio column found (tried {list(candidates)}), available keys: {list(sample.keys())}")
