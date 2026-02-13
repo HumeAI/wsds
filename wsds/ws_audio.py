@@ -93,11 +93,6 @@ class AudioReader:
 
         return marimo.audio(encode_mp3(self.read_segment()))
 
-    def _ipython_display_(self):
-        from IPython.display import HTML, display
-
-        display(HTML(self._repr_html_()))
-
 
 @dataclass(frozen=True)
 class WSAudio:
@@ -166,8 +161,3 @@ class WSAudio:
         import marimo
 
         return marimo.audio(encode_mp3(self.load()))
-
-    def _ipython_display_(self):
-        from IPython.display import HTML, display
-
-        display(HTML(self._repr_html_()))

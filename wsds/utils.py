@@ -225,6 +225,15 @@ def scan_ipc(path: str | Path, *args, glob=True, **kwargs):
         return pl.scan_ipc(f, *args, **kwargs)
 
 
+def is_notebook() -> bool:
+    """Detect if running in a Jupyter notebook vs terminal IPython or plain Python."""
+    try:
+        shell = get_ipython().__class__.__name__
+        return shell == "ZMQInteractiveShell"
+    except NameError:
+        return False
+
+
 def format_duration(duration):
     """Formats a duration in seconds as hours (or minutes or kilo-hours)."""
     hours = duration / 3600

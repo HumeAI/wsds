@@ -572,6 +572,12 @@ class WSDataset:
         )
 
     def _ipython_display_(self):
+        from .utils import is_notebook
+
+        if not is_notebook():
+            print(str(self))
+            return
+
         from IPython.display import Markdown, display
 
         if self.index is None:

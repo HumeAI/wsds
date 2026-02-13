@@ -243,6 +243,12 @@ class WSSample:
         return marimo.Html(html)
 
     def _ipython_display_(self):
+        from .utils import is_notebook
+
+        if not is_notebook():
+            print(repr(self))
+            return
+
         import random
 
         from IPython.display import HTML, display
