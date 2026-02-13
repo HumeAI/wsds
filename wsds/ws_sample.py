@@ -10,11 +10,11 @@ if TYPE_CHECKING:
 @dataclass(frozen=True)
 class WSSample:
     dataset: "WSDataset"
-    shard_name: str
+    shard_ref: str
     offset: int
     overrides: dict = field(default_factory=dict)
     # Key verification state (mutable containers to work with frozen dataclass)
-    _verified_subdirs: set = field(default_factory=set, repr=False, compare=False)
+    _verified_column_dirs: set = field(default_factory=set, repr=False, compare=False)
     _reference_key: list = field(default_factory=list, repr=False, compare=False)
 
     def get_audio(self, audio_columns=None):
@@ -37,46 +37,46 @@ class WSSample:
         yield from (v for _, v in self.items())
 
     def _verify_key_for_field(self, field: str):
-        """Verify __key__ in this field's subdir matches the reference key."""
+        """Verify __key__ in this field's column_dir matches the reference key."""
         value = self.dataset.fields.get(field)
         if value is None:
             return
-        (subdir, _column) = value[0]
+        (column_dir, _column) = value[0]
 
-        if subdir in self._verified_subdirs:
+        if column_dir in self._verified_column_dirs:
             return
 
         # Skip computed columns (they don't have their own __key__)
-        if subdir in self.dataset.computed_columns:
-            self._verified_subdirs.add(subdir)
+        if column_dir in self.dataset.computed_columns:
+            self._verified_column_dirs.add(column_dir)
             return
 
-        # Get __key__ from this subdir
+        # Get __key__ from this column_dir
         try:
-            key = self.dataset.get_shard(subdir, self.shard_name).get_sample("__key__", self.offset)
+            key = self.dataset.get_shard(column_dir, self.shard_ref).get_sample("__key__", self.offset)
         except (WSShardMissingError, KeyError):
             # Can't verify if shard or key is missing
-            self._verified_subdirs.add(subdir)
+            self._verified_column_dirs.add(column_dir)
             return
 
         if not self._reference_key:
-            # First subdir accessed - store as reference
-            self._reference_key.append((subdir, key))
+            # First column_dir accessed - store as reference
+            self._reference_key.append((column_dir, key))
         else:
-            ref_subdir, ref_key = self._reference_key[0]
+            ref_column_dir, ref_key = self._reference_key[0]
             if key != ref_key:
                 raise ValueError(
-                    f"Key mismatch at offset {self.offset} in shard {self.shard_name}: "
-                    f"{ref_subdir} has '{ref_key}' but {subdir} has '{key}'"
+                    f"Key mismatch at offset {self.offset} in shard {self.shard_ref}: "
+                    f"{ref_column_dir} has '{ref_key}' but {column_dir} has '{key}'"
                 )
 
-        self._verified_subdirs.add(subdir)
+        self._verified_column_dirs.add(column_dir)
 
     def __getitem__(self, field):
         if field in self.overrides:
             return self.overrides[field]
         self._verify_key_for_field(field)
-        return self.dataset.get_sample(self.shard_name, field, self.offset)
+        return self.dataset.get_sample(self.shard_ref, field, self.offset)
 
     def __setitem__(self, field, value):
         self.overrides[field] = value
@@ -117,46 +117,46 @@ class WSSample:
 
     def __repr__(self, repr=repr):
         r = [
-            f"WSSample({self.dataset.__repr__()}, shard_name={repr(self.shard_name)}, offset={repr(self.offset)}, fields={'{'}"
+            f"WSSample({self.dataset.__repr__()}, shard_ref={repr(self.shard_ref)}, offset={repr(self.offset)}, fields={'{'}"
         ]
         other = []
         txt = []
         arrays = []
 
-        # Group columns by subdirectory
-        subdir_columns = {}
+        # Group columns by column directory
+        columns_by_dir = {}
         for k in self.keys():
             if k in self.overrides:
-                subdir = "__overrides__"
+                column_dir = "__overrides__"
             elif k in self.dataset.fields:
                 value = self.dataset.fields[k]
-                (subdir, _column) = value[0]
+                (column_dir, _column) = value[0]
             else:
-                subdir = "__unknown__"
-            if subdir not in subdir_columns:
-                subdir_columns[subdir] = []
-            subdir_columns[subdir].append(k)
+                column_dir = "__unknown__"
+            if column_dir not in columns_by_dir:
+                columns_by_dir[column_dir] = []
+            columns_by_dir[column_dir].append(k)
 
-        # Prefetch shard tails concurrently for all subdirs that will be accessed
-        subdirs_to_prefetch = [s for s in subdir_columns.keys() if s not in ("__overrides__", "__unknown__")]
-        if subdirs_to_prefetch:
-            validate_shards(self.dataset, [self.shard_name], subdirs_to_prefetch)
+        # Prefetch shard tails concurrently for all column dirs that will be accessed
+        dirs_to_prefetch = [s for s in columns_by_dir.keys() if s not in ("__overrides__", "__unknown__")]
+        if dirs_to_prefetch:
+            validate_shards(self.dataset, [self.shard_ref], dirs_to_prefetch)
 
-        # Identify large subdirectories (>10 columns)
-        large_subdirs = {
-            subdir: cols
-            for subdir, cols in subdir_columns.items()
-            if len(cols) > 10 and subdir not in ("__overrides__", "__unknown__")
+        # Identify large column directories (>10 columns)
+        large_dirs = {
+            column_dir: cols
+            for column_dir, cols in columns_by_dir.items()
+            if len(cols) > 10 and column_dir not in ("__overrides__", "__unknown__")
         }
 
-        # Columns in small subdirectories go through normal classification
-        small_subdir_keys = set()
-        for subdir, cols in subdir_columns.items():
-            if subdir not in large_subdirs:
-                small_subdir_keys.update(cols)
+        # Columns in small column directories go through normal classification
+        small_dir_keys = set()
+        for column_dir, cols in columns_by_dir.items():
+            if column_dir not in large_dirs:
+                small_dir_keys.update(cols)
 
         missing = []
-        for k in small_subdir_keys:
+        for k in small_dir_keys:
             try:
                 v = self[k]
             except WSShardMissingError:
@@ -185,9 +185,9 @@ class WSSample:
             r.append("# Arrays:")
             print_keys(arrays)
 
-        # Handle large subdirectories
-        for subdir, cols in sorted(large_subdirs.items()):
-            r.append(f"# {subdir} ({len(cols)} columns, showing top 10):")
+        # Handle large column directories
+        for column_dir, cols in sorted(large_dirs.items()):
+            r.append(f"# {column_dir} ({len(cols)} columns, showing top 10):")
 
             # Try to get float values for sorting by highest value
             float_values = []

@@ -62,13 +62,13 @@ class WSS3Shard(WSShardInterface):
         return {col: col for col in columns if col != "__key__"}
 
     @classmethod
-    def from_link(cls, link, dataset, shard_name):
+    def from_link(cls, link, dataset, shard_ref):
         """Create an S3 shard from a link spec."""
-        dataset_path, shard = shard_name
+        partition, shard = shard_ref
         prefix = link["prefix"]
-        key = f"{prefix}/{dataset_path}/{shard}.wsds" if dataset_path else f"{prefix}/{shard}.wsds"
+        key = f"{prefix}/{partition}/{shard}.wsds" if partition else f"{prefix}/{shard}.wsds"
         s3_client = cls._make_s3_client(link.get("endpoint_url"))
-        return cls(dataset, link["bucket"], os.path.normpath(key), shard_name=shard_name, s3_client=s3_client)
+        return cls(dataset, link["bucket"], os.path.normpath(key), shard_name=shard_ref, s3_client=s3_client)
 
     @classmethod
     def _make_s3_client(cls, endpoint_url=None):

@@ -10,7 +10,7 @@ class WSFeatherIndex:
 
     Uses feather files:
     - `shard-index.feather`: shard metadata with columns:
-        shard_id, dataset_path, shard_name, n_samples, segment_id (global offset),
+        shard_id, partition, shard_name, n_samples, segment_id (global offset),
         audio_duration, speech_duration
     - `episode-index.feather`: episode/file info sorted by segment_id, with columns:
         segment_id, shard_id, episode_id, audio_duration, speech_duration
@@ -98,12 +98,12 @@ class WSFeatherIndex:
     #
 
     def shards(self):
-        """Iterate over all shards as (dataset_path, shard_name) tuples.
+        """Iterate over all shards as (partition, shard_name) tuples.
 
         Yields tuples in the order shards were added to the index.
         """
         for row in self._shard_df.iter_rows(named=True):
-            yield (row["dataset_path"], row["shard_name"])
+            yield (row["partition"], row["shard_name"])
 
     #
     # Shard lookups
@@ -116,7 +116,7 @@ class WSFeatherIndex:
             global_index: The global sample index (0-based across the entire dataset).
 
         Returns:
-            Tuple of (shard_name, shard_global_offset, dataset_path) or None if not found.
+            Tuple of (shard_name, shard_global_offset, partition) or None if not found.
             The local offset within the shard is: global_index - shard_global_offset.
         """
         if global_index < 0 or global_index >= self.n_samples:
@@ -131,7 +131,7 @@ class WSFeatherIndex:
             return None
 
         row = self._shard_df.row(idx, named=True)
-        return (row["shard_name"], int(row["segment_id"]), row["dataset_path"])
+        return (row["shard_name"], int(row["segment_id"]), row["partition"])
 
     def get_shard_by_file_name(self, file_name: str) -> tuple[str, int, int, str] | None:
         """Find the shard containing a given source file.
@@ -140,7 +140,7 @@ class WSFeatherIndex:
             file_name: The source file name (without segment suffix).
 
         Returns:
-            Tuple of (shard_name, shard_global_offset, file_offset_in_shard, dataset_path)
+            Tuple of (shard_name, shard_global_offset, file_offset_in_shard, partition)
             or None if not found.
         """
         if self._name_df is None:
@@ -156,7 +156,6 @@ class WSFeatherIndex:
         shard_id = name_row["shard_id"]
         episode_id = name_row["episode_id"]
 
-        # Get shard info by shard_id (shard_id is the row index)
         shard_row = self._shard_df.row(shard_id, named=True)
         shard_global_offset = int(shard_row["segment_id"])
 
@@ -172,7 +171,7 @@ class WSFeatherIndex:
             shard_row["shard_name"],
             shard_global_offset,
             file_offset,
-            shard_row["dataset_path"],
+            shard_row["partition"],
         )
 
     def get_shard_global_offset(self, shard_name: str) -> int | None:
@@ -193,15 +192,15 @@ class WSFeatherIndex:
         """Get the number of samples in a shard.
 
         Args:
-            shard: Tuple of (dataset_path, shard_name).
+            shard: Tuple of (partition, shard_name).
 
         Returns:
             The number of samples in the shard, or None if not found.
         """
-        dataset_path, shard_name = shard
-        if dataset_path:
+        partition, shard_name = shard
+        if partition:
             filtered = self._shard_df.filter(
-                (pl.col("dataset_path") == dataset_path) & (pl.col("shard_name") == shard_name)
+                (pl.col("partition") == partition) & (pl.col("shard_name") == shard_name)
             )
         else:
             filtered = self._shard_df.filter(pl.col("shard_name") == shard_name)
@@ -214,15 +213,15 @@ class WSFeatherIndex:
         """Get n_samples and shard_id for a shard.
 
         Args:
-            shard: Tuple of (dataset_path, shard_name).
+            shard: Tuple of (partition, shard_name).
 
         Returns:
             Tuple of (n_samples, shard_id) or None if not found.
         """
-        dataset_path, shard_name = shard
-        if dataset_path:
+        partition, shard_name = shard
+        if partition:
             filtered = self._shard_df.filter(
-                (pl.col("dataset_path") == dataset_path) & (pl.col("shard_name") == shard_name)
+                (pl.col("partition") == partition) & (pl.col("shard_name") == shard_name)
             )
         else:
             filtered = self._shard_df.filter(pl.col("shard_name") == shard_name)

@@ -39,7 +39,7 @@ def extract_episodes(episode_idx: pl.DataFrame) -> pl.DataFrame:
 def make_shard_idx(
     sample_idx: pl.DataFrame,
     n_samples_expr: pl.Expr,
-    dataset_path: Path | str,
+    partition: Path | str,
     shard_id_offset: int = 0
 ) -> pl.DataFrame:
     """
@@ -55,7 +55,7 @@ def make_shard_idx(
         )
         .with_row_index('shard_id', offset=shard_id_offset)
         .with_columns(
-            dataset_path = pl.lit(str(dataset_path)),
+            partition = pl.lit(str(partition)),
         )
     )
 
@@ -143,7 +143,7 @@ def extract_batch_index(
         except Exception as e:
             return str(batch), "error initializing source dataset", repr(e), traceback.format_exc()
 
-        print(f"Loaded dataset {source_ds.dataset_dir} in {time.perf_counter() - start:.1f}s")
+        print(f"Loaded dataset {source_ds.dataset_root} in {time.perf_counter() - start:.1f}s")
 
         # Update fields.json
         fields = {}
@@ -168,7 +168,7 @@ def extract_batch_index(
             )
             source_idx.write_ipc(batch / 'source/episode-list.feather', compression='zstd')
 
-            print(f"Extracted {len(source_idx)} episodes from {source_ds.dataset_dir} in {time.perf_counter() - start:.1f}s")
+            print(f"Extracted {len(source_idx)} episodes from {source_ds.dataset_root} in {time.perf_counter() - start:.1f}s")
         except Exception as e:
             return str(batch), "error extracting source episodes", repr(e), traceback.format_exc()
 
@@ -187,7 +187,7 @@ def extract_batch_index(
             print(f"Error initializing WSDataset at {batch / 'filtered_vad'}: {e}")
             return str(batch), "error initializing filtered_vad dataset", repr(e), traceback.format_exc()
 
-        print(f"Loaded dataset {vad_ds.dataset_dir} in {time.perf_counter() - start:.1f}s")
+        print(f"Loaded dataset {vad_ds.dataset_root} in {time.perf_counter() - start:.1f}s")
 
         # Update fields.json
         fields = {}
@@ -209,7 +209,7 @@ def extract_batch_index(
             )
             vad_idx.write_ipc(batch / 'filtered_vad/episode-list.feather', compression='zstd')
 
-            print(f"Extracted {len(vad_idx)} episodes from {vad_ds.dataset_dir} in {time.perf_counter() - start:.1f}s")
+            print(f"Extracted {len(vad_idx)} episodes from {vad_ds.dataset_root} in {time.perf_counter() - start:.1f}s")
         except Exception as e:
             return str(batch), "error extracting filtered_vad episodes", repr(e), traceback.format_exc()
 
@@ -260,7 +260,7 @@ def merge_batch_indices(
             shard_idx = make_shard_idx(
                 episode_idx,
                 n_samples_expr=pl.len().alias('n_samples') if dataset_kind == 'source' else pl.sum('segments').alias('n_samples'),
-                dataset_path=os.path.relpath(ds_path, dst),
+                partition=os.path.relpath(ds_path, dst),
                 shard_id_offset=n_shards,
             )
             n_shards += len(shard_idx)

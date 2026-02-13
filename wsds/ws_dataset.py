@@ -513,13 +513,13 @@ class WSDataset:
         shard_path = self.get_shard_path(column_dir, shard_ref)
 
         shard = self._open_shards.get(shard_path.parent, None)
-        if shard is not None and shard.shard_name == shard_ref:
+        if shard is not None and shard.shard_ref == shard_ref:
             return shard
 
         if column_dir in self.computed_columns:
             shard = self.get_linked_shard(self.computed_columns[column_dir], shard_ref)
         else:
-            shard = WSShard(self, shard_path, shard_name=shard_ref)
+            shard = WSShard(self, shard_path, shard_ref=shard_ref)
 
         self._open_shards[shard_path.parent] = shard
         return shard
