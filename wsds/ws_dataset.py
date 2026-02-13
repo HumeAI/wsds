@@ -35,12 +35,12 @@ class WSDataset:
     load the requested data.
 
     Examples:
-    >>> dataset = WSDataset("librilight/v3-vad_ws")
+    >>> dataset = WSDataset("librilight/v3-vad_ws", rng=42)
     >>> sample = dataset["large/5304/the_tinted_venus_1408_librivox_64kb_mp3/tintedvenus_05_anstey_64kb_090"]
     >>> print(repr(sample["transcription_wslang_raw.txt"]))
     ' I will accompany you," she said.'
     >>> sample['audio']
-    WSAudio(audio_reader=AudioReader(src=<class 'pyarrow.lib.BinaryScalar'>, sample_rate=None), tstart=1040.2133, tend=1042.8413)
+    WSAudio(audio_reader=AudioReader(src=<class '_io.BytesIO'>, sample_rate=None), tstart=1040.2133, tend=1042.8413)
     """
 
     dataset_root: Path
@@ -416,10 +416,10 @@ class WSDataset:
 
         Examples:
         >>> dataset = WSDataset("librilight/v3-vad_ws")
-        >>> next(dataset.filtered('pq < 3', shuffle=False))['__key__']  # first low-quality sample
+        >>> next(dataset.filtered('pq < 3', shuffle=False, shard_subsample=1))['__key__']  # first low-quality sample
         'large/6454/over_plum_pudding_1305_librivox_64kb_mp3/plumpudding_09_bangs_64kb_072'
-        >>> next(dataset.filtered("CAST(`transcription_wslang_raw.txt` AS string) ILIKE '%between New Orleans and St. Louis%'", shuffle=False))['__key__']
-        'large/107/oldtimes_jg_librivox_64kb_mp3/oldtimesonthemississippi_07_twain_64kb_032'
+        >>> next(dataset.filtered("CAST(`transcription_wslang_raw.txt` AS string) ILIKE '%between New Orleans%'", shuffle=False, shard_subsample=1))['__key__']
+        'large/10244/carpentersna_1612_librivox_64kb_mp3/geographicalreaderna_40_carpenter_64kb_034'
         """
         import polars as pl
 

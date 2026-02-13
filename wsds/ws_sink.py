@@ -33,7 +33,7 @@ class WSBatchedSink:
     Automatically batches data and infers the schema from the first batch.
 
     Example:
-    >>> with WSBatchedSink('output.feather', batch_size=2, throwaway=True) as sink: sink.write({'a': 1, 'b': 'x'})
+    >>> with WSBatchedSink('output.feather', throwaway=True) as sink: sink.write({'a': 1, 'b': 'x'})
     """
 
     def __init__(
