@@ -57,8 +57,16 @@ class WSDataset:
         key_folder: str | None = None,
         disable_memory_map: bool = False,
         ignore_index: bool = False,
+        rng: random.Random | int | None = None,
     ):
         self.dataset_root = self._resolve_path(dataset_root)
+
+        if isinstance(rng, int):
+            self.rng = random.Random(rng)
+        elif rng is not None:
+            self.rng = rng
+        else:
+            self.rng = random
 
         if include_in_progress is not True:
             print("NOTE: include_in_progress is deprecated and all subdirs are included by default")
@@ -133,7 +141,7 @@ class WSDataset:
         True
         """
         assert self.index is not None, "Random access is only supported for indexed datasets"
-        return self[random.randrange(self.index.n_samples)]
+        return self[self.rng.randrange(self.index.n_samples)]
 
     def __iter__(self):
         """Starts at a random position in the dataset and yields samples sequentially.
@@ -234,7 +242,6 @@ class WSDataset:
         column_dirs = defaultdict(list)
         exprs = []
         needed_special_columns = []
-        needs_key = False
         for query in queries:
             if "." in query and query in self.fields:
                 print(f"TIP: You seem to have passes a column name ({query}) which has dots in it.")
@@ -271,7 +278,7 @@ class WSDataset:
             column_dirs[key_column_dir] += needed_special_columns
 
         if rng is None:
-            rng = random
+            rng = self.rng
         shard_list = self.get_shard_list()
         if shard_subsample != 1:
             shard_list = rng.sample(shard_list, int(len(shard_list) * shard_subsample))
