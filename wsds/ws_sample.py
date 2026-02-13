@@ -230,7 +230,6 @@ class WSSample:
             else:
                 return repr(x)
 
-        # print(repr(special))
         html = marimo.md(f"```python\n{self.__repr__(repr=marimo_repr)}\n```").text
         for k, v in special.items():
             html = html.replace(k, v)
@@ -258,9 +257,11 @@ class WSSample:
                 return repr(x)
 
         # Jupyter Markdown renders client-side so we cannot use the same trick as Marimo
-        html = ('<pre style="font-family: monospace; white-space: pre-wrap;">' +
-            self.__repr__(repr=ipython_repr).replace("<", "&lt;").replace(">", "&gt;") +
-            '</pre>')
+        html = (
+            '<pre style="font-family: monospace; white-space: pre-wrap;">'
+            + self.__repr__(repr=ipython_repr).replace("<", "&lt;").replace(">", "&gt;")
+            + "</pre>"
+        )
 
         for k, v in special.items():
             html = html.replace(k, v)

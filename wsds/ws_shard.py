@@ -20,9 +20,7 @@ class WSShardInterface:
     """Used by WSDataset to invalidate cached shards."""
 
     @classmethod
-    def get_columns(
-        cls, link: dict, dataset: "WSDataset"
-    ) -> dict[str, str] | None:
+    def get_columns(cls, link: dict, dataset: "WSDataset") -> dict[str, str] | None:
         """Return columns this link provides: {column_name: column_name}.
 
         Override this to provide multiple columns from a single link.

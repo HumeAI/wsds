@@ -26,6 +26,7 @@ class WSShardMissingError(Exception):
 class WSShardCorruptedError(Exception):
     fname: str
 
+
 def get_columns(fname):
     if isinstance(fname, Path):
         fname = str(fname)
@@ -246,11 +247,12 @@ def format_duration(duration):
     else:
         return f"{hours:.2f} hours"
 
+
 def preload_shard(shard_fname):
     try:
         with open(shard_fname, "rb") as f:
             f.seek(-6, os.SEEK_END)
-            if f.read() != b'ARROW1':
+            if f.read() != b"ARROW1":
                 print(f"Invalid file format {shard_fname}: ARROW1 magic not found")
                 return False
     except FileNotFoundError:
@@ -260,6 +262,7 @@ def preload_shard(shard_fname):
         print(f"OSError while loading {shard_fname}: {err}")
         return False
     return True
+
 
 def validate_shards(
     dataset: "WSDataset", shards: list[tuple[str, str]], column_dirs: list[str], tail_bytes: int = 10240
@@ -287,7 +290,9 @@ def validate_shards(
         return []
 
     # Create all combinations of shards and column dirs
-    shard_files = [dataset.get_shard_path(column_dir, shard_name) for shard_name in shards for column_dir in actual_column_dirs]
+    shard_files = [
+        dataset.get_shard_path(column_dir, shard_name) for shard_name in shards for column_dir in actual_column_dirs
+    ]
 
     with ProcessPoolExecutor(max_workers=min(len(shard_files), 64)) as executor:
         results = list(executor.map(preload_shard, shard_files))

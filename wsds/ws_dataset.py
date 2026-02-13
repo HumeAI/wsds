@@ -478,7 +478,7 @@ class WSDataset:
         if isinstance(loader_class, list):
             loader_mod, loader_name = loader_class
             if loader_mod.startswith("hume_wsds."):
-                loader_mod = "wsds." + loader_mod[len("hume_wsds."):]
+                loader_mod = "wsds." + loader_mod[len("hume_wsds.") :]
             loader_module = importlib.import_module(loader_mod)
             return getattr(loader_module, loader_name)
         return loader_class

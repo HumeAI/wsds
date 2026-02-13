@@ -125,7 +125,7 @@ class WSFeatherIndex:
         # Binary search for the shard containing this index
         # search_sorted with side="right" returns index where global_index would be inserted
         # We want the shard where global_offset <= global_index, so subtract 1
-        idx = self._shard_df.select(pl.col('segment_id').search_sorted(global_index, side='right')).item()
+        idx = self._shard_df.select(pl.col("segment_id").search_sorted(global_index, side="right")).item()
 
         if idx < 0:
             return None
@@ -147,7 +147,7 @@ class WSFeatherIndex:
             raise RuntimeError("episode-name-index.feather is required to search by episode name")
 
         # Binary search in sorted name series
-        idx = self._name_df.select(pl.col('name').search_sorted(file_name, side='right')).item()
+        idx = self._name_df.select(pl.col("name").search_sorted(file_name, side="right")).item()
 
         if idx >= len(self._names) or self._names[idx] != file_name:
             return None
@@ -199,9 +199,7 @@ class WSFeatherIndex:
         """
         partition, shard_name = shard
         if partition:
-            filtered = self._shard_df.filter(
-                (pl.col("partition") == partition) & (pl.col("shard_name") == shard_name)
-            )
+            filtered = self._shard_df.filter((pl.col("partition") == partition) & (pl.col("shard_name") == shard_name))
         else:
             filtered = self._shard_df.filter(pl.col("shard_name") == shard_name)
 
@@ -220,9 +218,7 @@ class WSFeatherIndex:
         """
         partition, shard_name = shard
         if partition:
-            filtered = self._shard_df.filter(
-                (pl.col("partition") == partition) & (pl.col("shard_name") == shard_name)
-            )
+            filtered = self._shard_df.filter((pl.col("partition") == partition) & (pl.col("shard_name") == shard_name))
         else:
             filtered = self._shard_df.filter(pl.col("shard_name") == shard_name)
 

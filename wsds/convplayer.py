@@ -1,10 +1,11 @@
-import torch
-from PIL import Image
 import shutil
 from pathlib import Path
-import whisper
-import torchaudio
+
 import numpy as np
+import torch
+import torchaudio
+import whisper
+from PIL import Image
 
 HEADER = """
 <html>
@@ -267,7 +268,7 @@ FOOTER = """
 </html>
 """
 
-CSV = '''<div id="vote_results"></div>
+CSV = """<div id="vote_results"></div>
 <script>
   function calcResults() {
     results = {}; document.querySelectorAll('input[type=radio]').forEach((x) => { if(x.checked) results[x.name] = x.value }); results;
@@ -281,22 +282,26 @@ CSV = '''<div id="vote_results"></div>
   }
   document.addEventListener('change', calcResults);
   calcResults()
-</script>'''
+</script>"""
+
 
 def mel_img(snd, sr, mel_min=-1, mel_max=2):
     mel = whisper.log_mel_spectrogram(torchaudio.functional.resample(snd, sr, 16000))
     return torch.clamp((mel - mel_min) / (mel_max - mel_min) * 255, 0, 255).numpy().astype(np.uint8)
 
+
 def ticks_img(h):
-    ticks = np.full((10,h), 255, dtype=np.uint8)
-    ticks[5:,::h//10] = 150
-    ticks[:,0] = 50
-    ticks[4:,h//2] = 50
+    ticks = np.full((10, h), 255, dtype=np.uint8)
+    ticks[5:, :: h // 10] = 150
+    ticks[:, 0] = 50
+    ticks[4:, h // 2] = 50
     return ticks
+
 
 from collections import defaultdict
 
 from .utils import is_notebook
+
 
 class ColumnList:
     def __init__(self, player, side):
@@ -306,11 +311,11 @@ class ColumnList:
         self.content = defaultdict(list)
 
     def _get_fname(self, name, fmt):
-        return f"{name}-{self.side}-{len(self.content)+1:03d}.{fmt}"
+        return f"{name}-{self.side}-{len(self.content) + 1:03d}.{fmt}"
 
-    def _save_img(self, name, img, fmt='png'):
+    def _save_img(self, name, img, fmt="png"):
         fname = self._get_fname(name, fmt)
-        Image.fromarray(img.T).save(self.player.path/fname)
+        Image.fromarray(img.T).save(self.player.path / fname)
         return fname
 
     def append(self, name, content):
@@ -322,70 +327,91 @@ class ColumnList:
         else:
             self.styles[name] = f' style="flex: {flex}"'
         y = t_start * self.player.pixels_per_second
-        height = "" if t_len is None else f' height:{t_len * self.player.pixels_per_second}px;'
-        self.append(name, f'<div class="col-{name}-{self.side}-html label" data-tstart="{t_start}" style="position: absolute; top: {y}px;{height} background-color: {bg};">{html}</div>')
+        height = "" if t_len is None else f" height:{t_len * self.player.pixels_per_second}px;"
+        self.append(
+            name,
+            f'<div class="col-{name}-{self.side}-html label" data-tstart="{t_start}" style="position: absolute; top: {y}px;{height} background-color: {bg};">{html}</div>',
+        )
 
-    def put_img(self, name, t, img, fmt='png', scalex=1, scaley=1):
+    def put_img(self, name, t, img, fmt="png", scalex=1, scaley=1):
         fname = self._save_img(name, img, fmt=fmt)
-        w,h = img.shape
-        self.put_html(name, f'<img src="{fname}" width={w/scalex} height={h/scaley} class="col-{name}-{self.side}-img">', width=w/scalex)
+        w, h = img.shape
+        self.put_html(
+            name,
+            f'<img src="{fname}" width={w / scalex} height={h / scaley} class="col-{name}-{self.side}-img">',
+            width=w / scalex,
+        )
 
-    def append_img(self, name, img, fmt='png', scalex=1, scaley=1, repeat_y=False):
+    def append_img(self, name, img, fmt="png", scalex=1, scaley=1, repeat_y=False):
         fname = self._save_img(name, img, fmt=fmt)
-        w,h = img.shape
+        w, h = img.shape
         if not repeat_y:
-            self.append(name, f'<img src="{fname}" width={w/scalex} height={h/scaley} class="col-{name}-{self.side}-img">')
+            self.append(
+                name, f'<img src="{fname}" width={w / scalex} height={h / scaley} class="col-{name}-{self.side}-img">'
+            )
         else:
-            self.append(name, f'<div class="col-{name}-{self.side}-img" style="height: 100%; width: {w}px; background: url(\'{fname}\') repeat-y; background-size: {w/scalex}px {h/scaley}px;"></div>')
+            self.append(
+                name,
+                f'<div class="col-{name}-{self.side}-img" style="height: 100%; width: {w}px; background: url(\'{fname}\') repeat-y; background-size: {w / scalex}px {h / scaley}px;"></div>',
+            )
 
     def __str__(self):
         lines = []
         cols = self.content.items()
-        if self.side == 'right': cols = reversed(cols)
-        for name,c in cols:
-            lines.append(f'<div class="col col-{self.side} col-{name}-{self.side}"{self.styles[name]}>'+('\n'.join(self.content[name]))+'</div>')
-        return '\n'.join(lines)
+        if self.side == "right":
+            cols = reversed(cols)
+        for name, c in cols:
+            lines.append(
+                f'<div class="col col-{self.side} col-{name}-{self.side}"{self.styles[name]}>'
+                + ("\n".join(self.content[name]))
+                + "</div>"
+            )
+        return "\n".join(lines)
+
 
 class ConvPlayer:
     def __init__(self, path, snd, sr, rmdir=False, pixels_per_second=50):
-        if isinstance(path, str): path = Path(path)
+        if isinstance(path, str):
+            path = Path(path)
         self.path = path
         self.pixels_per_second = pixels_per_second
 
-        self.left = ColumnList(self, 'left')
-        self.right = ColumnList(self, 'right')
+        self.left = ColumnList(self, "left")
+        self.right = ColumnList(self, "right")
 
-        if rmdir and path.exists(): shutil.rmtree(path)
+        if rmdir and path.exists():
+            shutil.rmtree(path)
         path.mkdir(exist_ok=True)
 
         self._add_html()
         self._add_audio(snd, sr)
 
     def _add_html(self):
-        self.html = open(self.path/"index.html", "w")
+        self.html = open(self.path / "index.html", "w")
         self.html.write(HEADER)
 
     def _add_audio(self, snd, sr):
-        torchaudio.save(self.path/"snd.m4a", snd, sr)
+        torchaudio.save(self.path / "snd.m4a", snd, sr)
         ticks = ticks_img(self.pixels_per_second * 2)
-        self.left.append_img('ticks', ticks, scaley=2, repeat_y=True)
-        self.right.append_img('ticks', ticks[::-1], scaley=2, repeat_y=True)
-        for i,snd in enumerate(torch.split(snd, 5*60*sr)):
+        self.left.append_img("ticks", ticks, scaley=2, repeat_y=True)
+        self.right.append_img("ticks", ticks[::-1], scaley=2, repeat_y=True)
+        for i, snd in enumerate(torch.split(snd, 5 * 60 * sr)):
             mels = mel_img(snd, sr)
-            for c,i in zip([self.left, self.right], mels):
-                c.append_img('mel', i, scaley=100 / self.pixels_per_second)
+            for c, i in zip([self.left, self.right], mels):
+                c.append_img("mel", i, scaley=100 / self.pixels_per_second)
 
     def close(self, zip=False, show=False):
         self.html.write('<div class="middle-box">\n')
-        self.html.write(str(self.left)+'\n')
+        self.html.write(str(self.left) + "\n")
         self.html.write('<div class="col-separator"></div>')
-        self.html.write(str(self.right)+'\n')
+        self.html.write(str(self.right) + "\n")
         self.html.write(f"<script>pixels_per_second = {self.pixels_per_second}</script>")
         self.html.write(FOOTER)
         self.html.close()
         if show:
             if is_notebook():
-                from IPython.display import HTML 
+                from IPython.display import HTML
+
                 display(HTML(f'<a href="{self.path}/index.html">View player</a>'))
             else:
                 print(f"{self.path}/index.html")
