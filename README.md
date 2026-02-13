@@ -23,5 +23,5 @@ pip install https://github.com/HumeAI/wsds.git
 
 To run tests you currently need a copy of the `librilight` dataset. The tests can be run with:
 ```
-WSDS_DATASET_PATH=/path/to/the/librilight/folder python tests.py
+WSDS_DATASET_SEARCH_PATH=/path/to/the/librilight/folder python tests.py
 ```
