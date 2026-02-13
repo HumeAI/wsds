@@ -399,7 +399,7 @@ class WSDataset:
         exprs, df = self._parse_sql_queries_polars(
             query, "__key__", shard_subsample=self._check_for_subsampling(shard_subsample), rng=rng
         )
-        return df.filter(exprs[0]).select("__key__").filter(pl.col("__key__").is_not_null()).collect()["__key__"]
+        return df.filter(pl.first()).select("__key__").filter(pl.col("__key__").is_not_null()).collect()["__key__"]
 
     def filtered(
         self,
@@ -477,6 +477,8 @@ class WSDataset:
         loader_class = spec["loader"]
         if isinstance(loader_class, list):
             loader_mod, loader_name = loader_class
+            if loader_mod.startswith("hume_wsds."):
+                loader_mod = "wsds." + loader_mod[len("hume_wsds."):]
             loader_module = importlib.import_module(loader_mod)
             return getattr(loader_module, loader_name)
         return loader_class
