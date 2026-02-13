@@ -10,6 +10,7 @@ def load_tests(loader, tests, ignore):
     tests.addTests(doctest.DocTestSuite(ws_dataset))
     tests.addTests(doctest.DocTestSuite(ws_shard))
     tests.addTests(doctest.DocTestSuite(ws_sink))
+    tests.addTests(doctest.DocFileSuite("README.md"))
     return tests
 
 
