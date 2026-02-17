@@ -268,7 +268,7 @@ class WSDataset:
         cols_seen: set[str] = set()
         deduplicated_subdirs: dict[str, list[str]] = {}
         for subdir, fields in subdirs.items():
-            unique_fields = [f for f in fields if f not in cols_seen]
+            unique_fields = [f for f in dict.fromkeys(fields) if f not in cols_seen]
             if unique_fields:
                 deduplicated_subdirs[subdir] = unique_fields
                 cols_seen.update(unique_fields)
