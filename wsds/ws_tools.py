@@ -420,6 +420,8 @@ def init(
         with WSDSIndexWriter(fname) as index:
             with multiprocessing.Pool(num_workers) as p:
                 for r in progress_bar(p.imap_unordered(shard_extractor, all_shards), total=len(all_shards)):
+                    if r["n_samples"] == 0:
+                        continue
                     r["dataset_path"] = ""
                     try:
                         index.append(r)
@@ -503,33 +505,39 @@ def init_split(
             index.append_metadata({"fields": new_fields})
 
 def extract_index_for_shard(dataset, shard, vad_column=None, key_folder=None):
+    import pyarrow as pa
+
     from . import WSDataset
 
     ds = WSDataset(dataset, key_folder=key_folder)
     index = []
     i = 0
 
-    for s in ds.iter_shard(shard):
-        key = s["__key__"]
+    try:
+        for s in ds.iter_shard(shard):
+            key = s["__key__"]
 
-        if not vad_column:
-            n = 1
-            speech_duration = -1
-        else:
-            vad = s[vad_column]
-            n = len(vad)
-            speech_duration = 0
-            if vad.size > 0:
-                speech_duration = float((vad[:, -1] - vad[:, -2]).sum())  # tend - tstart
+            if not vad_column:
+                n = 1
+                speech_duration = -1
+            else:
+                vad = s[vad_column]
+                n = len(vad)
+                speech_duration = 0
+                if vad.size > 0:
+                    speech_duration = float((vad[:, -1] - vad[:, -2]).sum())  # tend - tstart
 
-        audio_duration = s.get('load_duration') or s.get('est_duration') or -1
+            audio_duration = s.get('load_duration') or s.get('est_duration') or -1
 
-        if (
-            n > 0
-        ):  # in derived datasets, skip files with no vad segments (they won't have samples and will never appear as keys)
-            index.append((key, i, audio_duration, speech_duration))
+            if (
+                n > 0
+            ):  # in derived datasets, skip files with no vad segments (they won't have samples and will never appear as keys)
+                index.append((key, i, audio_duration, speech_duration))
 
-        i += n
+            i += n
+    except pa.lib.ArrowInvalid as e:
+        print(f"Skipping corrupt shard {shard[1]}: {e}")
+
     return {
         "shard_name": shard[1],
         "index": index,
