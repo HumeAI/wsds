@@ -1,7 +1,6 @@
 import struct
 
 import pyarrow as pa
-import pyarrow.ipc
 
 from wsds.ws_tools import shard_from_audio_dir
 
