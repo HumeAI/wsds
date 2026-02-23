@@ -506,7 +506,7 @@ def init_split(
                         "loader": ["wsds.ws_shard", "WSSourceAudioShard"],
                         "vad_column": vad_column,
                     }
-                )
+                }})
                 new_fields["audio"] = [("audio.wsds-computed", "audio")]
             index.append_metadata({"fields": new_fields})
 
