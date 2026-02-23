@@ -1,4 +1,8 @@
+from __future__ import annotations
+
 import pickle
+from collections.abc import Collection
+from typing import BinaryIO, Optional, Protocol, Union
 
 import numpy as np
 
@@ -19,7 +23,15 @@ AUDIO_FILE_KEYS = frozenset(
 )
 
 
-def decode_sample(column: str, data):
+class _SampleLike(Protocol):
+    """Protocol for dict-like objects that support key lookup (e.g. WSSample)."""
+
+    def keys(self) -> Collection[str]: ...
+    def __contains__(self, key: str) -> bool: ...
+    def __getitem__(self, key: str) -> object: ...
+
+
+def decode_sample(column: str, data: Union[BinaryIO, str]) -> object:
     """Decode a binary column value from a file-like object based on column name.
 
     Handles .npy (numpy), .pyd (pickle), .txt (UTF-8 string), and audio columns.
@@ -28,6 +40,7 @@ def decode_sample(column: str, data):
     if column.endswith("npy"):
         return np.load(data)
     elif column.endswith("pyd"):
+        assert not isinstance(data, str)
         return pickle.load(data)
     elif column.endswith("txt"):
         return data if isinstance(data, str) else data.read().decode("utf-8")
@@ -36,7 +49,7 @@ def decode_sample(column: str, data):
     raise ValueError(f"Unknown binary column type: {column}")
 
 
-def get_audio(sample, audio_columns=None):
+def get_audio(sample: _SampleLike, audio_columns: Optional[Collection[str]] = None) -> object:
     """Find and return the first audio column value from a dict-like sample.
 
     Args:

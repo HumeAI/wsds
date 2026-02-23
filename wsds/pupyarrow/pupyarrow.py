@@ -16,7 +16,7 @@ import struct
 from dataclasses import dataclass
 from enum import IntEnum
 from pathlib import Path
-from typing import Any, BinaryIO, Iterator
+from typing import Any, BinaryIO, Iterator, Optional, Union
 
 import numpy as np
 
@@ -107,7 +107,7 @@ class FieldNode:
 class Field:
     """A named column in a record batch or child of a nested type."""
 
-    name: str | None
+    name: Optional[str]
     nullable: bool
     type_id: ArrowType
     type_metadata: dict[str, Any]
@@ -115,7 +115,7 @@ class Field:
     custom_metadata: dict[str, str]
 
     @classmethod
-    def from_flatbuf(cls, fb_field) -> Field:
+    def from_flatbuf(cls, fb_field: Any) -> Field:
         """Create a Field from a flatbuffer Field object."""
         name = fb_field.Name()
         if name is not None:
@@ -145,7 +145,7 @@ class Field:
         )
 
     @staticmethod
-    def _parse_type_metadata(fb_field, type_id: ArrowType) -> dict[str, Any]:
+    def _parse_type_metadata(fb_field: Any, type_id: ArrowType) -> dict[str, Any]:
         """Parse type-specific metadata from the flatbuffer type union."""
         metadata: dict[str, Any] = {}
         fb_type = fb_field.Type()
@@ -229,10 +229,10 @@ class Field:
         elif type_id == ArrowType.Interval:
             from wsds.pupyarrow.flatbuf.Interval import Interval
 
-            int_type = Interval()
-            int_type.Init(fb_type.Bytes, fb_type.Pos)
+            interval_type = Interval()
+            interval_type.Init(fb_type.Bytes, fb_type.Pos)
             unit_map = {0: "year_month", 1: "day_time", 2: "month_day_nano"}
-            metadata["unit"] = unit_map.get(int_type.Unit(), "unknown")
+            metadata["unit"] = unit_map.get(interval_type.Unit(), "unknown")
 
         elif type_id == ArrowType.Map:
             from wsds.pupyarrow.flatbuf.Map import Map
@@ -272,7 +272,7 @@ class Schema:
     endianness: str  # "little" or "big"
 
     @classmethod
-    def from_flatbuf(cls, fb_schema) -> Schema:
+    def from_flatbuf(cls, fb_schema: Any) -> Schema:
         """Create a Schema from a flatbuffer Schema object."""
         fields = []
         for i in range(fb_schema.FieldsLength()):
@@ -294,11 +294,11 @@ class Schema:
         )
 
     @property
-    def names(self) -> list[str | None]:
+    def names(self) -> list[Optional[str]]:
         """Return the list of field names."""
         return [f.name for f in self.fields]
 
-    def field(self, name: str) -> Field | None:
+    def field(self, name: str) -> Optional[Field]:
         """Get a field by name."""
         for f in self.fields:
             if f.name == name:
@@ -308,7 +308,7 @@ class Schema:
     def __len__(self) -> int:
         return len(self.fields)
 
-    def __getitem__(self, key: int | str) -> Field:
+    def __getitem__(self, key: Union[int, str]) -> Field:
         if isinstance(key, int):
             return self.fields[key]
         for f in self.fields:
@@ -333,11 +333,11 @@ class RecordBatchInfo:
     length: int  # Number of rows
     nodes: list[FieldNode]
     buffers: list[Buffer]
-    compression: str | None
+    compression: Optional[str]
     variadic_buffer_counts: list[int]
 
 
-def _decompress_buffer(raw_data: bytes, compression: str | None) -> bytes:
+def _decompress_buffer(raw_data: bytes, compression: Optional[str]) -> bytes:
     """
     Decompress a buffer if compression is enabled.
 
@@ -387,11 +387,11 @@ class LazyBuffer:
 
     # __slots__ = ("_reader", "_offset", "_length", "_data", "_compression", "_pos")
 
-    def __init__(self, reader: FileReader, offset: int, length: int, compression: str | None = None):
+    def __init__(self, reader: FileReader, offset: int, length: int, compression: Optional[str] = None):
         self._reader = reader
         self._offset = offset
         self._length = length
-        self._data: bytes | None = None
+        self._data: Optional[bytes] = None
         self._compression = compression
         self._pos = 0
 
@@ -476,7 +476,7 @@ class LazyBuffer:
             child._data = self._read_all()[start:end]
         return child
 
-    def as_numpy(self, dtype: np.dtype) -> np.ndarray:
+    def as_numpy(self, dtype: Union[np.dtype[Any], type[np.generic]]) -> np.ndarray:
         """Read the buffer as a numpy array with the given dtype."""
         data = self._read_all()
         return np.frombuffer(data, dtype=dtype)
@@ -506,7 +506,7 @@ class LazyArray:
         self.field = field
         self.node = node
         self._buffers = buffers
-        self._validity: np.ndarray | None = None
+        self._validity: Optional[np.ndarray] = None
 
     @property
     def length(self) -> int:
@@ -519,7 +519,7 @@ class LazyArray:
     def __len__(self) -> int:
         return self.node.length
 
-    def validity_mask(self) -> np.ndarray | None:
+    def validity_mask(self) -> Optional[np.ndarray]:
         """
         Return a boolean mask indicating valid (non-null) values.
 
@@ -543,7 +543,7 @@ class LazyArray:
 class LazyIntArray(LazyArray):
     """Lazy integer array with numpy access."""
 
-    _DTYPE_MAP = {
+    _DTYPE_MAP: dict[tuple[int, bool], type[np.integer[Any]]] = {
         (8, True): np.int8,
         (8, False): np.uint8,
         (16, True): np.int16,
@@ -559,7 +559,7 @@ class LazyIntArray(LazyArray):
         bit_width = field.type_metadata.get("bit_width", 64)
         is_signed = field.type_metadata.get("is_signed", True)
         self._dtype = self._DTYPE_MAP[(bit_width, is_signed)]
-        self._values: np.ndarray | None = None
+        self._values: Optional[np.ndarray] = None
 
     @property
     def dtype(self) -> np.dtype:
@@ -579,7 +579,7 @@ class LazyIntArray(LazyArray):
             return np.ma.array(values, mask=False)
         return np.ma.array(values, mask=~mask)
 
-    def __getitem__(self, idx: int | slice) -> Any:
+    def __getitem__(self, idx: Union[int, slice]) -> object:
         return self.to_numpy()[idx]
 
     def __repr__(self) -> str:
@@ -589,13 +589,13 @@ class LazyIntArray(LazyArray):
 class LazyFloatArray(LazyArray):
     """Lazy floating point array with numpy access."""
 
-    _DTYPE_MAP = {"half": np.float16, "single": np.float32, "double": np.float64}
+    _DTYPE_MAP: dict[str, type[np.floating[Any]]] = {"half": np.float16, "single": np.float32, "double": np.float64}
 
     def __init__(self, field: Field, node: FieldNode, buffers: list[LazyBuffer]):
         super().__init__(field, node, buffers)
         precision = field.type_metadata.get("precision", "double")
         self._dtype = self._DTYPE_MAP[precision]
-        self._values: np.ndarray | None = None
+        self._values: Optional[np.ndarray] = None
 
     @property
     def dtype(self) -> np.dtype:
@@ -615,7 +615,7 @@ class LazyFloatArray(LazyArray):
             return np.ma.array(values, mask=False)
         return np.ma.array(values, mask=~mask)
 
-    def __getitem__(self, idx: int | slice) -> Any:
+    def __getitem__(self, idx: Union[int, slice]) -> object:
         return self.to_numpy()[idx]
 
     def __repr__(self) -> str:
@@ -627,7 +627,7 @@ class LazyBoolArray(LazyArray):
 
     def __init__(self, field: Field, node: FieldNode, buffers: list[LazyBuffer]):
         super().__init__(field, node, buffers)
-        self._values: np.ndarray | None = None
+        self._values: Optional[np.ndarray] = None
 
     @property
     def dtype(self) -> np.dtype:
@@ -649,7 +649,7 @@ class LazyBoolArray(LazyArray):
             return np.ma.array(values, mask=False)
         return np.ma.array(values, mask=~mask)
 
-    def __getitem__(self, idx: int | slice) -> Any:
+    def __getitem__(self, idx: Union[int, slice]) -> object:
         return self.to_numpy()[idx]
 
     def __repr__(self) -> str:
@@ -673,21 +673,20 @@ class LazyStringArray(LazyArray):
     ):
         super().__init__(field, node, buffers)
         self._large = large
-        self._offsets: np.ndarray | None = None
         self._data_buffer = buffers[2]
-        self._data: bytes | None = None
+        self._data: Optional[bytes] = None
         # Eagerly load offsets (metadata)
-        self._load_offsets()
+        self._offsets: np.ndarray = self._load_offsets()
 
-    def _load_offsets(self) -> None:
+    def _load_offsets(self) -> np.ndarray:
         """Eagerly load offset array."""
         offset_dtype = np.int64 if self._large else np.int32
-        self._offsets = self._buffers[1].as_numpy(offset_dtype)[: self.length + 1]
+        return self._buffers[1].as_numpy(offset_dtype)[: self.length + 1]
 
     @property
     def offsets(self) -> np.ndarray:
         """Return the offset array (eagerly loaded)."""
-        return self._offsets  # type: ignore
+        return self._offsets
 
     def _ensure_data(self) -> bytes:
         """Lazily load string data buffer."""
@@ -695,7 +694,7 @@ class LazyStringArray(LazyArray):
             self._data = self._data_buffer._read_all()
         return self._data
 
-    def __getitem__(self, idx: int | slice) -> str | None | list[str | None]:
+    def __getitem__(self, idx: Union[int, slice]) -> Union[Optional[str], list[Optional[str]]]:
         """Get string(s) by index or slice."""
         if isinstance(idx, slice):
             indices = range(*idx.indices(self.length))
@@ -708,7 +707,7 @@ class LazyStringArray(LazyArray):
 
         return self._get_single(idx)
 
-    def _get_single(self, idx: int) -> str | None:
+    def _get_single(self, idx: int) -> Optional[str]:
         """Get a single string by index."""
         # Check validity
         mask = self.validity_mask()
@@ -719,11 +718,11 @@ class LazyStringArray(LazyArray):
         end = int(self._offsets[idx + 1])
         return self._data_buffer.read_range(start, end).decode("utf-8")
 
-    def to_list(self) -> list[str | None]:
+    def to_list(self) -> list[Optional[str]]:
         """Convert to a Python list of strings."""
         data = self._ensure_data()
         mask = self.validity_mask()
-        result: list[str | None] = []
+        result: list[Optional[str]] = []
 
         for i in range(self.length):
             if mask is not None and not mask[i]:
@@ -766,21 +765,20 @@ class LazyBinaryArray(LazyArray):
     ):
         super().__init__(field, node, buffers)
         self._large = large
-        self._offsets: np.ndarray | None = None
         self._data_buffer = buffers[2]
-        self._data: bytes | None = None
+        self._data: Optional[bytes] = None
         # Eagerly load offsets (metadata)
-        self._load_offsets()
+        self._offsets: np.ndarray = self._load_offsets()
 
-    def _load_offsets(self) -> None:
+    def _load_offsets(self) -> np.ndarray:
         """Eagerly load offset array."""
         offset_dtype = np.int64 if self._large else np.int32
-        self._offsets = self._buffers[1].as_numpy(offset_dtype)[: self.length + 1]
+        return self._buffers[1].as_numpy(offset_dtype)[: self.length + 1]
 
     @property
     def offsets(self) -> np.ndarray:
         """Return the offset array (eagerly loaded)."""
-        return self._offsets  # type: ignore
+        return self._offsets
 
     def _ensure_data(self) -> bytes:
         """Lazily load binary data buffer."""
@@ -788,7 +786,7 @@ class LazyBinaryArray(LazyArray):
             self._data = self._data_buffer._read_all()
         return self._data
 
-    def __getitem__(self, idx: int | slice) -> LazyBuffer | None | list[LazyBuffer | None]:
+    def __getitem__(self, idx: Union[int, slice]) -> Union[Optional[LazyBuffer], list[Optional[LazyBuffer]]]:
         """Get binary data as a file-like LazyBuffer by index or slice."""
         if isinstance(idx, slice):
             indices = range(*idx.indices(self.length))
@@ -801,7 +799,7 @@ class LazyBinaryArray(LazyArray):
 
         return self._get_single(idx)
 
-    def _get_single(self, idx: int) -> LazyBuffer | None:
+    def _get_single(self, idx: int) -> Optional[LazyBuffer]:
         """Get a single binary value as a file-like LazyBuffer by index."""
         mask = self.validity_mask()
         if mask is not None and not mask[idx]:
@@ -834,10 +832,10 @@ class LazyBinaryArray(LazyArray):
 
         return self._data_buffer.read_range(read_start, read_end)
 
-    def to_list(self) -> list[LazyBuffer | None]:
+    def to_list(self) -> list[Optional[LazyBuffer]]:
         """Convert to a Python list of file-like LazyBuffers."""
         mask = self.validity_mask()
-        result: list[LazyBuffer | None] = []
+        result: list[Optional[LazyBuffer]] = []
 
         for i in range(self.length):
             if mask is not None and not mask[i]:
@@ -865,7 +863,7 @@ class LazyFixedSizeBinaryArray(LazyArray):
     def __init__(self, field: Field, node: FieldNode, buffers: list[LazyBuffer]):
         super().__init__(field, node, buffers)
         self._byte_width = field.type_metadata.get("byte_width", 1)
-        self._values: np.ndarray | None = None
+        self._values: Optional[np.ndarray] = None
 
     @property
     def byte_width(self) -> int:
@@ -878,7 +876,7 @@ class LazyFixedSizeBinaryArray(LazyArray):
             self._values = np.frombuffer(data, dtype=np.uint8).reshape(-1, self._byte_width)[: self.length]
         return self._values
 
-    def __getitem__(self, idx: int | slice) -> np.ndarray:
+    def __getitem__(self, idx: Union[int, slice]) -> np.ndarray:
         return self.to_numpy()[idx]
 
     def __repr__(self) -> str:
@@ -886,15 +884,15 @@ class LazyFixedSizeBinaryArray(LazyArray):
 
 
 # Type alias for any lazy array
-LazyArrayType = (
-    LazyIntArray
-    | LazyFloatArray
-    | LazyBoolArray
-    | LazyStringArray
-    | LazyBinaryArray
-    | LazyFixedSizeBinaryArray
-    | LazyArray
-)
+LazyArrayType = Union[
+    LazyIntArray,
+    LazyFloatArray,
+    LazyBoolArray,
+    LazyStringArray,
+    LazyBinaryArray,
+    LazyFixedSizeBinaryArray,
+    LazyArray,
+]
 
 
 class RecordBatch:
@@ -971,7 +969,7 @@ class RecordBatch:
             )
         return lazy_buffers
 
-    def column(self, column: int | str) -> LazyArrayType:
+    def column(self, column: Union[int, str]) -> LazyArrayType:
         """
         Get a lazy array for a column by index or name.
 
@@ -995,6 +993,7 @@ class RecordBatch:
         # Create appropriate lazy array type
         type_id = field.type_id
 
+        arr: LazyArrayType
         if type_id == ArrowType.Int:
             arr = LazyIntArray(field, node, buffers)
         elif type_id == ArrowType.FloatingPoint:
@@ -1044,28 +1043,28 @@ class FeatherFile:
                 values = col.to_numpy()
     """
 
-    def __init__(self, path_or_file: str | Path | BinaryIO | FileReader):
+    def __init__(self, path_or_file: Union[str, Path, BinaryIO, FileReader]):
         """
         Open a Feather file.
 
         Args:
             path_or_file: Path to the file, an open binary file object, or a FileReader.
         """
-        if hasattr(path_or_file, "read_end"):
-            self._reader = path_or_file
-        elif isinstance(path_or_file, [str, Path, BinaryIO]):
+        if isinstance(path_or_file, FileReader):
+            self._reader: FileReader = path_or_file
+        elif isinstance(path_or_file, (str, Path)):
             self._reader = LocalFileReader(path_or_file)
         else:
-            raise TypeError(f"Unsupported type for path_or_file: {type(path_or_file)} (expected str, Path, BinaryIO, or FileReader)")
+            self._reader = LocalFileReader(path_or_file)
 
         self._footer = self._read_footer()
         self._schema = Schema.from_flatbuf(self._footer.Schema())
         self._record_batch_blocks = self._read_record_batch_blocks()
 
         # Eagerly parse record batch metadata
-        self._record_batch_infos: list[RecordBatchInfo | None] = [None] * len(self._record_batch_blocks)
+        self._record_batch_infos: list[Optional[RecordBatchInfo]] = [None] * len(self._record_batch_blocks)
 
-    def _read_footer(self):
+    def _read_footer(self) -> Any:
         """Read and parse the footer from the end of the file."""
         # don't check start magic to reduce I/O latency
         end_magic = self._reader.read_end(-6, 6)
@@ -1197,7 +1196,7 @@ class FeatherFile:
     def __enter__(self) -> FeatherFile:
         return self
 
-    def __exit__(self, *args) -> None:
+    def __exit__(self, *args: object) -> None:
         self.close()
 
     def close(self) -> None:

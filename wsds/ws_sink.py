@@ -2,14 +2,17 @@ from __future__ import annotations
 
 import os
 import random
+from collections.abc import Generator
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Optional
+from types import TracebackType
 
 import pyarrow
 
 
-def indented(prefix, obj):
+def indented(prefix: str, obj: object) -> str:
     lines = str(obj).split("\n")
     return "\n".join(p + ln for p, ln in zip([prefix] + [" " * len(prefix)] * (len(lines) - 1), lines))
 
@@ -19,7 +22,7 @@ class SampleFormatChanged(BaseException):
     old_schema: pyarrow.Schema
     new_schema: pyarrow.Schema
 
-    def __str__(self):
+    def __str__(self) -> str:
         return (
             f"The dataset format changed:\n\n"
             f"{indented('  OLD: ', self.old_schema)}\n\n"
@@ -38,11 +41,11 @@ class WSBatchedSink:
 
     def __init__(
         self,
-        fname,  # final output file name, intermediate output goes into a temporary file
+        fname: str,  # final output file name, intermediate output goes into a temporary file
         min_batch_size_bytes: int = 1024 * 1024,  # minimum size of a batch in bytes (1MB by default)
-        compression: str | None = "zstd",
-        throwaway=False,  # discard the temp file, useful for testing and benchmarking
-    ):
+        compression: Optional[str] = "zstd",
+        throwaway: bool = False,  # discard the temp file, useful for testing and benchmarking
+    ) -> None:
         self.fname = fname
         self.batch_size = 1
         self.min_batch_size_bytes = min_batch_size_bytes
@@ -50,16 +53,17 @@ class WSBatchedSink:
         self.compression = compression
         self.throwaway = throwaway
 
-        self._buffer = []
-        self._sink = None
+        self._buffer: list[dict[str, object]] = []
+        self._sink: Optional[pyarrow.RecordBatchFileWriter] = None
+        self._sink_schema: Optional[pyarrow.Schema] = None
 
-    def write(self, x):
+    def write(self, x: dict[str, object]) -> None:
         self._buffer.append(x)
         if len(self._buffer) >= self.batch_size:
             self.write_batch(self._buffer)
 
     # TODO: test writing batches of data straight from a PyTorch batched processing loop
-    def write_batch(self, b, flush=False):
+    def write_batch(self, b: list[dict[str, object]], flush: bool = False) -> None:
         import pyarrow
 
         try:
@@ -82,17 +86,17 @@ class WSBatchedSink:
         self._sink.write(record)
         self._buffer.clear()
 
-    def close(self):
+    def close(self) -> None:
         if self._buffer:
             self.write_batch(self._buffer, flush=True)  # flush the last batch
         assert self._sink is not None, "closing a WSSink that was never written to"
         self._sink.close()
 
-    def __enter__(self):
+    def __enter__(self) -> WSBatchedSink:
         assert self._sink is None, "WSSink is not re-entrant"
         return self
 
-    def __exit__(self, exc_type, exc_value, traceback):
+    def __exit__(self, exc_type: Optional[type[BaseException]], exc_value: Optional[BaseException], traceback: Optional[TracebackType]) -> None:
         if exc_type is None:
             self.close()
 
@@ -108,16 +112,16 @@ class AtomicFile:
     ```
     """
 
-    def __init__(self, fname, ephemeral=False):
+    def __init__(self, fname: str | Path, ephemeral: bool = False) -> None:
         self.fname = Path(fname)
         self.ephemeral = ephemeral
 
-    def __enter__(self):
+    def __enter__(self) -> str:
         self.fname.parent.mkdir(exist_ok=True, parents=True)
         self._tmp_name = str(self.fname) + (".%010x" % random.getrandbits(40))
         return self._tmp_name
 
-    def __exit__(self, exc_type, exc_value, traceback):
+    def __exit__(self, exc_type: Optional[type[BaseException]], exc_value: Optional[BaseException], traceback: Optional[TracebackType]) -> None:
         if exc_type is None and not self.ephemeral:
             os.rename(self._tmp_name, self.fname)
         else:
@@ -130,10 +134,10 @@ class AtomicFile:
 def WSSink(
     fname: str,  # final output file name, intermediate output goes into a temporary file
     batch_size: int = 16,  # batch size (see also `min_batch_size_bytes`)
-    compression: str | None = "zstd",  # pass None to disable compression
+    compression: Optional[str] = "zstd",  # pass None to disable compression
     min_batch_size_bytes: int = 0,  # auto-increase the batch size until it's at least this size in bytes
     ephemeral: bool = False,  # discard the temp file, useful for testing and benchmarking
-):
+) -> Generator[WSBatchedSink, None, None]:
     """Context manager to atomically create a `.wsds` shard.
 
     Example:

@@ -1,10 +1,11 @@
+from __future__ import annotations
+
 import os
-import typing
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any, Optional
 from urllib.parse import urlparse
 
 from .pupyarrow.file_reader import S3FileReader
-from .pupyarrow.pupyarrow import FeatherFile, LazyBinaryArray
+from .pupyarrow.pupyarrow import FeatherFile, LazyBinaryArray, RecordBatch
 from .utils import WSShardMissingError
 from .ws_decode import decode_sample
 from .ws_shard import WSShardInterface
@@ -20,7 +21,7 @@ class WSS3Shard(WSShardInterface):
     IPC footer and the specific batch(es) needed are fetched, rather than
     downloading the entire shard file."""
 
-    def __init__(self, dataset: "WSDataset", bucket: str, key: str, shard_name=None, s3_client=None):
+    def __init__(self, dataset: WSDataset, bucket: str, key: str, shard_name: Optional[tuple[str, str]] = None, s3_client: Optional[Any] = None):
         self.dataset = dataset
         self.shard_name = shard_name
         self.bucket = bucket
@@ -39,12 +40,12 @@ class WSS3Shard(WSShardInterface):
         self.batch_size = int(self._feather.schema.custom_metadata["batch_size"])
 
         # cache
-        self._start = None
-        self._end = None
-        self._batch = None
+        self._start: Optional[int] = None
+        self._end: Optional[int] = None
+        self._batch: Optional[RecordBatch] = None
 
     @classmethod
-    def from_s3_url(cls, dataset: "WSDataset", url: str, shard_name=None, s3_client=None):
+    def from_s3_url(cls, dataset: WSDataset, url: str, shard_name: Optional[tuple[str, str]] = None, s3_client: Optional[Any] = None) -> WSS3Shard:
         """Construct from an s3://bucket/key URL."""
         parsed = urlparse(url)
         if parsed.scheme != "s3":
@@ -54,15 +55,15 @@ class WSS3Shard(WSShardInterface):
         return cls(dataset, bucket, key, shard_name=shard_name, s3_client=s3_client)
 
     @classmethod
-    def get_columns(cls, link, dataset):
+    def get_columns(cls, link: dict[str, Any], dataset: WSDataset) -> Optional[dict[str, str]]:
         """Return columns provided by this S3 link."""
         if "columns" in link:
             return {col: col for col in link["columns"]}
         columns = cls._discover_columns_from_s3(link)
-        return {col: col for col in columns if col != "__key__"}
+        return {col: col for col in columns if col is not None and col != "__key__"}
 
     @classmethod
-    def from_link(cls, link, dataset, shard_ref):
+    def from_link(cls, link: dict[str, Any], dataset: WSDataset, shard_ref: tuple[str, str]) -> WSS3Shard:
         """Create an S3 shard from a link spec."""
         partition, shard = shard_ref
         prefix = link["prefix"]
@@ -71,7 +72,7 @@ class WSS3Shard(WSShardInterface):
         return cls(dataset, link["bucket"], os.path.normpath(key), shard_name=shard_ref, s3_client=s3_client)
 
     @classmethod
-    def _make_s3_client(cls, endpoint_url=None):
+    def _make_s3_client(cls, endpoint_url: Optional[str] = None) -> Any:
         import boto3
 
         endpoint_url = endpoint_url or os.environ.get("WSDS_S3_ENDPOINT_URL")
@@ -81,7 +82,7 @@ class WSS3Shard(WSShardInterface):
         return boto3.client("s3", **kwargs)
 
     @classmethod
-    def _discover_columns_from_s3(cls, link):
+    def _discover_columns_from_s3(cls, link: dict[str, Any]) -> list[Optional[str]]:
         """Read one shard's footer from S3 to discover column names."""
         s3_client = cls._make_s3_client(link.get("endpoint_url"))
         bucket = link["bucket"]
@@ -97,8 +98,8 @@ class WSS3Shard(WSShardInterface):
     def _s3_path(self) -> str:
         return f"s3://{self.bucket}/{self.key}"
 
-    def get_sample(self, column: str, offset: int) -> typing.Any:
-        if self._batch is None or offset < self._start or offset >= self._end:
+    def get_sample(self, column: str, offset: int) -> Any:
+        if self._batch is None or self._start is None or self._end is None or offset < self._start or offset >= self._end:
             i = offset // self.batch_size
             if i >= self._feather.num_record_batches:
                 raise IndexError(f"{offset} is out of range for shard {self._s3_path()}")
@@ -119,7 +120,7 @@ class WSS3Shard(WSShardInterface):
             col = self._batch.column(column)
         except KeyError:
             raise KeyError(f"column {column} not found in shard {self._s3_path()}")
-        data = col[j]
+        data = col[j]  # type: ignore[index]
         try:
             if isinstance(col, LazyBinaryArray):
                 data._optimal_read_size = 2 * 1024 * 1024
@@ -128,7 +129,7 @@ class WSS3Shard(WSShardInterface):
             raise ValueError(f"Failed to decode column {column} in shard {self._s3_path()} (offset {offset}): {e}")
         return data
 
-    def __repr__(self):
+    def __repr__(self) -> str:
         r = f"WSS3Shard('{self._s3_path()}')"
         if self._batch:
             r += f" # cached_region = [{self._start}, {self._end}]"

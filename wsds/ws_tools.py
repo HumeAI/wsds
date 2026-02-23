@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import functools
 import json
 import os
@@ -5,6 +7,7 @@ import sys
 import tarfile
 from collections import defaultdict
 from pathlib import Path
+from typing import TYPE_CHECKING, Any, Optional, Union
 
 import numpy as np
 import polars as pl
@@ -13,13 +16,18 @@ import webdataset as wds
 
 from . import WSSample, WSSink
 
+if TYPE_CHECKING:
+    from collections.abc import Callable
+
+    from .ws_index import WSIndex
+
 commands = {}
 
 
-def command(name_or_fun):
+def command(name_or_fun: Union[str, Callable[..., object]]) -> Callable[..., object]:
     name = None
 
-    def decorator(f):
+    def decorator(f: Callable[..., object]) -> Callable[..., object]:
         commands[name or f.__name__] = f
         return f
 
@@ -31,7 +39,7 @@ def command(name_or_fun):
 
 
 @command("list")
-def _list(input_shard: str):
+def _list(input_shard: str) -> None:
     """Lists keys in a wsds dataset or shard."""
     if (Path(input_shard) / "index.sqlite3").exists():
         # FIXME: implement keys
@@ -54,13 +62,14 @@ def _list(input_shard: str):
             sys.exit(1)
 
 
-def inspect_dataset(input_path, verbose=True):
+def inspect_dataset(input_path: str, verbose: bool = True) -> None:
     """Displays metadata and schema of a wsds dataset."""
     from . import WSDataset
 
     ds = WSDataset(input_path)
     print(ds)
     if verbose:
+        assert ds.index is not None, "Dataset has no index"
         print("Metadata:")
         for k, v in ds.index.metadata.items():
             print(f"{k}: {v}")
@@ -71,7 +80,7 @@ def inspect_dataset(input_path, verbose=True):
             break
 
 
-def inspect_shard(input_path):
+def inspect_shard(input_path: Union[str, Path]) -> None:
     reader = pa.RecordBatchFileReader(pa.memory_map(str(input_path)))
     print(f"Batches: {reader.num_record_batches}")
     print(f"Rows: {int(reader.schema.metadata[b'batch_size']) * reader.num_record_batches}")
@@ -80,7 +89,7 @@ def inspect_shard(input_path):
 
 
 @command
-def inspect(input_path: str):
+def inspect(input_path: str) -> None:
     """Displays metadata and schema of a wsds dataset or shard."""
     if Path(input_path).is_dir():
         if (Path(input_path) / "index.sqlite3").exists():
@@ -103,7 +112,7 @@ def inspect(input_path: str):
         inspect_shard(input_path)
 
 
-def print_head(shard: str, n: int = 5):
+def print_head(shard: Union[str, Path], n: int = 5) -> None:
     reader = pa.ipc.open_file(shard)
     batch = reader.get_batch(0)
     table = batch.to_pandas()
@@ -111,7 +120,7 @@ def print_head(shard: str, n: int = 5):
 
 
 @command
-def head_shard(input_path: str, n: int = 5):
+def head_shard(input_path: str, n: int = 5) -> None:
     """Displays metadata and schema of a wsds dataset or shard."""
     import warnings
 
@@ -127,11 +136,12 @@ def head_shard(input_path: str, n: int = 5):
 
 
 @command
-def dump_index(source_dataset: Path):
+def dump_index(source_dataset: Path) -> None:
     """Dump the index of the given dataset in a readable format."""
     from . import WSDataset
 
     ds = WSDataset(source_dataset)
+    assert ds.index is not None, "Dataset has no index"
 
     try:
         for sample in ds.index.query(
@@ -146,12 +156,12 @@ def dump_index(source_dataset: Path):
 class validate:
     @command("validate_shards")  # backwards compatibility
     @staticmethod
-    def shards(dataset: Path, verbose=False, complete_in_progress=False):
+    def shards(dataset: Path, verbose: bool = False, complete_in_progress: bool = False) -> None:
         """Validate if subdirs have all the shards and if all their schemas match."""
         from .utils import list_all_shards
         from .ws_sink import indented
 
-        shard_names = list_all_shards(dataset, verbose=True, print_missing=False)
+        shard_names = list_all_shards(str(dataset), verbose=True, print_missing=False)
         print()
         for column_dir in Path(dataset).iterdir():
             if not column_dir.is_dir():
@@ -173,7 +183,7 @@ class validate:
                 os.rename(column_dir, str(column_dir).replace('.in-progress', ''))
 
     @staticmethod
-    def load_test_yaml(test_yaml_path: Path):
+    def load_test_yaml(test_yaml_path: Path) -> dict[str, dict[str, Any]]:
         """Load the expected artifacts, keys, and datatypes from test.yaml"""
         import yaml
 
@@ -183,7 +193,7 @@ class validate:
 
     @command("validate_artifacts")
     @staticmethod
-    def validate_artifacts(dataset: Path, test_yaml: Path, verbose=False, check_index=False, n_shards: int = None):
+    def validate_artifacts(dataset: Path, test_yaml: Path, verbose: bool = False, check_index: bool = False, n_shards: Optional[int] = None) -> None:
         """
         Validate that:
         1. The dataset has a valid index and loads correctly.
@@ -296,7 +306,7 @@ class validate:
         print(f"\n{BOLD}Validation complete.{RESET}\n")
 
     @staticmethod
-    def keys(dataset: Path, verbose=False, skip_audio=True):
+    def keys(dataset: Path, verbose: bool = False, skip_audio: bool = True) -> None:
         """Validate __key__s against the index for all the shards in the dataset."""
         from collections import defaultdict
 
@@ -314,8 +324,9 @@ class validate:
                 column_dirs = [dir for dir in column_dirs if dir.name != "audio"]
 
         ds = WSDataset(dataset)
+        assert ds.index is not None, "Dataset has no index"
         shards = ds.get_shard_list()
-        missing_shards = defaultdict(int)
+        missing_shards: defaultdict[Path, int] = defaultdict(int)
         for shard in tqdm(shards, desc=str(dataset)):
             expected_keys = generate_all_keys_for_shard(ds.index, shard)
             for column_dir in column_dirs:
@@ -341,7 +352,7 @@ class validate:
             tqdm.write(f"{column_dir}: missing {count} shards")
 
     @staticmethod
-    def all(base_path, skip_audio=True):
+    def all(base_path: Union[str, Path], skip_audio: bool = True) -> None:
         from tqdm import tqdm
 
         base_path = Path(base_path)
@@ -364,7 +375,7 @@ class validate:
             validate.keys(segmentation, skip_audio=skip_audio)
 
 
-def get_shard_schema(fname):
+def get_shard_schema(fname: Union[str, Path]) -> Optional[str]:
     fname = Path(fname)
     if not fname.exists():
         return None
@@ -373,7 +384,7 @@ def get_shard_schema(fname):
     return repr(pa.RecordBatchFileReader(pa.memory_map(str(fname))).schema).split("-- schema metadata --")[0]
 
 
-def generate_all_keys_for_shard(index, shard):
+def generate_all_keys_for_shard(index: WSIndex, shard: tuple[str, str]) -> pl.Series:
     partition, shard_name = shard
     if index.has_partition or index.has_dataset_path:
         N, shard_id = index.query(
@@ -397,10 +408,10 @@ def generate_all_keys_for_shard(index, shard):
 @command
 def init(
     new_dataset: Path,
-    source_dataset: Path | None = None,
-    vad_column: str | None = None,
+    source_dataset: Optional[Path] = None,
+    vad_column: Optional[str] = None,
     num_workers: int = 32,
-):
+) -> None:
     """Initialize a new dataset, from scratch or from a segmentation of an existing one."""
     import multiprocessing
 
@@ -450,11 +461,11 @@ def init(
 def init_split(
     splits_path: Path,
     new_dataset: Path,
-    source_dataset: Path | None = None,
-    vad_column: str | None = None,
+    source_dataset: Optional[Path] = None,
+    vad_column: Optional[str] = None,
     num_workers: int = 64,
     index_path: str = ".",
-):
+) -> None:
     """Initialize a new dataset, from scratch or from a segmentation of an existing one."""
     if source_dataset is not None:
         assert vad_column is not None, "vad_column must be specified when initializing from a source dataset"
@@ -510,7 +521,7 @@ def init_split(
                 new_fields["audio"] = [("audio.wsds-computed", "audio")]
             index.append_metadata({"fields": new_fields})
 
-def extract_index_for_shard(dataset, shard, vad_column=None):
+def extract_index_for_shard(dataset: Union[str, Path], shard: tuple[str, str], vad_column: Optional[str] = None) -> dict[str, object]:
     from . import WSDataset
 
     ds = WSDataset(dataset)
@@ -522,13 +533,13 @@ def extract_index_for_shard(dataset, shard, vad_column=None):
 
         if not vad_column:
             n = 1
-            speech_duration = -1
+            speech_duration: float = -1
         else:
             vad = s[vad_column]
-            n = len(vad)
-            speech_duration = 0
-            if vad.size > 0:
-                speech_duration = float((vad[:, -1] - vad[:, -2]).sum())  # tend - tstart
+            n = len(vad)  # type: ignore[arg-type]
+            speech_duration = 0.0
+            if vad.size > 0:  # type: ignore[attr-defined]
+                speech_duration = float((vad[:, -1] - vad[:, -2]).sum())  # type: ignore[index]  # tend - tstart
 
         audio_duration = s['load_duration'] or s['est_duration'] or -1
 
@@ -546,7 +557,7 @@ def extract_index_for_shard(dataset, shard, vad_column=None):
 
 
 @command
-def _remove_columns(*fnames, remove: str = ""):
+def _remove_columns(*fnames: str, remove: str = "") -> None:
     """
     Remove one or more columns from .wsds shard files if they exist.
 
@@ -578,7 +589,7 @@ def _remove_columns(*fnames, remove: str = ""):
                 with pa.ipc.new_file(tmp, table2.schema.with_metadata(reader.schema.metadata)) as sink:
                     sink.write_table(table2)
 
-def episode_stats(shard_path):
+def episode_stats(shard_path: Union[str, Path]) -> pl.DataFrame:
     return (
         pl.read_ipc(shard_path, memory_map=False)
         .with_columns(
@@ -593,7 +604,7 @@ def episode_stats(shard_path):
     )
 
 @command
-def diff_keys(source_shard : str, *shards : str):
+def diff_keys(source_shard: str, *shards: str) -> None:
     base = pl.read_ipc(source_shard, memory_map=False).select(episode='__key__')
     df = base
     for shard in shards:

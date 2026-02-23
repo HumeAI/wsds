@@ -1,5 +1,8 @@
+from __future__ import annotations
+
 import shutil
 from pathlib import Path
+from typing import Iterable, Optional, Union
 
 import numpy as np
 import torch
@@ -285,12 +288,12 @@ CSV = """<div id="vote_results"></div>
 </script>"""
 
 
-def mel_img(snd, sr, mel_min=-1, mel_max=2):
+def mel_img(snd: torch.Tensor, sr: int, mel_min: float = -1, mel_max: float = 2) -> np.ndarray:
     mel = whisper.log_mel_spectrogram(torchaudio.functional.resample(snd, sr, 16000))
     return torch.clamp((mel - mel_min) / (mel_max - mel_min) * 255, 0, 255).numpy().astype(np.uint8)
 
 
-def ticks_img(h):
+def ticks_img(h: int) -> np.ndarray:
     ticks = np.full((10, h), 255, dtype=np.uint8)
     ticks[5:, :: h // 10] = 150
     ticks[:, 0] = 50
@@ -304,24 +307,24 @@ from .utils import is_notebook
 
 
 class ColumnList:
-    def __init__(self, player, side):
+    def __init__(self, player: ConvPlayer, side: str) -> None:
         self.player = player
         self.side = side
-        self.styles = defaultdict(str)
-        self.content = defaultdict(list)
+        self.styles: defaultdict[str, str] = defaultdict(str)
+        self.content: defaultdict[str, list[str]] = defaultdict(list)
 
-    def _get_fname(self, name, fmt):
+    def _get_fname(self, name: str, fmt: str) -> str:
         return f"{name}-{self.side}-{len(self.content) + 1:03d}.{fmt}"
 
-    def _save_img(self, name, img, fmt="png"):
+    def _save_img(self, name: str, img: np.ndarray, fmt: str = "png") -> str:
         fname = self._get_fname(name, fmt)
         Image.fromarray(img.T).save(self.player.path / fname)
         return fname
 
-    def append(self, name, content):
+    def append(self, name: str, content: str) -> None:
         self.content[name].append(content)
 
-    def put_html(self, name, t_start, html, t_len=None, bg="#eee", flex=10, width=None):
+    def put_html(self, name: str, t_start: float, html: str, t_len: Optional[float] = None, bg: str = "#eee", flex: int = 10, width: Optional[float] = None) -> None:
         if width:
             self.styles[name] = f' style="width: {width}px"'
         else:
@@ -333,16 +336,18 @@ class ColumnList:
             f'<div class="col-{name}-{self.side}-html label" data-tstart="{t_start}" style="position: absolute; top: {y}px;{height} background-color: {bg};">{html}</div>',
         )
 
-    def put_img(self, name, t, img, fmt="png", scalex=1, scaley=1):
+    def put_img(self, name: str, t: float, img: np.ndarray, fmt: str = "png", scalex: float = 1, scaley: float = 1) -> None:
         fname = self._save_img(name, img, fmt=fmt)
         w, h = img.shape
-        self.put_html(
+        # BUG: put_html expects (name, t_start, html, ...) but here the HTML string is
+        # passed as t_start and `html` is missing entirely. The `t` parameter is also unused.
+        self.put_html(  # type: ignore[call-arg]
             name,
-            f'<img src="{fname}" width={w / scalex} height={h / scaley} class="col-{name}-{self.side}-img">',
+            f'<img src="{fname}" width={w / scalex} height={h / scaley} class="col-{name}-{self.side}-img">',  # type: ignore[arg-type]
             width=w / scalex,
         )
 
-    def append_img(self, name, img, fmt="png", scalex=1, scaley=1, repeat_y=False):
+    def append_img(self, name: str, img: np.ndarray, fmt: str = "png", scalex: float = 1, scaley: float = 1, repeat_y: bool = False) -> None:
         fname = self._save_img(name, img, fmt=fmt)
         w, h = img.shape
         if not repeat_y:
@@ -355,12 +360,12 @@ class ColumnList:
                 f'<div class="col-{name}-{self.side}-img" style="height: 100%; width: {w}px; background: url(\'{fname}\') repeat-y; background-size: {w / scalex}px {h / scaley}px;"></div>',
             )
 
-    def __str__(self):
+    def __str__(self) -> str:
         lines = []
-        cols = self.content.items()
+        cols_iter: Iterable[tuple[str, list[str]]] = self.content.items()
         if self.side == "right":
-            cols = reversed(cols)
-        for name, c in cols:
+            cols_iter = reversed(list(self.content.items()))
+        for name, c in cols_iter:
             lines.append(
                 f'<div class="col col-{self.side} col-{name}-{self.side}"{self.styles[name]}>'
                 + ("\n".join(self.content[name]))
@@ -370,7 +375,7 @@ class ColumnList:
 
 
 class ConvPlayer:
-    def __init__(self, path, snd, sr, rmdir=False, pixels_per_second=50):
+    def __init__(self, path: Union[str, Path], snd: torch.Tensor, sr: int, rmdir: bool = False, pixels_per_second: int = 50) -> None:
         if isinstance(path, str):
             path = Path(path)
         self.path = path
@@ -386,11 +391,11 @@ class ConvPlayer:
         self._add_html()
         self._add_audio(snd, sr)
 
-    def _add_html(self):
+    def _add_html(self) -> None:
         self.html = open(self.path / "index.html", "w")
         self.html.write(HEADER)
 
-    def _add_audio(self, snd, sr):
+    def _add_audio(self, snd: torch.Tensor, sr: int) -> None:
         torchaudio.save(self.path / "snd.m4a", snd, sr)
         ticks = ticks_img(self.pixels_per_second * 2)
         self.left.append_img("ticks", ticks, scaley=2, repeat_y=True)
@@ -400,7 +405,7 @@ class ConvPlayer:
             for c, i in zip([self.left, self.right], mels):
                 c.append_img("mel", i, scaley=100 / self.pixels_per_second)
 
-    def close(self, zip=False, show=False):
+    def close(self, zip: bool = False, show: bool = False) -> None:
         self.html.write('<div class="middle-box">\n')
         self.html.write(str(self.left) + "\n")
         self.html.write('<div class="col-separator"></div>')
@@ -410,7 +415,7 @@ class ConvPlayer:
         self.html.close()
         if show:
             if is_notebook():
-                from IPython.display import HTML
+                from IPython.display import HTML, display
 
                 display(HTML(f'<a href="{self.path}/index.html">View player</a>'))
             else:

@@ -2,11 +2,15 @@ from __future__ import annotations
 
 import typing
 from dataclasses import dataclass
+from typing import TYPE_CHECKING, Any, Optional
 
 from .audio_codec import audio_to_html, create_decoder, encode_mp3, to_filelike
 
+if TYPE_CHECKING:
+    import torch
 
-def load_segment(src, start, end, sample_rate=None):
+
+def load_segment(src: object, start: float, end: Optional[float], sample_rate: Optional[int] = None) -> torch.Tensor:
     """Efficiently loads an audio segment from `src` (see below) `tstart` to `tend` seconds while
     optionally resampling it to `sample_rate`.
 
@@ -21,15 +25,15 @@ def load_segment(src, start, end, sample_rate=None):
 class AudioReader:
     """A lazy seeking-capable audio reader for random-access to recordings stored in wsds shards."""
 
-    src: typing.Any
-    _decoder: typing.Any = None
-    _sample_rate: int | None = None
+    src: object
+    _decoder: Any = None
+    _sample_rate: Optional[int] = None
     skip_samples: int = 0
 
-    def __repr__(self):
+    def __repr__(self) -> str:
         return f"AudioReader(src={type(self.src)}, sample_rate={self._sample_rate})"
 
-    def unwrap(self):
+    def unwrap(self) -> bytes:
         """Return the raw audio bytes"""
         if hasattr(self.src, "as_buffer"):
             return self.src.as_buffer().to_pybytes()
@@ -38,7 +42,7 @@ class AudioReader:
         else:
             raise TypeError(f"Unsupported AudioReader src type: {type(self.src)}")
 
-    def get_decoder(self, sample_rate=None):
+    def get_decoder(self, sample_rate: Optional[int] = None) -> tuple[Any, int]:
         """Lazily creates/caches decoder via audio_codec.create_decoder()."""
         sample_rate_switch = False
         if self._sample_rate is not None:
@@ -56,19 +60,20 @@ class AudioReader:
             self._decoder = decoder
             self._sample_rate = sample_rate
 
+        assert self._sample_rate is not None
         return self._decoder, self._sample_rate
 
     @property
-    def metadata(self):
+    def metadata(self) -> Any:
         decoder, sample_rate = self.get_decoder()
         return decoder.metadata
 
     @property
-    def sample_rate(self):
+    def sample_rate(self) -> Optional[int]:
         _, sr = self.get_decoder()
         return sr
 
-    def read_segment(self, start=0, end=None, sample_rate=None):
+    def read_segment(self, start: float = 0, end: Optional[float] = None, sample_rate: Optional[int] = None) -> torch.Tensor:
         decoder, sample_rate = self.get_decoder(sample_rate)
         seek_adjustment = self.skip_samples / sample_rate if start > 0 else 0
         _samples = decoder.get_samples_played_in_range(
@@ -81,17 +86,17 @@ class AudioReader:
         samples.sample_rate = sample_rate
         return samples
 
-    def load(self, sample_rate=None):
+    def load(self, sample_rate: Optional[int] = None) -> torch.Tensor:
         samples = self.read_segment(sample_rate=sample_rate)
         return samples
 
-    def _repr_html_(self):
+    def _repr_html_(self) -> str:
         return audio_to_html(self.read_segment())
 
-    def _display_(self):
+    def _display_(self) -> object:
         import marimo
 
-        return marimo.audio(encode_mp3(self.read_segment()))
+        return marimo.audio(encode_mp3(self.read_segment()))  # type: ignore[arg-type]
 
 
 @dataclass(frozen=True)
@@ -123,7 +128,7 @@ class WSAudio:
             tend=self.tend + after,
         )
 
-    def with_timestamps(self, tstart: float | None = None, tend: float | None = None) -> "WSAudio":
+    def with_timestamps(self, tstart: Optional[float] = None, tend: Optional[float] = None) -> "WSAudio":
         """Return a new WSAudio with modified timestamps.
 
         Args:
@@ -139,25 +144,25 @@ class WSAudio:
             tend=tend if tend is not None else self.tend,
         )
 
-    def load(self, sample_rate=None, pad_to_seconds=None):
+    def load(self, sample_rate: Optional[int] = None, pad_to_seconds: Optional[float] = None) -> torch.Tensor:
         samples = self.audio_reader.read_segment(self.tstart, self.tend, sample_rate)
-        sample_rate = samples.sample_rate
+        sample_rate = samples.sample_rate  # type: ignore[attr-defined]
         if pad_to_seconds is not None:
             import torch
 
             padding = int(pad_to_seconds * sample_rate - samples.shape[-1])
             samples = torch.nn.functional.pad(samples, (0, padding))
-            samples.sample_rate = sample_rate
+            samples.sample_rate = sample_rate  # type: ignore[attr-defined]
         return samples
 
     @property
-    def metadata(self):
+    def metadata(self) -> Any:
         return self.audio_reader.metadata
 
-    def _repr_html_(self):
+    def _repr_html_(self) -> str:
         return audio_to_html(self.load())
 
-    def _display_(self):
+    def _display_(self) -> object:
         import marimo
 
-        return marimo.audio(encode_mp3(self.load()))
+        return marimo.audio(encode_mp3(self.load()))  # type: ignore[arg-type]

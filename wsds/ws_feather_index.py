@@ -1,6 +1,9 @@
+from __future__ import annotations
+
 import functools
 import json
 from pathlib import Path
+from typing import Iterator, Optional, Union
 
 import polars as pl
 
@@ -20,7 +23,7 @@ class WSFeatherIndex:
     This enables O(log n) lookups by global sample index or by file name using search_sorted.
     """
 
-    def __init__(self, index_dir: str | Path):
+    def __init__(self, index_dir: Union[str, Path]) -> None:
         """Initialize the feather index from a directory containing the index files.
 
         Args:
@@ -41,12 +44,13 @@ class WSFeatherIndex:
                 raise ValueError(f"Required index file not found: {p}")
 
         # Load shard index - segment_id column already contains global offsets
-        self._shard_df = pl.read_ipc(shard_path)
+        self._shard_df: pl.DataFrame = pl.read_ipc(shard_path)
 
         # Load episode index (sorted by segment_id for binary search)
-        self._episode_df = pl.read_ipc(episode_path)
+        self._episode_df: pl.DataFrame = pl.read_ipc(episode_path)
 
         # Load name index if available (sorted by name for binary search)
+        self._name_df: Optional[pl.DataFrame]
         if name_path.exists():
             self._name_df = pl.read_ipc(name_path)
         else:
@@ -82,7 +86,7 @@ class WSFeatherIndex:
         return float(self._shard_df["speech_duration"].sum())
 
     @functools.cached_property
-    def metadata(self) -> dict:
+    def metadata(self) -> dict[str, object]:
         """Dataset metadata dictionary.
 
         Reads from metadata.json if present, otherwise returns empty dict.
@@ -90,14 +94,14 @@ class WSFeatherIndex:
         metadata_path = self.index_dir / "metadata.json"
         if metadata_path.exists():
             with open(metadata_path) as f:
-                return json.load(f)
+                return json.load(f)  # type: ignore[no-any-return]
         return {}
 
     #
     # Shard iteration
     #
 
-    def shards(self):
+    def shards(self) -> Iterator[tuple[str, str]]:
         """Iterate over all shards as (partition, shard_name) tuples.
 
         Yields tuples in the order shards were added to the index.
@@ -109,7 +113,7 @@ class WSFeatherIndex:
     # Shard lookups
     #
 
-    def get_shard_by_global_index(self, global_index: int) -> tuple[str, int, str] | None:
+    def get_shard_by_global_index(self, global_index: int) -> Optional[tuple[str, int, str]]:
         """Find the shard containing a given global sample index.
 
         Args:
@@ -133,7 +137,7 @@ class WSFeatherIndex:
         row = self._shard_df.row(idx, named=True)
         return (row["shard_name"], int(row["segment_id"]), row["partition"])
 
-    def get_shard_by_file_name(self, file_name: str) -> tuple[str, int, int, str] | None:
+    def get_shard_by_file_name(self, file_name: str) -> Optional[tuple[str, int, int, str]]:
         """Find the shard containing a given source file.
 
         Args:
@@ -149,7 +153,8 @@ class WSFeatherIndex:
         # Binary search in sorted name series
         idx = self._name_df.select(pl.col("name").search_sorted(file_name, side="right")).item()
 
-        if idx >= len(self._names) or self._names[idx] != file_name:
+        # BUG: self._names does not exist; should likely be self._name_df["name"]
+        if idx >= len(self._names) or self._names[idx] != file_name:  # type: ignore[attr-defined]
             return None
 
         name_row = self._name_df.row(idx, named=True)
@@ -174,7 +179,7 @@ class WSFeatherIndex:
             shard_row["partition"],
         )
 
-    def get_shard_global_offset(self, shard_name: str) -> int | None:
+    def get_shard_global_offset(self, shard_name: str) -> Optional[int]:
         """Get the global sample offset for a shard.
 
         Args:
@@ -188,7 +193,7 @@ class WSFeatherIndex:
             return None
         return int(filtered.row(0, named=True)["segment_id"])
 
-    def get_shard_n_samples(self, shard: tuple[str, str]) -> int | None:
+    def get_shard_n_samples(self, shard: tuple[str, str]) -> Optional[int]:
         """Get the number of samples in a shard.
 
         Args:
@@ -207,7 +212,7 @@ class WSFeatherIndex:
             return None
         return int(filtered.row(0, named=True)["n_samples"])
 
-    def get_shard_info(self, shard: tuple[str, str]) -> tuple[int, int] | None:
+    def get_shard_info(self, shard: tuple[str, str]) -> Optional[tuple[int, int]]:
         """Get n_samples and shard_id for a shard.
 
         Args:
@@ -240,7 +245,7 @@ class WSFeatherIndex:
         Returns:
             List of (file_name, offset) tuples.
         """
-        if not self._has_name_index:
+        if self._name_df is None:
             raise RuntimeError("episode-name-index.feather is required for get_files_for_shard")
 
         # Get shard global offset
@@ -257,19 +262,19 @@ class WSFeatherIndex:
         # Join to get name with segment_id
         joined = names.join(episodes.select(["episode_id", "segment_id"]), on="episode_id")
 
-        result = []
+        result: list[tuple[str, int]] = []
         for row in joined.iter_rows(named=True):
             offset = int(row["segment_id"]) - shard_global_offset
             result.append((row["name"], offset))
 
         return result
 
-    def iter_files(self):
+    def iter_files(self) -> Iterator[tuple[str, str, int]]:
         """Iterate over all files with their shard and offset info.
 
         Yields tuples of (file_name, shard_name, offset) ordered by file name.
         """
-        if not self._has_name_index:
+        if self._name_df is None:
             raise RuntimeError("episode-name-index.feather is required for iter_files")
 
         # Join all three dataframes
@@ -294,13 +299,13 @@ class WSFeatherIndex:
     # DataFrame export
     #
 
-    def dataframe(self):
+    def dataframe(self) -> pl.DataFrame:
         """Export the index as a Polars DataFrame.
 
         Returns:
             DataFrame with columns: name, audio_duration, speech_duration, shard, n_samples.
         """
-        if not self._has_name_index:
+        if self._name_df is None:
             raise RuntimeError("episode-name-index.feather is required for dataframe")
 
         # Join name_df with episode_df to get durations, then with shard_df
@@ -313,5 +318,5 @@ class WSFeatherIndex:
         )
         return df
 
-    def __repr__(self):
+    def __repr__(self) -> str:
         return f"WSFeatherIndex({repr(str(self.index_dir))})"

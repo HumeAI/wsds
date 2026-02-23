@@ -5,11 +5,14 @@ wsds index creation
 `merge_batch_indices` – merges extracted indices across multiple partitions into a single SQLite wsds index
 """
 
+from __future__ import annotations
+
 import json
 import os
 import time
 import traceback
 from pathlib import Path
+from typing import Optional
 
 import polars as pl
 
@@ -62,9 +65,9 @@ def write_index(
     shard_idx: pl.DataFrame,
     episode_idx: pl.DataFrame,
     fields: dict,
-    source_path: str | None = None,
-    vad_column: str | None = None,
-):
+    source_path: Optional[str] = None,
+    vad_column: Optional[str] = None,
+) -> None:
     """
     Write a wsds SQLite index file with shard and episode data.
 
@@ -79,7 +82,7 @@ def write_index(
     audio_duration, speech_duration = episode_idx.select("audio_duration", "speech_duration").sum().row(0)
     with AtomicFile(f"{path}/index.sqlite3") as fname:
         with WSDSIndexWriter(fname) as index:
-            metadata = {}
+            metadata: dict[str, object] = {}
             if source_path and vad_column:
                 metadata["computed_columns"] = {
                     "audio.wsds-computed": {
@@ -96,14 +99,18 @@ def write_index(
             metadata.update({"fields": fields, "audio_duration": audio_duration, "speech_duration": speech_duration})
             index.append_metadata(metadata)
 
-        conn = dict(connection=f"sqlite:///{fname}", if_table_exists="append", engine="adbc")
-        shard_idx.drop("audio_duration").write_database(table_name="shards", **conn)
-        episode_idx.with_columns(pl.col("speech_duration").fill_null(-1)).write_database(table_name="files", **conn)
+        connection_uri = f"sqlite:///{fname}"
+        shard_idx.drop("audio_duration").write_database(
+            table_name="shards", connection=connection_uri, if_table_exists="append", engine="adbc"
+        )
+        episode_idx.with_columns(pl.col("speech_duration").fill_null(-1)).write_database(
+            table_name="files", connection=connection_uri, if_table_exists="append", engine="adbc"
+        )
 
 
 def extract_batch_index(
     batch_path: Path | str, overwrite: bool = False
-) -> tuple[str, str | None, str | None, str | None]:
+) -> tuple[str, Optional[str], Optional[str], Optional[str]]:
     """
     Extract episode indices from a single batch directory.
 
@@ -128,7 +135,7 @@ def extract_batch_index(
         try:
             source_idx = pl.read_ipc(out_file, memory_map=False)
         except Exception as e:
-            return str(batch), "error reading source index:", repr(e), traceback.format_exc()
+            return str(batch), "error reading source index", repr(e), traceback.format_exc()
     else:
         if not ds_path.exists():
             return str(batch), "error: source not found", None, None
@@ -153,13 +160,15 @@ def extract_batch_index(
 
         try:
             start = time.perf_counter()
-            source_idx = source_ds.sql_select(
+            source_idx_result = source_ds.sql_select(
                 "__key__",
                 "load_duration AS audio_duration",
                 "__shard_path__",
                 "__shard_offset__ AS offset",
                 shard_subsample=1,
-            ).with_columns(
+            )
+            assert isinstance(source_idx_result, pl.DataFrame)
+            source_idx = source_idx_result.with_columns(
                 pl.col("audio_duration").cast(pl.Float32),
                 speech_duration=pl.lit(None).cast(pl.Float32()),
                 shard=pl.col("__shard_path__").str.extract(r"([^/]+).wsds$", 1),
@@ -201,14 +210,16 @@ def extract_batch_index(
 
         try:
             start = time.perf_counter()
-            vad_idx = vad_ds.sql_select(
+            vad_idx_result = vad_ds.sql_select(
                 "__key__",
                 "tend - tstart AS speech_duration",
                 "__shard_path__",
                 "__shard_offset__ AS offset",
                 shard_subsample=1,
-                shard_pipe=extract_episodes,
-            ).join(source_idx["__key__", "audio_duration"], on="__key__")
+                shard_pipe=extract_episodes,  # type: ignore[arg-type]
+            )
+            assert isinstance(vad_idx_result, pl.DataFrame)
+            vad_idx = vad_idx_result.join(source_idx["__key__", "audio_duration"], on="__key__")
             vad_idx.write_ipc(batch / "filtered_vad/episode-list.feather", compression="zstd")
 
             print(f"Extracted {len(vad_idx)} episodes from {vad_ds.dataset_root} in {time.perf_counter() - start:.1f}s")
@@ -222,7 +233,7 @@ def merge_batch_indices(
     batches: list[Path | str],
     dataset_kind: str,
     dest_path: Path | str,
-) -> tuple[str, list[tuple[str, str, str | None, str | None]]]:
+) -> tuple[str, list[tuple[str, str, Optional[str], Optional[str]]]]:
     """
     Merge episode indices from multiple batches into a single wsds index.
 
@@ -241,7 +252,7 @@ def merge_batch_indices(
 
     episode_idxs = []
     shard_idxs = []
-    errors = []
+    errors: list[tuple[str, str, Optional[str], Optional[str]]] = []
     merged_fields = {}
     size = 0
     n_shards = 0

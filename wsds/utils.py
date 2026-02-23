@@ -1,15 +1,19 @@
+from __future__ import annotations
+
 import os
 import re
 import traceback
 from concurrent.futures import ProcessPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Optional, Union
 
 import numpy as np
 import pyarrow as pa
 
 if TYPE_CHECKING:
+    import polars as pl
+
     from .ws_dataset import WSDataset
 
 
@@ -18,8 +22,8 @@ class WSShardMissingError(Exception):
     fname: str
 
     @classmethod
-    def from_s3(cls, s3_client, key, bucket, err):
-        return cls(f"{s3_client._endpoint}://{bucket}/{key} [error: {err}]")
+    def from_s3(cls, s3_client: object, key: str, bucket: str, err: object) -> WSShardMissingError:
+        return cls(f"{s3_client._endpoint}://{bucket}/{key} [error: {err}]")  # type: ignore[attr-defined]
 
 
 @dataclass
@@ -27,7 +31,7 @@ class WSShardCorruptedError(Exception):
     fname: str
 
 
-def get_columns(fname):
+def get_columns(fname: Union[str, Path]) -> list[str]:
     if isinstance(fname, Path):
         fname = str(fname)
     try:
@@ -37,14 +41,14 @@ def get_columns(fname):
     return reader.schema.names
 
 
-def find_first_shard(path):
+def find_first_shard(path: Union[str, Path]) -> Optional[Path]:
     for file in Path(path).iterdir():
         if file.suffix == ".wsds":
             return file
     return None
 
 
-def list_all_columns(ds_path, shard_name=None):
+def list_all_columns(ds_path: Union[str, Path], shard_name: Optional[str] = None) -> dict[str, list[tuple[str, str]]]:
     """Given a dataset path, return a list of all columns.
 
     If you also give a shard name it greatly speeds it up
@@ -92,7 +96,7 @@ def list_all_columns(ds_path, shard_name=None):
     return dict(sorted(cols.items()))
 
 
-def list_all_shards(dataset: str, verbose: bool = False, print_missing: bool = False):
+def list_all_shards(dataset: str, verbose: bool = False, print_missing: bool = False) -> list[tuple[str, str]]:
     shards = {}
     for column_dir in Path(dataset).iterdir():
         if not column_dir.is_dir():
@@ -136,7 +140,7 @@ def list_all_shards(dataset: str, verbose: bool = False, print_missing: bool = F
     return [("", x.replace(".wsds", "")) for x in common_shards]
 
 
-def make_key(src_file: str, segment_id: int):
+def make_key(src_file: str, segment_id: int) -> str:
     """Make a composite string key from source file name and sequential segment id.
 
     >>> make_key('20VC with Harry Stebbings/[HGF1a_ULnik] Gina Gotthilf', 1254)
@@ -147,7 +151,7 @@ def make_key(src_file: str, segment_id: int):
     return f"{src_file}_{segment_id:08d}"
 
 
-def parse_key(key: str):
+def parse_key(key: str) -> tuple[str, int]:
     """Parse a composite string key into the source file name and sequential segment id.
 
     >>> parse_key('20VC with Harry Stebbings/[HGF1a_ULnik] Gina Gotthilf_00001254')
@@ -158,7 +162,7 @@ def parse_key(key: str):
     return src_file, int(segment_id)
 
 
-def cast_types_for_storage(obj, float_cast="float32", int_cast="int32", debug=False):
+def cast_types_for_storage(obj: object, float_cast: Union[str, type] = "float32", int_cast: Union[str, type] = "int32", debug: bool = False) -> object:
     """Cast nested JSON-like objects to more resctrictive float and integer types.
 
     By default PyArrow would cast to float64 and int64, which are not optimal for storage.
@@ -169,11 +173,11 @@ def cast_types_for_storage(obj, float_cast="float32", int_cast="int32", debug=Fa
     if isinstance(int_cast, str):
         int_cast = getattr(np, int_cast)
 
-    def _cast(obj):
+    def _cast(obj: object) -> object:
         if type(obj) is float:
-            return float_cast(obj)
+            return float_cast(obj)  # type: ignore[operator]
         elif type(obj) is int:
-            return int_cast(obj)
+            return int_cast(obj)  # type: ignore[operator]
         elif type(obj) is dict:
             return {k: _cast(v) for k, v in obj.items()}
         elif type(obj) is list:
@@ -186,7 +190,7 @@ def cast_types_for_storage(obj, float_cast="float32", int_cast="int32", debug=Fa
     return _cast(obj)
 
 
-def parse_key_two_parts(key: str):
+def parse_key_two_parts(key: str) -> tuple[str, str, int]:
     """Parse a composite string key into the source file name, segmentation kind and sequential segment id.
 
     >>> parse_key('20VC with Harry Stebbings/[HGF1a_ULnik] Gina Gotthilf_rawvad_00001254')
@@ -201,16 +205,14 @@ magic_check = re.compile("([*?[])")
 magic_check_bytes = re.compile(b"([*?[])")
 
 
-def has_magic(s):
+def has_magic(s: Union[str, bytes]) -> bool:
     """Does the given input contain any shell globbing characters?"""
     if isinstance(s, bytes):
-        match = magic_check_bytes.search(s)
-    else:
-        match = magic_check.search(s)
-    return match is not None
+        return magic_check_bytes.search(s) is not None
+    return magic_check.search(s) is not None
 
 
-def scan_ipc(path: str | Path, *args, glob=True, **kwargs):
+def scan_ipc(path: Union[str, Path], *args: object, glob: bool = True, **kwargs: object) -> pl.LazyFrame:
     """Like pl.scan_ipc but with a workaround to disable globbing.
 
     See also: https://github.com/pola-rs/polars/issues/24608"""
@@ -218,24 +220,24 @@ def scan_ipc(path: str | Path, *args, glob=True, **kwargs):
 
     path = str(path)
     if glob or not has_magic(path):
-        return pl.scan_ipc(path, *args, **kwargs)
+        return pl.scan_ipc(path, *args, **kwargs)  # type: ignore[arg-type]
     else:
         # we open the file manually since scan_ipc always does globbing which does not work on files with square brackets in their names
         f = open(path, "rb")
         # we will leak the file descriptor in this case but there is not a lot we can do about it (GC will close it eventually)
-        return pl.scan_ipc(f, *args, **kwargs)
+        return pl.scan_ipc(f, *args, **kwargs)  # type: ignore[arg-type]
 
 
 def is_notebook() -> bool:
     """Detect if running in a Jupyter notebook vs terminal IPython or plain Python."""
     try:
-        shell = get_ipython().__class__.__name__
+        shell = get_ipython().__class__.__name__  # type: ignore[name-defined]
         return shell == "ZMQInteractiveShell"
     except NameError:
         return False
 
 
-def format_duration(duration):
+def format_duration(duration: float) -> str:
     """Formats a duration in seconds as hours (or minutes or kilo-hours)."""
     hours = duration / 3600
     if hours > 1000000:
@@ -248,7 +250,7 @@ def format_duration(duration):
         return f"{hours:.2f} hours"
 
 
-def preload_shard(shard_fname):
+def preload_shard(shard_fname: Union[str, Path]) -> bool:
     try:
         with open(shard_fname, "rb") as f:
             f.seek(-6, os.SEEK_END)
@@ -265,8 +267,8 @@ def preload_shard(shard_fname):
 
 
 def validate_shards(
-    dataset: "WSDataset", shards: list[tuple[str, str]], column_dirs: list[str], tail_bytes: int = 10240
-):
+    dataset: WSDataset, shards: list[tuple[str, str]], column_dirs: list[str], tail_bytes: int = 10240
+) -> list[tuple[tuple[str, str], bool]]:
     """Prefetch and validate shard files for the given shards and column dirs.
 
     Uses a ProcessPoolExecutor to load them concurrently, which helps with network filesystems

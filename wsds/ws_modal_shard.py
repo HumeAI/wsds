@@ -1,9 +1,11 @@
+from __future__ import annotations
+
 import os
 import typing
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any, Optional
 
 from .pupyarrow.file_reader import ModalFileReader
-from .pupyarrow.pupyarrow import FeatherFile, LazyBinaryArray
+from .pupyarrow.pupyarrow import FeatherFile, LazyBinaryArray, RecordBatch
 from .ws_decode import decode_sample
 from .ws_shard import WSShardInterface
 
@@ -18,7 +20,7 @@ class WSModalShard(WSShardInterface):
     that only the IPC footer and the specific batch(es) needed are fetched,
     rather than downloading the entire shard file."""
 
-    def __init__(self, dataset: "WSDataset", volume_name: str, path: str, shard_name=None):
+    def __init__(self, dataset: WSDataset, volume_name: str, path: str, shard_name: Optional[tuple[str, str]] = None) -> None:
         self.dataset = dataset
         self.shard_name = shard_name
         self.volume_name = volume_name
@@ -29,12 +31,12 @@ class WSModalShard(WSShardInterface):
         self.batch_size = int(self._feather.schema.custom_metadata["batch_size"])
 
         # cache
-        self._start = None
-        self._end = None
-        self._batch = None
+        self._start: Optional[int] = None
+        self._end: Optional[int] = None
+        self._batch: Optional[RecordBatch] = None
 
     @classmethod
-    def from_link(cls, link, dataset, shard_ref):
+    def from_link(cls, link: dict[str, Any], dataset: WSDataset, shard_ref: tuple[str, str]) -> WSModalShard:
         """Create a Modal shard from a link spec.
 
         The volume path is built as ``<prefix>/<partition>/<column_dir>/<shard>.wsds``.
@@ -52,15 +54,15 @@ class WSModalShard(WSShardInterface):
         return cls(dataset, link["volume_name"], path, shard_name=shard_ref)
 
     @classmethod
-    def get_columns(cls, link, dataset):
+    def get_columns(cls, link: dict[str, Any], dataset: WSDataset) -> Optional[dict[str, str]]:
         """Return columns provided by this Modal link."""
         if "columns" in link:
             return {col: col for col in link["columns"]}
         columns = cls._discover_columns(link)
-        return {col: col for col in columns if col != "__key__"}
+        return {col: col for col in columns if col is not None and col != "__key__"}
 
     @classmethod
-    def _discover_columns(cls, link):
+    def _discover_columns(cls, link: dict[str, Any]) -> list[Optional[str]]:
         """Read one shard's footer from the Modal Volume to discover column names."""
         import modal
 
@@ -79,7 +81,7 @@ class WSModalShard(WSShardInterface):
         return f"modal://{self.volume_name}/{self.path}"
 
     def get_sample(self, column: str, offset: int) -> typing.Any:
-        if self._batch is None or offset < self._start or offset >= self._end:
+        if self._batch is None or self._start is None or self._end is None or offset < self._start or offset >= self._end:
             i = offset // self.batch_size
             if i >= self._feather.num_record_batches:
                 raise IndexError(f"{offset} is out of range for shard {self._modal_path()}")
@@ -100,7 +102,7 @@ class WSModalShard(WSShardInterface):
             col = self._batch.column(column)
         except KeyError:
             raise KeyError(f"column {column} not found in shard {self._modal_path()}")
-        data = col[j]
+        data = col[j]  # type: ignore[index]
         try:
             if isinstance(col, LazyBinaryArray):
                 data._optimal_read_size = 2 * 1024 * 1024
@@ -109,7 +111,7 @@ class WSModalShard(WSShardInterface):
             raise ValueError(f"Failed to decode column {column} in shard {self._modal_path()} (offset {offset}): {e}")
         return data
 
-    def __repr__(self):
+    def __repr__(self) -> str:
         r = f"WSModalShard('{self._modal_path()}')"
         if self._batch:
             r += f" # cached_region = [{self._start}, {self._end}]"

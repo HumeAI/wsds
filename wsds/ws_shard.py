@@ -1,8 +1,10 @@
+from __future__ import annotations
+
 import io
 import re
-import typing
 from dataclasses import dataclass
-from typing import TYPE_CHECKING
+from pathlib import Path
+from typing import TYPE_CHECKING, Any, Optional, cast
 
 import pyarrow as pa
 
@@ -16,11 +18,11 @@ if TYPE_CHECKING:
 
 
 class WSShardInterface:
-    shard_ref: (str, str)
+    shard_ref: Optional[tuple[str, str]]
     """Used by WSDataset to invalidate cached shards."""
 
     @classmethod
-    def get_columns(cls, link: dict, dataset: "WSDataset") -> dict[str, str] | None:
+    def get_columns(cls, link: dict[str, Any], dataset: "WSDataset") -> Optional[dict[str, str]]:
         """Return columns this link provides: {column_name: column_name}.
 
         Override this to provide multiple columns from a single link.
@@ -28,7 +30,7 @@ class WSShardInterface:
         """
         return None
 
-    def get_sample(self, column: str, offset: int) -> typing.Any:
+    def get_sample(self, column: str, offset: int) -> object:
         raise NotImplementedError
 
 
@@ -37,12 +39,7 @@ class WSShard(WSShardInterface):
 
     Caches one batch worth of data for efficient sequential access to samples."""
 
-    fname: str
-    reader: pa.RecordBatchFileReader
-    batch_size: int
-    dataset: "WSDataset"
-
-    def __init__(self, dataset, fname, shard_ref=None):
+    def __init__(self, dataset: WSDataset, fname: str | Path, shard_ref: Optional[tuple[str, str]] = None) -> None:
         self.dataset = dataset
         self.shard_ref = shard_ref
         self.fname = fname
@@ -53,17 +50,17 @@ class WSShard(WSShardInterface):
             else:
                 self.reader = pa.RecordBatchFileReader(pa.memory_map(str(fname)))
         except FileNotFoundError:
-            raise WSShardMissingError(fname) from None
+            raise WSShardMissingError(str(fname)) from None
 
         self.batch_size = int(self.reader.schema.metadata[b"batch_size"])
 
         # cache
-        self._start = None
-        self._end = None
-        self._data = None
+        self._start: Optional[int] = None
+        self._end: Optional[int] = None
+        self._data: Optional[pa.RecordBatch] = None
 
-    def get_sample(self, column: str, offset: int) -> typing.Any:
-        if self._data is None or offset < self._start or offset >= self._end:
+    def get_sample(self, column: str, offset: int) -> object:
+        if self._data is None or self._start is None or self._end is None or offset < self._start or offset >= self._end:
             i = offset // self.batch_size
             if i >= self.reader.num_record_batches:
                 raise IndexError(f"{offset} is out of range for shard {self.fname}")
@@ -90,7 +87,7 @@ class WSShard(WSShardInterface):
         except Exception as e:
             raise ValueError(f"Failed to decode column {column} in shard {self.fname} (offset {offset}): {e}")
 
-    def __repr__(self):
+    def __repr__(self) -> str:
         r = f"WSShard({repr(self.fname)})"
         if self._data:
             r += f" # cached_region = [{self._start, self._end}]"
@@ -103,38 +100,42 @@ class WSSourceAudioShard(WSShardInterface):
 
     It is used via the `WSDataset.add_computed` method or the `.wsds-link` file mechanism."""
 
-    shard_ref: (str, str)
-    source_dataset: "WSDataset"  # noqa: F821
-    derived_dataset: "WSDataset"  # noqa: F821
+    shard_ref: tuple[str, str]
+    source_dataset: WSDataset
+    derived_dataset: WSDataset
     vad_column: str
 
     # cache
-    _source_file_name: str = None
-    _source_sample: WSSample = None
-    _source_reader: AudioReader = None
+    _source_file_name: Optional[str] = None
+    _source_sample: Optional[WSSample] = None
+    _source_reader: Optional[AudioReader] = None
 
     @classmethod
-    def from_link(cls, link, dataset, shard_ref):
+    def from_link(cls, link: dict[str, Any], dataset: WSDataset, shard_ref: tuple[str, str]) -> WSSourceAudioShard:
         source_dataset = dataset.get_linked_dataset(link["dataset_dir"])
         return cls(shard_ref, source_dataset, dataset, link["vad_column"])
 
-    def get_timestamps(self, segment_offset):
-        return self._source_sample[self.vad_column][segment_offset]
+    def get_timestamps(self, segment_offset: int) -> object:
+        assert self._source_sample is not None
+        timestamps: Any = self._source_sample[self.vad_column]
+        return timestamps[segment_offset]
 
-    def get_sample(self, _column, offset):
-        file_name, segment_offset = self.derived_dataset.parse_key(
-            WSSample(self.derived_dataset, self.shard_ref, offset)["__key__"]
-        )
+    def get_sample(self, _column: str, offset: int) -> object:
+        key = cast(str, WSSample(self.derived_dataset, self.shard_ref, offset)["__key__"])
+        file_name, segment_offset = self.derived_dataset.parse_key(key)
 
         if self._source_file_name != file_name:
             self._source_sample = self.source_dataset[file_name]
+            assert self._source_sample is not None
             try:
-                self._source_reader = self._source_sample.get_audio()
+                self._source_reader = self._source_sample.get_audio()  # type: ignore[assignment]
             except KeyError:
                 raise WSShardMissingError("no audio shards found")
             self._source_file_name = file_name
 
-        tstart, tend = self.get_timestamps(segment_offset)
+        assert self._source_reader is not None
+        timestamps: Any = self.get_timestamps(segment_offset)
+        tstart, tend = timestamps
         return WSAudio(self._source_reader, tstart, tend)
 
 
@@ -142,13 +143,15 @@ class WSYoutubeVideoShard(WSSourceAudioShard):
     re_pattern: re.Pattern[str]
 
     @classmethod
-    def from_link(cls, link, dataset, shard_ref):
-        self = super().from_link(link, dataset, shard_ref)
+    def from_link(cls, link: dict[str, Any], dataset: WSDataset, shard_ref: tuple[str, str]) -> WSYoutubeVideoShard:
+        self = cast(WSYoutubeVideoShard, super().from_link(link, dataset, shard_ref))
         self.re_pattern = re.compile(link["youtube_id_regexp"])
         return self
 
-    def get_sample(self, _column, offset):
+    def get_sample(self, _column: str, offset: int) -> object:
         sample = super().get_sample(_column, offset)
+        assert isinstance(sample, WSAudio)
+        assert self._source_file_name is not None
         match = self.re_pattern.search(self._source_file_name)
         if not match:
             raise ValueError(
@@ -168,17 +171,17 @@ class WSSourceLink(WSShardInterface):
     {"dataset_dir": "../source", "loader": ["wsds.ws_shard", "WSSourceLink"], "key_prefix": "source."}
     """
 
-    shard_ref: (str, str)
-    source_dataset: "WSDataset"
-    derived_dataset: "WSDataset"
+    shard_ref: tuple[str, str]
+    source_dataset: WSDataset
+    derived_dataset: WSDataset
     key_prefix: str
 
     # cache
-    _source_file_name: str = None
-    _source_sample: WSSample = None
+    _source_file_name: Optional[str] = None
+    _source_sample: Optional[WSSample] = None
 
     @classmethod
-    def get_columns(cls, link, dataset):
+    def get_columns(cls, link: dict[str, Any], dataset: WSDataset) -> dict[str, str]:
         """Return all source dataset fields with the configured prefix."""
         source_dataset = dataset.get_linked_dataset(link["dataset_dir"])
         key_prefix = link.get("key_prefix", "source.")
@@ -191,14 +194,14 @@ class WSSourceLink(WSShardInterface):
         return columns
 
     @classmethod
-    def from_link(cls, link, dataset, shard_ref):
+    def from_link(cls, link: dict[str, Any], dataset: WSDataset, shard_ref: tuple[str, str]) -> WSSourceLink:
         source_dataset = dataset.get_linked_dataset(link["dataset_dir"])
         key_prefix = link.get("key_prefix", "source.")
         return cls(shard_ref, source_dataset, dataset, key_prefix)
 
-    def get_sample(self, column: str, offset: int):
+    def get_sample(self, column: str, offset: int) -> object:
         # Parse the derived dataset's key to get the source file name
-        derived_key = WSSample(self.derived_dataset, self.shard_ref, offset)["__key__"]
+        derived_key = cast(str, WSSample(self.derived_dataset, self.shard_ref, offset)["__key__"])
         file_name, _segment_offset = self.derived_dataset.parse_key(derived_key)
 
         if self._source_file_name != file_name:
@@ -211,6 +214,7 @@ class WSSourceLink(WSShardInterface):
         else:
             source_field = column
 
+        assert self._source_sample is not None
         return self._source_sample[source_field]
 
 
@@ -219,11 +223,11 @@ class WSYouTubeVideo:
     id: str
     tstart: float
 
-    def get_url(self):
+    def get_url(self) -> str:
         return f"https://www.youtube.com/embed/{self.id}?start={int(self.tstart)}"
 
-    def _repr_html_(self):
+    def _repr_html_(self) -> str:
         return f'<iframe width="560" height="315" src="{self.get_url()}" title="YouTube video player" frameborder="0" allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share" referrerpolicy="strict-origin-when-cross-origin" allowfullscreen></iframe>'
 
-    def __repr__(self):
+    def __repr__(self) -> str:
         return f'WSYouTubeVideo(video_url="{self.get_url()}")'

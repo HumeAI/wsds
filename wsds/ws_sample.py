@@ -1,5 +1,8 @@
+from __future__ import annotations
+
+from collections.abc import Callable, Collection, Iterator
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Optional
 
 from .utils import WSShardMissingError, validate_shards
 from .ws_decode import get_audio as _get_audio
@@ -11,26 +14,26 @@ if TYPE_CHECKING:
 @dataclass(frozen=True)
 class WSSample:
     dataset: "WSDataset"
-    shard_ref: str
+    shard_ref: tuple[str, str]
     offset: int
-    overrides: dict = field(default_factory=dict)
+    overrides: dict[str, object] = field(default_factory=dict)
     # Key verification state (mutable containers to work with frozen dataclass)
-    _verified_column_dirs: set = field(default_factory=set, repr=False, compare=False)
-    _reference_key: list = field(default_factory=list, repr=False, compare=False)
+    _verified_column_dirs: set[str] = field(default_factory=set, repr=False, compare=False)
+    _reference_key: list[tuple[str, str]] = field(default_factory=list, repr=False, compare=False)
 
-    def get_audio(self, audio_columns=None):
+    def get_audio(self, audio_columns: Optional[Collection[str]] = None) -> object:
         return _get_audio(self, audio_columns)
 
-    def keys(self):
+    def keys(self) -> set[str]:
         return self.dataset.fields.keys() | (self.overrides.keys() if self.overrides else set())
 
-    def items(self):
+    def items(self) -> Iterator[tuple[str, object]]:
         yield from ((k, self[k]) for k in self.keys())
 
-    def values(self):
+    def values(self) -> Iterator[object]:
         yield from (v for _, v in self.items())
 
-    def _verify_key_for_field(self, field: str):
+    def _verify_key_for_field(self, field: str) -> None:
         """Verify __key__ in this field's column_dir matches the reference key."""
         value = self.dataset.fields.get(field)
         if value is None:
@@ -47,7 +50,7 @@ class WSSample:
 
         # Get __key__ from this column_dir
         try:
-            key = self.dataset.get_shard(column_dir, self.shard_ref).get_sample("__key__", self.offset)
+            key = str(self.dataset.get_shard(column_dir, self.shard_ref).get_sample("__key__", self.offset))
         except (WSShardMissingError, KeyError):
             # Can't verify if shard or key is missing
             self._verified_column_dirs.add(column_dir)
@@ -66,35 +69,35 @@ class WSSample:
 
         self._verified_column_dirs.add(column_dir)
 
-    def __getitem__(self, field):
+    def __getitem__(self, field: str) -> object:
         if field in self.overrides:
             return self.overrides[field]
         self._verify_key_for_field(field)
         return self.dataset.get_sample(self.shard_ref, field, self.offset)
 
-    def __setitem__(self, field, value):
+    def __setitem__(self, field: str, value: object) -> None:
         self.overrides[field] = value
 
-    def get_one_of(self, *fields, default=None):
+    def get_one_of(self, *fields: str, default: object = None) -> object:
         for f in fields:
             if f in self:
                 return self[f]
         return default
 
-    def get(self, field: str, default=None):
+    def get(self, field: str, default: object = None) -> object:
         return self[field] if field in self else default
 
-    def __contains__(self, field):
+    def __contains__(self, field: str) -> bool:
         return field in self.overrides or field in self.dataset.fields.keys()
 
-    def __repr_field__(self, field, repr=repr):
+    def __repr_field__(self, field: str, repr: Callable[..., str] = repr) -> str:
         try:
             v = self[field]
             if hasattr(v, "shape"):
                 if v.shape:
-                    if v.size > 10:
+                    if v.size > 10:  # type: ignore[attr-defined]
                         trunc_repr = " ".join(repr(v).split(" ")[:10])
-                        v = f"{trunc_repr}…], shape={repr(v.shape)}, dtype={v.dtype})"
+                        v = f"{trunc_repr}…], shape={repr(v.shape)}, dtype={v.dtype})"  # type: ignore[attr-defined]
                     else:
                         v = repr(v)
                 else:
@@ -109,7 +112,7 @@ class WSSample:
         except KeyError as err:
             return f"<error: {err.args[0]}>"
 
-    def __repr__(self, repr=repr):
+    def __repr__(self, repr: Callable[..., str] = repr) -> str:
         r = [
             f"WSSample({self.dataset.__repr__()}, shard_ref={repr(self.shard_ref)}, offset={repr(self.offset)}, fields={'{'}"
         ]
@@ -118,7 +121,7 @@ class WSSample:
         arrays = []
 
         # Group columns by column directory
-        columns_by_dir = {}
+        columns_by_dir: dict[str, list[str]] = {}
         for k in self.keys():
             if k in self.overrides:
                 column_dir = "__overrides__"
@@ -167,7 +170,7 @@ class WSSample:
                 else:
                     other.append(k)
 
-        def print_keys(keys, max_keys=None):
+        def print_keys(keys: list[str], max_keys: Optional[int] = None) -> None:
             for k in keys[:max_keys] if max_keys else keys:
                 r.append(f"  '{k}': {self.__repr_field__(k, repr=repr)},")
 
@@ -215,14 +218,14 @@ class WSSample:
         r.append("})\n")
         return "\n".join(r)
 
-    def _display_(self):
+    def _display_(self) -> object:
         import random
 
         import marimo
 
         special = {}
 
-        def marimo_repr(x):
+        def marimo_repr(x: object) -> str:
             if hasattr(x, "_display_"):
                 rand_str = "__%030x__" % random.getrandbits(60)
                 special[rand_str] = x._display_().text
@@ -230,12 +233,12 @@ class WSSample:
             else:
                 return repr(x)
 
-        html = marimo.md(f"```python\n{self.__repr__(repr=marimo_repr)}\n```").text
+        html = marimo.md(f"```python\n{self.__repr__(repr=marimo_repr)}\n```").text  # type: ignore[call-arg]
         for k, v in special.items():
             html = html.replace(k, v)
         return marimo.Html(html)
 
-    def _ipython_display_(self):
+    def _ipython_display_(self) -> None:
         from .utils import is_notebook
 
         if not is_notebook():
@@ -248,7 +251,7 @@ class WSSample:
 
         special = {}
 
-        def ipython_repr(x):
+        def ipython_repr(x: object) -> str:
             if hasattr(x, "_repr_html_"):
                 rand_str = "__%030x__" % random.getrandbits(60)
                 special[rand_str] = x._repr_html_()
@@ -259,7 +262,7 @@ class WSSample:
         # Jupyter Markdown renders client-side so we cannot use the same trick as Marimo
         html = (
             '<pre style="font-family: monospace; white-space: pre-wrap;">'
-            + self.__repr__(repr=ipython_repr).replace("<", "&lt;").replace(">", "&gt;")
+            + self.__repr__(repr=ipython_repr).replace("<", "&lt;").replace(">", "&gt;")  # type: ignore[call-arg]
             + "</pre>"
         )
 

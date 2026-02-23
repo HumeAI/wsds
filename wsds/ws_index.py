@@ -1,7 +1,13 @@
+from __future__ import annotations
+
 import functools
 import json
 import sqlite3
 from pathlib import Path
+from types import TracebackType
+from typing import Optional, Union
+
+import polars as pl
 
 from . import utils
 
@@ -9,11 +15,11 @@ from . import utils
 # TODO:
 # - add support for dataset splits (split on file-level or segment-level?)
 class WSDSIndexWriter:
-    def __init__(self, fname):
+    def __init__(self, fname: Union[str, Path]) -> None:
         self.fname = Path(fname)
         self.global_offset = 0
 
-    def __enter__(self):
+    def __enter__(self) -> WSDSIndexWriter:
         self.fname.unlink(missing_ok=True)
         self.conn = sqlite3.connect(self.fname)
 
@@ -51,19 +57,19 @@ class WSDSIndexWriter:
 
         return self
 
-    def append_metadata(self, metadata):
+    def append_metadata(self, metadata: dict[str, object]) -> None:
         self.conn.execute(
             "INSERT INTO metadata (value) VALUES (?);",
             (json.dumps(metadata),),
         )
 
-    def append(self, s):
+    def append(self, s: dict[str, object]) -> None:
         # we ensure plain Python types for everything passed in, otherwise sqlite will silently save invalid data
         shard_id = self.conn.execute(
             "INSERT INTO shards (shard, n_samples, global_offset, partition) VALUES (?, ?, ?, ?);",
-            (str(s["shard_name"]), int(s["n_samples"]), self.global_offset, str(s["partition"])),
+            (str(s["shard_name"]), int(s["n_samples"]), self.global_offset, str(s["partition"])),  # type: ignore[call-overload]
         ).lastrowid
-        for name, offset, audio_duration, speech_duration in s["index"]:
+        for name, offset, audio_duration, speech_duration in s["index"]:  # type: ignore[union-attr, attr-defined]
             try:
                 self.conn.execute(
                     "INSERT INTO files (name, shard_id, offset, audio_duration, speech_duration) VALUES (?, ?, ?, ?, ?);",
@@ -88,16 +94,21 @@ class WSDSIndexWriter:
                     for row in self.conn.execute("SELECT * FROM files WHERE shard_id == ?", (shard_id,)):
                         print(row)
                     raise
-        self.global_offset += s["n_samples"]
+        self.global_offset += s["n_samples"]  # type: ignore[operator]
 
-    def __exit__(self, exc_type, exc_value, traceback):
+    def __exit__(
+        self,
+        exc_type: Optional[type[BaseException]],
+        exc_value: Optional[BaseException],
+        traceback: Optional[TracebackType],
+    ) -> None:
         if exc_type is None:
             self.conn.commit()
             self.conn.close()
 
 
 class WSIndex:
-    def __init__(self, fname: str):
+    def __init__(self, fname: str) -> None:
         self.fname = fname
         if not Path(fname).exists():
             raise ValueError(f"WSIndex not found: {fname}")
@@ -113,31 +124,31 @@ class WSIndex:
         self.has_dataset_path = "dataset_path" in columns
 
     @functools.cached_property
-    def n_shards(self):
-        return self.conn.execute("SELECT COUNT(*) FROM shards;").fetchone()[0]
+    def n_shards(self) -> int:
+        return self.conn.execute("SELECT COUNT(*) FROM shards;").fetchone()[0]  # type: ignore[index]
 
     @functools.cached_property
-    def n_files(self):
-        return self.conn.execute("SELECT COUNT(*) FROM files;").fetchone()[0]
+    def n_files(self) -> int:
+        return self.conn.execute("SELECT COUNT(*) FROM files;").fetchone()[0]  # type: ignore[index]
 
     @functools.cached_property
-    def n_samples(self):
-        return self.conn.execute("SELECT SUM(n_samples) FROM shards;").fetchone()[0]
+    def n_samples(self) -> int:
+        return self.conn.execute("SELECT SUM(n_samples) FROM shards;").fetchone()[0]  # type: ignore[index]
 
     @functools.cached_property
-    def audio_duration(self):
+    def audio_duration(self) -> Optional[float]:
         if "audio_duration" in self.metadata:
-            return self.metadata["audio_duration"]
-        return self.conn.execute("SELECT SUM(audio_duration) FROM files;").fetchone()[0]
+            return self.metadata["audio_duration"]  # type: ignore[return-value]
+        return self.conn.execute("SELECT SUM(audio_duration) FROM files;").fetchone()[0]  # type: ignore[index]
 
     @functools.cached_property
-    def speech_duration(self):
+    def speech_duration(self) -> Optional[float]:
         if "speech_duration" in self.metadata:
-            return self.metadata["speech_duration"]
-        return self.conn.execute("SELECT SUM(speech_duration) FROM files;").fetchone()[0]
+            return self.metadata["speech_duration"]  # type: ignore[return-value]
+        return self.conn.execute("SELECT SUM(speech_duration) FROM files;").fetchone()[0]  # type: ignore[index]
 
     @functools.cached_property
-    def _partition_col(self):
+    def _partition_col(self) -> str:
         """SQL expression for the partition column, adapting to old/new index formats."""
         if self.has_partition:
             return "s.partition"
@@ -145,10 +156,10 @@ class WSIndex:
             return "s.dataset_path"
         return "''"
 
-    def shards(self):
+    def shards(self) -> sqlite3.Cursor:
         return self.conn.execute(f"SELECT {self._partition_col}, shard FROM shards AS s ORDER BY rowid;")
 
-    def lookup_by_index(self, index: int):
+    def lookup_by_index(self, index: int) -> Optional[tuple[str, str, int]]:
         """Look up a sample by global index. Returns (partition, shard_name, local_offset) or None."""
         r = self.conn.execute(
             f"SELECT s.shard, s.global_offset, {self._partition_col} FROM shards AS s"
@@ -161,7 +172,7 @@ class WSIndex:
         local_offset = index - shard_global_offset
         return partition, shard_name, local_offset
 
-    def lookup_by_key(self, file_name: str, offset_of_key_wrt_file: int):
+    def lookup_by_key(self, file_name: str, offset_of_key_wrt_file: int) -> Optional[tuple[str, str, int, int]]:
         """Look up a sample by file name and offset within file.
         Returns (partition, shard_name, local_offset, global_offset) or None."""
         r = self.conn.execute(
@@ -176,7 +187,7 @@ class WSIndex:
         global_offset = shard_global_offset + local_offset
         return partition, shard_name, local_offset, global_offset
 
-    def _query_shard(self, columns, shard_ref):
+    def _query_shard(self, columns: str, shard_ref: tuple[str, str]) -> Optional[tuple[object, ...]]:
         """Query shard table columns for a given (partition, shard_name) ref."""
         partition, shard_name = shard_ref
         if self.has_partition or self.has_dataset_path:
@@ -189,23 +200,21 @@ class WSIndex:
                 f"SELECT {columns} FROM shards WHERE shard = ?", (shard_name,)
             ).fetchone()
 
-    def shard_n_samples(self, shard_ref):
+    def shard_n_samples(self, shard_ref: tuple[str, str]) -> int:
         """Return the number of samples in a shard, given a (partition, shard_name) ref."""
         r = self._query_shard("n_samples", shard_ref)
         if r is None:
             raise IndexError(f"Shard not found: {shard_ref}")
-        return r[0]
+        return r[0]  # type: ignore[return-value]
 
-    def shard_global_offset(self, shard_ref):
+    def shard_global_offset(self, shard_ref: tuple[str, str]) -> int:
         """Return the global offset of a shard, given a (partition, shard_name) ref."""
         r = self._query_shard("global_offset", shard_ref)
         if r is None:
             raise IndexError(f"Shard not found: {shard_ref}")
-        return r[0]
+        return r[0]  # type: ignore[return-value]
 
-    def dataframe(self):
-        import polars as pl
-
+    def dataframe(self) -> pl.DataFrame:
         df = pl.read_database_uri(
             """
             SELECT f.name, audio_duration, speech_duration, s.shard, s.n_samples
@@ -216,8 +225,8 @@ class WSIndex:
         return df
 
     @functools.cached_property
-    def metadata(self):
-        metadata = {}
+    def metadata(self) -> dict[str, object]:
+        metadata: dict[str, object] = {}
         try:
             for (metadata_chunk,) in self.conn.execute("SELECT value FROM metadata;"):
                 metadata.update(json.loads(metadata_chunk))
@@ -226,8 +235,8 @@ class WSIndex:
                 raise
         return metadata
 
-    def query(self, query, *args):
+    def query(self, query: str, *args: object) -> sqlite3.Cursor:
         return self.conn.execute(query, args)
 
-    def __repr__(self):
+    def __repr__(self) -> str:
         return f"WSIndex({repr(self.fname)})"

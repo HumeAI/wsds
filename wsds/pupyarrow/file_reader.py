@@ -4,7 +4,7 @@ import os
 import threading
 import time
 from pathlib import Path
-from typing import BinaryIO
+from typing import Any, BinaryIO, Optional, Union
 
 BLOCK_SIZE = 16384  # 16kB minimum read size
 
@@ -81,14 +81,14 @@ class FileReader:
         """Read the last n bytes of the file. May return fewer if file is smaller."""
         raise NotImplementedError
 
-    def close(self):
+    def close(self) -> None:
         pass
 
 
 class LocalFileReader(FileReader):
     """FileReader backed by a local file."""
 
-    def __init__(self, path_or_file: str | Path | BinaryIO, *, verbose: bool = False):
+    def __init__(self, path_or_file: Union[str, Path, BinaryIO], *, verbose: bool = False):
         super().__init__(verbose=verbose)
         if isinstance(path_or_file, (str, Path)):
             self._file: BinaryIO = open(path_or_file, "rb")
@@ -105,7 +105,7 @@ class LocalFileReader(FileReader):
         self._file.seek(-n, os.SEEK_END)
         return self._file.read(n)
 
-    def close(self):
+    def close(self) -> None:
         if self._owns_file:
             self._file.close()
 
@@ -113,7 +113,7 @@ class LocalFileReader(FileReader):
 class S3FileReader(FileReader):
     """FileReader backed by S3 range requests via boto3."""
 
-    def __init__(self, s3_client, bucket: str, key: str, *, verbose: bool = False):
+    def __init__(self, s3_client: Any, bucket: str, key: str, *, verbose: bool = False):
         super().__init__(verbose=verbose)
         self._client = s3_client
         self._bucket = bucket
@@ -137,27 +137,27 @@ class _ModalEventLoop:
     bound to a single loop, and callers on the main thread (or Jupyter,
     or another loop) are never blocked by "loop already running" errors."""
 
-    def __init__(self):
+    def __init__(self) -> None:
         import asyncio
 
         self._loop = asyncio.new_event_loop()
         self._thread = threading.Thread(target=self._loop.run_forever, daemon=True)
         self._thread.start()
 
-    def run(self, coro):
+    def run(self, coro: Any) -> Any:
         """Submit *coro* to the background loop and block until it completes."""
         import asyncio
 
         future = asyncio.run_coroutine_threadsafe(coro, self._loop)
         return future.result()
 
-    def close(self):
+    def close(self) -> None:
         self._loop.call_soon_threadsafe(self._loop.stop)
         self._thread.join()
 
 
 # Module-level singleton — created on first use.
-_modal_loop: _ModalEventLoop | None = None
+_modal_loop: Optional[_ModalEventLoop] = None
 _modal_loop_lock = threading.Lock()
 
 
@@ -181,11 +181,11 @@ class ModalFileReader(FileReader):
     ``_ModalEventLoop``) so it works regardless of whether the caller already
     has a running loop (Jupyter, Modal synchronizer, etc.)."""
 
-    def __init__(self, vol, path: str, *, verbose: bool = False):
+    def __init__(self, vol: Any, path: str, *, verbose: bool = False):
         super().__init__(verbose=verbose)
         self._vol = vol
         self._path = path
-        self._size: int | None = None
+        self._size: Optional[int] = None
         self._loop = _get_modal_loop()
 
     @classmethod
@@ -197,14 +197,14 @@ class ModalFileReader(FileReader):
         return reader
 
     @staticmethod
-    async def _hydrate(volume_name: str):
+    async def _hydrate(volume_name: str) -> Any:
         from modal.volume import _Volume
 
         vol = _Volume.from_name(volume_name)
         await vol.hydrate()
         return vol
 
-    async def _get_range(self, start: int, length: int):
+    async def _get_range(self, start: int, length: int) -> Any:
         from modal_proto import api_pb2
 
         req = api_pb2.VolumeGetFile2Request(
@@ -215,9 +215,9 @@ class ModalFileReader(FileReader):
         )
         return await self._vol._client.stub.VolumeGetFile2(req)
 
-    def _fetch_urls(self, resp) -> bytes:
+    def _fetch_urls(self, resp: Any) -> bytes:
         """Download presigned block URLs and concatenate the bytes."""
-        import requests
+        import requests  # type: ignore[import-untyped]
 
         chunks = []
         for url in resp.get_urls:

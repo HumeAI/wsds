@@ -1,10 +1,15 @@
+from __future__ import annotations
+
 import importlib
 import json
 import os
 import random
 import sys
+import types
 from collections import defaultdict
+from collections.abc import Callable, Generator
 from pathlib import Path
+from typing import Optional, Union
 
 import polars as pl
 
@@ -19,7 +24,7 @@ from .utils import (
 )
 from .ws_index import WSIndex
 from .ws_sample import WSSample
-from .ws_shard import WSShard
+from .ws_shard import WSShard, WSShardInterface
 
 
 class WSDataset:
@@ -45,22 +50,23 @@ class WSDataset:
 
     dataset_root: Path
     """Path to the dataset root directory."""
-    fields: dict
+    fields: dict[str, list[tuple[str, str]]]
     """List of fields available for each sample."""
-    computed_columns: dict
+    computed_columns: dict[str, object]
     """List of computed columns (e.g. the source audio or video link). @private"""
 
     def __init__(
         self,
-        dataset_root: str | Path,
+        dataset_root: Union[str, Path],
         include_in_progress: bool = True,
-        key_folder: str | None = None,
+        key_folder: Optional[str] = None,
         disable_memory_map: bool = False,
         ignore_index: bool = False,
-        rng: random.Random | int | None = None,
-    ):
+        rng: Optional[Union[random.Random, int]] = None,
+    ) -> None:
         self.dataset_root = self._resolve_path(dataset_root)
 
+        self.rng: Union[random.Random, types.ModuleType]
         if isinstance(rng, int):
             self.rng = random.Random(rng)
         elif rng is not None:
@@ -73,25 +79,24 @@ class WSDataset:
         if key_folder is not None:
             print("NOTE: key_folder is deprecated and key folder is selected automatically")
 
-        self.index = None
+        self.index: Optional[WSIndex] = None
         self.segmented = False
         self.disable_memory_map = disable_memory_map
+        meta: dict[str, object] = {}
         index_file = self.dataset_root / "index.sqlite3"
         if not ignore_index and index_file.exists():
-            self.index = WSIndex(index_file)
+            self.index = WSIndex(str(index_file))
             meta = self.index.metadata
-            self.segmented = meta.get("segmented", False)
-        else:
-            meta = {}
+            self.segmented = bool(meta.get("segmented", False))
 
         if "fields" in meta:
-            self.fields = meta["fields"]
+            self.fields = meta["fields"]  # type: ignore[assignment]
         else:
             partition, shard_name = next(self.index.shards()) if self.index else ("", None)
             self.fields = list_all_columns(self.dataset_root / partition, shard_name)
 
         if "computed_columns" in meta:
-            self.computed_columns = meta["computed_columns"]
+            self.computed_columns = meta["computed_columns"]  # type: ignore[assignment]
         else:
             self.computed_columns = {}
 
@@ -101,16 +106,16 @@ class WSDataset:
         # Normalize old-style single-tuple fields to list-of-tuples
         for k, v in self.fields.items():
             if v and isinstance(v[0], str):
-                self.fields[k] = [v]
+                self.fields[k] = [v]  # type: ignore[list-item]
 
-        self._filter_dfs = None  # mapping of "filter name" -> polars dataframe representing the filter
+        self._filter_dfs: Optional[dict[str, pl.DataFrame]] = None  # mapping of "filter name" -> polars dataframe representing the filter
 
-        self._open_shards = {}
-        self._linked_datasets = {}
+        self._open_shards: dict[Path, WSShardInterface] = {}
+        self._linked_datasets: dict[Path, WSDataset] = {}
 
         self._register_wsds_links()
 
-    def enable_filter(self, filter_name: str, filter_df: pl.DataFrame):
+    def enable_filter(self, filter_name: str, filter_df: pl.DataFrame) -> None:
         """
         Enabling a filter adds extra columns to the dataset, each column representing a filter.
         """
@@ -131,7 +136,7 @@ class WSDataset:
     #
     # Accessing samples randomly and sequentially
     #
-    def random_sample(self):
+    def random_sample(self) -> WSSample:
         """Returns one random sample.
 
         Example:
@@ -141,9 +146,11 @@ class WSDataset:
         True
         """
         assert self.index is not None, "Random access is only supported for indexed datasets"
-        return self[self.rng.randrange(self.index.n_samples)]
+        sample = self[self.rng.randrange(self.index.n_samples)]  # type: ignore[union-attr]
+        assert sample is not None
+        return sample
 
-    def __iter__(self):
+    def __iter__(self) -> Generator[WSSample, None, None]:
         """Starts at a random position in the dataset and yields samples sequentially.
         Once it reaches the end of a shard it will jump to a new random position.
 
@@ -152,41 +159,42 @@ class WSDataset:
         while True:
             yield from self.sequential_from(self.random_sample())
 
-    def random_samples(self, N: int = 1):
+    def random_samples(self, N: int = 1) -> Generator[WSSample, None, None]:
         """Yields N random samples (not sequential)."""
         for _ in range(N):
             yield self.random_sample()
 
-    def random_chunks(self, max_N: int):
+    def random_chunks(self, max_N: int) -> Generator[WSSample, None, None]:
         """Like `__iter__`, but jumps to a random position after yielding `max_N` samples."""
         while True:
             yield from self.sequential_from(self.random_sample(), max_N=max_N)
 
-    def __getitem__(self, key_or_index: str | int):
+    def __getitem__(self, key_or_index: Union[str, int]) -> Optional[WSSample]:
         """Returns a sample with the given __key__ or sample index."""
+        assert self.index is not None, "Random access is only supported for indexed datasets"
         if isinstance(key_or_index, int):
-            r = self.index.lookup_by_index(key_or_index)
-            if not r:
+            r_idx = self.index.lookup_by_index(key_or_index)
+            if not r_idx:
                 return None
-            partition, shard_name, local_offset = r
+            partition, shard_name, local_offset = r_idx
             global_offset = key_or_index
         elif isinstance(key_or_index, str):
             file_name, offset_of_key_wrt_file = self.parse_key(key_or_index)
-            r = self.index.lookup_by_key(file_name, offset_of_key_wrt_file)
-            if not r:
+            r_key = self.index.lookup_by_key(file_name, offset_of_key_wrt_file)
+            if not r_key:
                 return None
-            partition, shard_name, local_offset, global_offset = r
+            partition, shard_name, local_offset, global_offset = r_key
         else:
             raise TypeError(f"Invalid key type: {type(key_or_index)}")
 
-        overrides = dict()
+        overrides: dict[str, object] = dict()
         if self._filter_dfs is not None:
             overrides.update(
                 {filter_name: filter_df.row(global_offset)[0] for filter_name, filter_df in self._filter_dfs.items()}
             )
         return WSSample(self, (partition, shard_name), local_offset, overrides=overrides)
 
-    def sequential_from(self, sample, max_N=None):
+    def sequential_from(self, sample: WSSample, max_N: Optional[int] = None) -> Generator[WSSample, None, None]:
         """Yields samples sequentially from the given `sample`, stopping after `max_N` samples."""
         shard_ref, i = sample.shard_ref, sample.offset
         max_N = min(i + (max_N or sys.maxsize), self._shard_n_samples(shard_ref))
@@ -195,7 +203,7 @@ class WSDataset:
         shard_global_offset = None
         if self._filter_dfs is not None:
             # We need to know the global shard offset to know what filter values to use for the sample
-            shard_global_offset = self.index.shard_global_offset(shard_ref)
+            shard_global_offset = self.index.shard_global_offset(shard_ref)  # type: ignore[union-attr]
 
         while i < max_N:
             sample = WSSample(self, shard_ref, i)
@@ -209,22 +217,22 @@ class WSDataset:
             if self._filter_dfs is not None:
                 # TODO: treat this as just another (unsharded) column
                 for filter_name, filter_df in self._filter_dfs.items():
-                    sample[filter_name] = filter_df.row(shard_global_offset + i)[0]
+                    sample[filter_name] = filter_df.row(shard_global_offset + i)[0]  # type: ignore[operator]
             yield sample
             i += 1
 
-    def _shard_n_samples(self, shard_ref: (str, str)) -> int:
+    def _shard_n_samples(self, shard_ref: tuple[str, str]) -> int:
         if not self.index:
             return sys.maxsize
         return self.index.shard_n_samples(shard_ref)
 
-    def iter_shard(self, shard_ref):
+    def iter_shard(self, shard_ref: tuple[str, str]) -> Generator[WSSample, None, None]:
         partition, shard_name = shard_ref
         if shard_name.endswith(".wsds"):
             shard_name = shard_name[:-5]
         return self.sequential_from(WSSample(self, (partition, shard_name), 0))
 
-    def __len__(self):
+    def __len__(self) -> int:
         """Returns the number of samples in the dataset.
 
         @public"""
@@ -234,14 +242,20 @@ class WSDataset:
     #
     # SQL support, using Polars
     #
-    def _parse_sql_queries_polars(self, *queries, shard_subsample=1, rng=None, shard_pipe=None):
+    def _parse_sql_queries_polars(
+        self,
+        *queries: str,
+        shard_subsample: float = 1,
+        rng: Optional[Union[random.Random, types.ModuleType]] = None,
+        shard_pipe: Optional[Callable[[pl.LazyFrame], pl.LazyFrame]] = None,
+    ) -> tuple[list[pl.Expr], pl.LazyFrame]:
         """Parses SQL queries via Polars to:
         - extract the Polars expressions for each query
         - use the expressions to build a list of column dirs to load shards from"""
 
-        column_dirs = defaultdict(list)
-        exprs = []
-        needed_special_columns = []
+        column_dirs: defaultdict[str, list[str]] = defaultdict(list)
+        exprs: list[pl.Expr] = []
+        needed_special_columns: list[str] = []
         for query in queries:
             if "." in query and query in self.fields:
                 print(f"TIP: You seem to have passes a column name ({query}) which has dots in it.")
@@ -281,16 +295,16 @@ class WSDataset:
             rng = self.rng
         shard_list = self.get_shard_list()
         if shard_subsample != 1:
-            shard_list = rng.sample(shard_list, int(len(shard_list) * shard_subsample))
+            shard_list = rng.sample(shard_list, int(len(shard_list) * shard_subsample))  # type: ignore[union-attr]
 
         # Prefetch shard tails concurrently to warm up the filesystem cache
         verified_shard_list = validate_shards(self, shard_list, list(column_dirs.keys()))
 
-        row_merge = []
-        column_dir_samples = {}
-        missing = defaultdict(list)
+        row_merge: list[pl.LazyFrame] = []
+        column_dir_samples: dict[str, pl.DataFrame] = {}
+        missing: defaultdict[str, list[tuple[str, str]]] = defaultdict(list)
         for shard_ref, shard_ok in verified_shard_list:
-            col_merge = []
+            col_merge: list[pl.LazyFrame] = []
             for column_dir, fields in column_dirs.items():
                 shard_path = self.get_shard_path(column_dir, shard_ref)
                 if shard_ok:
@@ -307,10 +321,12 @@ class WSDataset:
                     if self.index:
                         n_samples = self.index.shard_n_samples(shard_ref)
                         df = pl.defer(
-                            lambda column_dir=column_dir, n_samples=n_samples: column_dir_samples[column_dir].clear(
-                                n=n_samples
-                            ),
-                            schema=lambda column_dir=column_dir: column_dir_samples[column_dir].schema,
+                            lambda column_dir=column_dir, n_samples=n_samples: column_dir_samples[  # type: ignore[misc]
+                                column_dir
+                            ].clear(n=n_samples),
+                            schema=lambda column_dir=column_dir: column_dir_samples[  # type: ignore[misc]
+                                column_dir
+                            ].schema,
                         )
                     else:
                         df = None
@@ -338,7 +354,7 @@ class WSDataset:
 
         return exprs, pl.concat(row_merge)
 
-    def _check_for_subsampling(self, shard_subsample):
+    def _check_for_subsampling(self, shard_subsample: Optional[float]) -> float:
         if shard_subsample is None:
             # Check if we're running inside a PyTorch DataLoader worker
             try:
@@ -370,12 +386,12 @@ class WSDataset:
 
     def sql_select(
         self,
-        *queries,
-        return_as_lazyframe=False,
-        shard_subsample=None,
-        rng=42,
-        shard_pipe=None,
-    ) -> pl.DataFrame | pl.LazyFrame:
+        *queries: str,
+        return_as_lazyframe: bool = False,
+        shard_subsample: Optional[float] = None,
+        rng: Union[int, random.Random] = 42,
+        shard_pipe: Optional[Callable[[pl.LazyFrame], pl.LazyFrame]] = None,
+    ) -> Union[pl.DataFrame, pl.LazyFrame]:
         """Given a list of SQL expressions, returns a Polars DataFrame/ LazyFrame with the results."""
         if isinstance(rng, int):
             rng = random.Random(rng)
@@ -391,7 +407,7 @@ class WSDataset:
 
         return df.collect()
 
-    def sql_filter(self, query, shard_subsample=None, rng=42):
+    def sql_filter(self, query: str, shard_subsample: Optional[float] = None, rng: Union[int, random.Random] = 42) -> pl.Series:
         """Given a boolean SQL expression, returns a list of keys for samples that match the query."""
         if isinstance(rng, int):
             rng = random.Random(rng)
@@ -403,14 +419,14 @@ class WSDataset:
 
     def filtered(
         self,
-        query,
+        query: str,
         infinite: bool = False,  # keep yielding samples indefinitely (restarting from the beginning)
         shuffle: bool = True,  # shuffle the sample order (otherwise it will return them as they appear in the dataset)
-        N: int = None,  # optional maximum number of samples to yield (otherwise it will yield all matching samples)
-        seed: int = None,  # optional random seed used shuffling
-        shard_subsample=None,
-        rng=42,
-    ):
+        N: Optional[int] = None,  # optional maximum number of samples to yield (otherwise it will yield all matching samples)
+        seed: Optional[int] = None,  # optional random seed used shuffling
+        shard_subsample: Optional[float] = None,
+        rng: Union[int, random.Random] = 42,
+    ) -> Generator[WSSample, None, None]:
         """Given an boolean SQL expression, returns an iterator which yields random samples
         that match the query.
 
@@ -431,9 +447,9 @@ class WSDataset:
                 if shuffle:
                     keys = keys.sample(fraction=1, shuffle=shuffle, seed=seed)
             else:
-                keys = keys.sample(n=pl.len().clip(0, N), shuffle=shuffle, seed=seed)
+                keys = keys.sample(n=pl.len().clip(0, N), shuffle=shuffle, seed=seed)  # type: ignore[arg-type]
             for key in keys:
-                yield self[key]
+                yield self[key]  # type: ignore[misc]
                 i += 1
                 if N is not None and i >= N:
                     return
@@ -443,7 +459,7 @@ class WSDataset:
     #
     # Helper and internal API
     #
-    def _resolve_path(self, path_str: str) -> Path:
+    def _resolve_path(self, path_str: Union[str, Path]) -> Path:
         """If the 'path' is relative and does not exist, we search for it using 'WSDS_DATASET_SEARCH_PATH' env var.
         WSDS_DATASET_SEARCH_PATH is a colon-separated list of directories where datasets are stored.
 
@@ -461,31 +477,31 @@ class WSDataset:
 
         raise ValueError(f"Dataset {repr(str(path))} not found.")
 
-    def get_shard_list(self, ignore_index=False):
+    def get_shard_list(self, ignore_index: bool = False) -> list[tuple[str, str]]:
         if not ignore_index and self.index:
             return list(self.index.shards())
         else:
-            return list_all_shards(self.dataset_root)
+            return list_all_shards(str(self.dataset_root))
 
-    def get_shard_path(self, column_dir, shard_ref):
+    def get_shard_path(self, column_dir: str, shard_ref: tuple[str, str]) -> Path:
         partition, shard_name = shard_ref
         dir = self.dataset_root / partition / column_dir
         return (Path(dir) / shard_name).with_suffix(".wsds")
 
-    def _get_loader_class(self, spec: dict):
+    def _get_loader_class(self, spec: dict[str, object]) -> type:
         """Get the loader class from a link spec."""
         loader_class = spec["loader"]
         if isinstance(loader_class, list):
             loader_mod, loader_name = loader_class
             if loader_mod.startswith("hume_wsds."):
-                loader_mod = "wsds." + loader_mod[len("hume_wsds.") :]
+                loader_mod = "wsds." + loader_mod[len("hume_wsds."):]
             loader_module = importlib.import_module(loader_mod)
             return getattr(loader_module, loader_name)
-        return loader_class
+        return loader_class  # type: ignore[return-value]
 
-    def _register_wsds_links(self):
+    def _register_wsds_links(self) -> None:
         # Collect links first to avoid modifying dict during iteration
-        links_to_register = []
+        links_to_register: list[tuple[str, dict[str, object]]] = []
         for value in self.fields.values():
             (column_dir, _column) = value[0]
             if column_dir.endswith(".wsds-link"):
@@ -496,29 +512,29 @@ class WSDataset:
         # Ask each loader class what columns it provides
         for link_file, spec in links_to_register:
             loader_class = self._get_loader_class(spec)
-            columns = loader_class.get_columns(spec, self)
+            columns = loader_class.get_columns(spec, self)  # type: ignore[attr-defined]
 
             if columns:
                 # Loader provides multiple columns - register them all
                 for col_name in columns:
                     self.fields[col_name] = [(link_file, col_name)]
 
-    def add_computed(self, name, **link):
+    def add_computed(self, name: str, **link: object) -> None:
         column_dir = name + ".wsds-computed"
         self.computed_columns[column_dir] = link
         self.fields[name] = [(column_dir, name)]
 
-    def get_linked_dataset(self, relative_path):
+    def get_linked_dataset(self, relative_path: str) -> WSDataset:
         linked_root = self.dataset_root / relative_path
         if linked_root not in self._linked_datasets:
             self._linked_datasets[linked_root] = WSDataset(linked_root)
         return self._linked_datasets[linked_root]
 
-    def get_linked_shard(self, link, shard_ref):
+    def get_linked_shard(self, link: dict[str, object], shard_ref: tuple[str, str]) -> WSShardInterface:
         loader_class = self._get_loader_class(link)
-        return loader_class.from_link(link, self, shard_ref)
+        return loader_class.from_link(link, self, shard_ref)  # type: ignore[attr-defined]
 
-    def get_shard(self, column_dir, shard_ref):
+    def get_shard(self, column_dir: str, shard_ref: tuple[str, str]) -> WSShardInterface:
         shard_path = self.get_shard_path(column_dir, shard_ref)
 
         shard = self._open_shards.get(shard_path.parent, None)
@@ -526,48 +542,48 @@ class WSDataset:
             return shard
 
         if column_dir in self.computed_columns:
-            shard = self.get_linked_shard(self.computed_columns[column_dir], shard_ref)
+            shard = self.get_linked_shard(self.computed_columns[column_dir], shard_ref)  # type: ignore[arg-type]
         else:
             shard = WSShard(self, shard_path, shard_ref=shard_ref)
 
         self._open_shards[shard_path.parent] = shard
         return shard
 
-    def get_sample(self, shard_ref, field, offset):
+    def get_sample(self, shard_ref: tuple[str, str], field: str, offset: int) -> object:
         alternatives = self.fields[field]
-        last_err = None
+        last_err: Optional[WSShardMissingError] = None
         for column_dir, column in alternatives:
             try:
                 return self.get_shard(column_dir, shard_ref).get_sample(column, offset)
             except WSShardMissingError as e:
                 last_err = e
                 continue
-        raise last_err
+        raise last_err  # type: ignore[misc]
 
-    def parse_key(self, key):
+    def parse_key(self, key: str) -> tuple[str, int]:
         if self.segmented:
             return parse_key(key)
         else:
             return key, 0
 
-    def __str__(self):
+    def __str__(self) -> str:
         out = ""
         out += repr(self) + "\n"
         if self.index is None:
             return out
-        out += f"     Audio duration: {format_duration(self.index.audio_duration)}\n"
+        out += f"     Audio duration: {format_duration(self.index.audio_duration or 0)}\n"
         if self.segmented:
-            out += f"    Speech duration: {format_duration(self.index.speech_duration)}\n"
+            out += f"    Speech duration: {format_duration(self.index.speech_duration or 0)}\n"
         out += f"   Number of shards: {self.index.n_shards}\n"
         out += f"  Number of samples: {format(len(self), ',d').replace(',', ' ')}\n"
         return out
 
-    def __repr__(self):
+    def __repr__(self) -> str:
         if self.index is None:
             return f"WSDataset({repr(str(self.dataset_root))}, segmented={self.segmented}, index=None)"
         return f"WSDataset({repr(str(self.dataset_root))}, segmented={self.segmented})"
 
-    def _display_(self):
+    def _display_(self) -> object:
         import marimo
 
         if self.index is None:
@@ -580,7 +596,7 @@ class WSDataset:
             ]
         )
 
-    def _ipython_display_(self):
+    def _ipython_display_(self) -> None:
         from .utils import is_notebook
 
         if not is_notebook():

@@ -3,7 +3,7 @@ import fire
 from .ws_tools import commands
 
 
-def main():
+def main() -> None:
     fire.Fire(commands, name="wsds")
 
 
