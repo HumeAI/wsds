@@ -24,6 +24,11 @@ indent-width = 4
 ignore = ["E203", "E501", "E731"]
 extend-select = ["I"]
 
+[tool.mypy]
+python_version = "3.10"
+disallow_untyped_defs = true
+exclude = "wsds/pupyarrow/flatbuf"
+
 # --- build-data --- #
 [build-system]
 requires = ["hatchling", "hatch-requirements-txt"]
