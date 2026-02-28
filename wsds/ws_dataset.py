@@ -244,7 +244,8 @@ class WSDataset:
                     continue
                 subdir, field = self.fields[col]
                 assert col == field, "renamed fields are not supported in SQL queries yet"
-                subdirs[subdir].append(field)
+                if field not in subdirs[subdir]:
+                    subdirs[subdir].append(field)
             exprs.append(expr)
 
         # If only __key__ is in the query, we need to load shards from at least one subdir
