@@ -39,7 +39,7 @@ class WSBatchedSink:
     def __init__(
         self,
         fname: str,  # final output file name, intermediate output goes into a temporary file
-        min_batch_size_bytes: int = 1024*1024, # minimum size of a batch in bytes (1MB by default)
+        min_batch_size_bytes: int = 1024 * 1024,  # minimum size of a batch in bytes (1MB by default)
         compression: str | None = "zstd",
         throwaway=False,  # discard the temp file, useful for testing and benchmarking
     ):
