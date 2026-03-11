@@ -74,6 +74,8 @@ class WSShard(WSShardInterface):
         if self._data.schema.get_field_index(column) == -1:
             raise KeyError(f"column {column} not found in shard {self.fname}")
         data = self._data[column][j]
+        if not data.is_valid:
+            return None
         try:
             # FIXME: implement proper encoders and decoders
             if column.endswith("npy"):

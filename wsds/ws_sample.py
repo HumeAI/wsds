@@ -51,7 +51,16 @@ class WSSample:
         return self[field] if field in self else default
 
     def __contains__(self, field):
-        return field in self.overrides or field in self.dataset.fields.keys()
+        if field in self.overrides:
+            return True
+        if field not in self.dataset.fields:
+            return False
+        # Field exists in schema, but shard might be missing (e.g. .in-progress directories)
+        try:
+            self[field]
+            return True
+        except WSShardMissingError:
+            return False
 
     def __repr_field__(self, field, repr=repr):
         try:
