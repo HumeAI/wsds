@@ -1,29 +1,26 @@
 import io
-import pickle
 import re
 import typing
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
-import numpy as np
 import pyarrow as pa
 
-from .ws_audio import AudioReader, WSAudio
-from .ws_sample import WSSample
 from .utils import WSShardMissingError
+from .ws_audio import AudioReader, WSAudio
+from .ws_decode import decode_sample
+from .ws_sample import WSSample
 
 if TYPE_CHECKING:
     from .ws_dataset import WSDataset
 
 
 class WSShardInterface:
-    shard_name: str
+    shard_ref: (str, str)
     """Used by WSDataset to invalidate cached shards."""
 
     @classmethod
-    def get_columns(
-        cls, link: dict, source_dataset: "WSDataset", derived_dataset: "WSDataset"
-    ) -> dict[str, str] | None:
+    def get_columns(cls, link: dict, dataset: "WSDataset") -> dict[str, str] | None:
         """Return columns this link provides: {column_name: column_name}.
 
         Override this to provide multiple columns from a single link.
@@ -45,9 +42,9 @@ class WSShard(WSShardInterface):
     batch_size: int
     dataset: "WSDataset"
 
-    def __init__(self, dataset, fname, shard_name=None):
+    def __init__(self, dataset, fname, shard_ref=None):
         self.dataset = dataset
-        self.shard_name = shard_name
+        self.shard_ref = shard_ref
         self.fname = fname
 
         try:
@@ -85,19 +82,11 @@ class WSShard(WSShardInterface):
         if self._data.schema.get_field_index(column) == -1:
             raise KeyError(f"column {column} not found in shard {self.fname}")
         data = self._data[column][j]
+        col_type = self._data.schema.field(column).type
         try:
-            # FIXME: implement proper encoders and decoders
-            if column.endswith("npy"):
-                return np.load(io.BytesIO(data.as_buffer()))
-            elif column.endswith("pyd"):
-                return pickle.load(io.BytesIO(data.as_buffer()))
-            elif column.endswith("txt"):
-                return data.as_buffer().to_pybytes().decode("utf-8")
-            elif column in self.dataset._audio_file_keys:
-                return AudioReader(data)
-            else:
-                # FIXME: we need to handle audio decoding here to avoid copying the entire audio buffer
-                return data.as_py(maps_as_pydicts="strict")
+            if pa.types.is_binary(col_type) or pa.types.is_large_binary(col_type):
+                return decode_sample(column, io.BytesIO(data.as_buffer()))
+            return data.as_py(maps_as_pydicts="strict")
         except Exception as e:
             raise ValueError(f"Failed to decode column {column} in shard {self.fname} (offset {offset}): {e}")
 
@@ -114,7 +103,7 @@ class WSSourceAudioShard(WSShardInterface):
 
     It is used via the `WSDataset.add_computed` method or the `.wsds-link` file mechanism."""
 
-    shard_name: str
+    shard_ref: (str, str)
     source_dataset: "WSDataset"  # noqa: F821
     derived_dataset: "WSDataset"  # noqa: F821
     vad_column: str
@@ -125,22 +114,23 @@ class WSSourceAudioShard(WSShardInterface):
     _source_reader: AudioReader = None
 
     @classmethod
-    def from_link(cls, link, source_dataset, derived_dataset, shard_name):
-        return cls(shard_name, source_dataset, derived_dataset, link["vad_column"])
+    def from_link(cls, link, dataset, shard_ref):
+        source_dataset = dataset.get_linked_dataset(link["dataset_dir"])
+        return cls(shard_ref, source_dataset, dataset, link["vad_column"])
 
     def get_timestamps(self, segment_offset):
         return self._source_sample[self.vad_column][segment_offset]
 
     def get_sample(self, _column, offset):
         file_name, segment_offset = self.derived_dataset.parse_key(
-            WSSample(self.derived_dataset, self.shard_name, offset)["__key__"]
+            WSSample(self.derived_dataset, self.shard_ref, offset)["__key__"]
         )
 
         if self._source_file_name != file_name:
             self._source_sample = self.source_dataset[file_name]
             try:
                 self._source_reader = self._source_sample.get_audio()
-            except KeyError as err:
+            except KeyError:
                 raise WSShardMissingError("no audio shards found")
             self._source_file_name = file_name
 
@@ -152,8 +142,8 @@ class WSYoutubeVideoShard(WSSourceAudioShard):
     re_pattern: re.Pattern[str]
 
     @classmethod
-    def from_link(cls, link, source_dataset, derived_dataset, shard_name):
-        self = super().from_link(link, source_dataset, derived_dataset, shard_name)
+    def from_link(cls, link, dataset, shard_ref):
+        self = super().from_link(link, dataset, shard_ref)
         self.re_pattern = re.compile(link["youtube_id_regexp"])
         return self
 
@@ -178,7 +168,7 @@ class WSSourceLink(WSShardInterface):
     {"dataset_dir": "../source", "loader": ["wsds.ws_shard", "WSSourceLink"], "key_prefix": "source."}
     """
 
-    shard_name: str
+    shard_ref: (str, str)
     source_dataset: "WSDataset"
     derived_dataset: "WSDataset"
     key_prefix: str
@@ -188,8 +178,9 @@ class WSSourceLink(WSShardInterface):
     _source_sample: WSSample = None
 
     @classmethod
-    def get_columns(cls, link, source_dataset, derived_dataset):
+    def get_columns(cls, link, dataset):
         """Return all source dataset fields with the configured prefix."""
+        source_dataset = dataset.get_linked_dataset(link["dataset_dir"])
         key_prefix = link.get("key_prefix", "source.")
         columns = {}
         for field_name in source_dataset.fields:
@@ -200,13 +191,14 @@ class WSSourceLink(WSShardInterface):
         return columns
 
     @classmethod
-    def from_link(cls, link, source_dataset, derived_dataset, shard_name):
+    def from_link(cls, link, dataset, shard_ref):
+        source_dataset = dataset.get_linked_dataset(link["dataset_dir"])
         key_prefix = link.get("key_prefix", "source.")
-        return cls(shard_name, source_dataset, derived_dataset, key_prefix)
+        return cls(shard_ref, source_dataset, dataset, key_prefix)
 
     def get_sample(self, column: str, offset: int):
         # Parse the derived dataset's key to get the source file name
-        derived_key = WSSample(self.derived_dataset, self.shard_name, offset)["__key__"]
+        derived_key = WSSample(self.derived_dataset, self.shard_ref, offset)["__key__"]
         file_name, _segment_offset = self.derived_dataset.parse_key(derived_key)
 
         if self._source_file_name != file_name:

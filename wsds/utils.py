@@ -17,9 +17,15 @@ if TYPE_CHECKING:
 class WSShardMissingError(Exception):
     fname: str
 
+    @classmethod
+    def from_s3(cls, s3_client, key, bucket, err):
+        return cls(f"{s3_client._endpoint}://{bucket}/{key} [error: {err}]")
+
+
 @dataclass
 class WSShardCorruptedError(Exception):
     fname: str
+
 
 def get_columns(fname):
     if isinstance(fname, Path):
@@ -49,7 +55,7 @@ def list_all_columns(ds_path, shard_name=None):
     for p in Path(ds_path).iterdir():
         if p.suffix == ".wsds-link":
             col = p.with_suffix("").name
-            cols[col] = (p.name, col)
+            cols[col] = [(p.name, col)]
             continue
         if not p.is_dir():
             continue
@@ -74,33 +80,34 @@ def list_all_columns(ds_path, shard_name=None):
                 if col in cols or col in dupes:
                     dupes[col] = True
                     if col in cols:
-                        dirname = cols[col][0]
-                        cols[f"{dirname}.{col}"] = (dirname, col)
+                        (dirname, _colname) = cols[col][0]
+                        cols[f"{dirname}.{col}"] = [(dirname, col)]
                         del cols[col]
-                    cols[f"{p.name}.{col}"] = (p.name, col)
+                    cols[f"{p.name}.{col}"] = [(p.name, col)]
                 else:
-                    cols[col] = (p.name, col)
+                    cols[col] = [(p.name, col)]
     # use the smallest shards for __key__ (should be the fastest)
-    cols["__key__"] = [x[1:] for x in sorted(key_col)]
+    if key_col:
+        cols["__key__"] = [x[1:] for x in sorted(key_col)]
     return dict(sorted(cols.items()))
 
 
 def list_all_shards(dataset: str, verbose: bool = False, print_missing: bool = False):
     shards = {}
-    for subdir in Path(dataset).iterdir():
-        if not subdir.is_dir():
+    for column_dir in Path(dataset).iterdir():
+        if not column_dir.is_dir():
             continue
-        shards[subdir] = {file.name for file in subdir.iterdir() if file.suffix == ".wsds"}
-        if not shards[subdir]:
+        shards[column_dir] = {file.name for file in column_dir.iterdir() if file.suffix == ".wsds"}
+        if not shards[column_dir]:
             if verbose:
-                print(f"error: empty folder {subdir}")
-            del shards[subdir]
+                print(f"error: empty folder {column_dir}")
+            del shards[column_dir]
 
     common_shards = {v for shard_values in shards.values() for v in shard_values}
     num_common = len(common_shards)
 
     errors = False
-    for subdir, files in shards.items():
+    for column_dir, files in shards.items():
         missing = common_shards - files
         n_missing = len(missing)
         if n_missing == 0:
@@ -109,7 +116,7 @@ def list_all_shards(dataset: str, verbose: bool = False, print_missing: bool = F
             status = f"[MISSING {n_missing}]"
 
         if verbose:
-            print(f"Path {subdir} has {len(files)}/{num_common} shards {status}")
+            print(f"Path {column_dir} has {len(files)}/{num_common} shards {status}")
 
         if n_missing > 0 and print_missing:
             for m in sorted(missing):
@@ -219,6 +226,15 @@ def scan_ipc(path: str | Path, *args, glob=True, **kwargs):
         return pl.scan_ipc(f, *args, **kwargs)
 
 
+def is_notebook() -> bool:
+    """Detect if running in a Jupyter notebook vs terminal IPython or plain Python."""
+    try:
+        shell = get_ipython().__class__.__name__
+        return shell == "ZMQInteractiveShell"
+    except NameError:
+        return False
+
+
 def format_duration(duration):
     """Formats a duration in seconds as hours (or minutes or kilo-hours)."""
     hours = duration / 3600
@@ -231,11 +247,12 @@ def format_duration(duration):
     else:
         return f"{hours:.2f} hours"
 
+
 def preload_shard(shard_fname):
     try:
         with open(shard_fname, "rb") as f:
             f.seek(-6, os.SEEK_END)
-            if f.read() != b'ARROW1':
+            if f.read() != b"ARROW1":
                 print(f"Invalid file format {shard_fname}: ARROW1 magic not found")
                 return False
     except FileNotFoundError:
@@ -246,10 +263,11 @@ def preload_shard(shard_fname):
         return False
     return True
 
+
 def validate_shards(
-    dataset: "WSDataset", shards: list[tuple[str, str]], subdirs: list[str], tail_bytes: int = 10240
+    dataset: "WSDataset", shards: list[tuple[str, str]], column_dirs: list[str], tail_bytes: int = 10240
 ):
-    """Prefetch and validate shard files for the given shards and subdirs.
+    """Prefetch and validate shard files for the given shards and column dirs.
 
     Uses a ProcessPoolExecutor to load them concurrently, which helps with network filesystems
     where latency is the bottleneck. This is useful before operations that need to read
@@ -257,27 +275,29 @@ def validate_shards(
 
     Args:
         dataset: The WSDataset instance
-        shards: List of (dataset_path, shard_name) tuples identifying the shards
-        subdirs: List of subdirectory names to prefetch
+        shards: List of (partition, shard_name) tuples identifying the shards
+        column_dirs: List of column directory names to prefetch
         tail_bytes: Number of bytes to read from the end of each file (default 10KB)
 
     Returns:
-        List of shards that loaded successfully across all subdirs
+        List of shards that loaded successfully across all column dirs
     """
 
     # Filter out computed columns (they don't have actual shard files)
-    actual_subdirs = [s for s in subdirs if s not in dataset.computed_columns]
+    actual_column_dirs = [s for s in column_dirs if s not in dataset.computed_columns]
 
-    if not actual_subdirs or not shards:
+    if not actual_column_dirs or not shards:
         return []
 
-    # Create all combinations of shards and subdirs
-    shard_files = [dataset.get_shard_path(subdir, shard_name) for shard_name in shards for subdir in actual_subdirs]
+    # Create all combinations of shards and column dirs
+    shard_files = [
+        dataset.get_shard_path(column_dir, shard_name) for shard_name in shards for column_dir in actual_column_dirs
+    ]
 
     with ProcessPoolExecutor(max_workers=min(len(shard_files), 64)) as executor:
         results = list(executor.map(preload_shard, shard_files))
 
-    # Check that all subdirs loaded successfully for each shard
+    # Check that all column dirs loaded successfully for each shard
     # Return all given shards with an ok flag
-    num_subdirs = len(actual_subdirs)
-    return [(shard, all(results[i * num_subdirs : (i + 1) * num_subdirs])) for i, shard in enumerate(shards)]
+    num_column_dirs = len(actual_column_dirs)
+    return [(shard, all(results[i * num_column_dirs : (i + 1) * num_column_dirs])) for i, shard in enumerate(shards)]
