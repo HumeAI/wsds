@@ -249,6 +249,16 @@ class WSDataset:
         needed_special_columns = []
         needs_key = False
         for query in queries:
+            if "." in query and query in self.fields:
+                print(f"TIP: You seem to have passes a column name ({query}) which has dots in it.")
+                query = f"`{query}`"
+                print(
+                    f"We expect to get SQL expressions which requires quoting such names, in this cases it should likely be: {query}"
+                )
+                print(
+                    "I fixed it for you in this simple case but am not smart enough to do it in real SQL expressions."
+                )
+
             expr = pl.sql_expr(query)
             for col in expr.meta.root_names():
                 if col == "__key__" or col == '__shard_path__' or col == '__shard_offset__':
