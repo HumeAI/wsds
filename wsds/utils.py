@@ -1,9 +1,14 @@
 import re
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import numpy as np
 import pyarrow as pa
+
+if TYPE_CHECKING:
+    from .ws_dataset import WSDataset
 
 
 @dataclass
@@ -228,3 +233,46 @@ def format_duration(duration):
         return f"{duration / 60:.1f} minutes"
     else:
         return f"{hours:.2f} hours"
+
+
+def prefetch_shard_tails(
+    dataset: "WSDataset", shards: list[tuple[str, str]], subdirs: list[str], tail_bytes: int = 10240
+):
+    """Prefetch the last `tail_bytes` of shard files for the given shards and subdirs.
+
+    Uses a ThreadPoolExecutor to load them concurrently, which helps with network filesystems
+    where latency is the bottleneck. This is useful before operations that need to read
+    from multiple shards (like WSSample.__repr__ or SQL queries).
+
+    Args:
+        dataset: The WSDataset instance
+        shards: List of (dataset_path, shard_name) tuples identifying the shards
+        subdirs: List of subdirectory names to prefetch
+        tail_bytes: Number of bytes to read from the end of each file (default 10KB)
+    """
+
+    def read_tail(args: tuple[tuple[str, str], str]) -> tuple[tuple[str, str], str, bytes | None]:
+        shard_name, subdir = args
+        shard_path = dataset.get_shard_path(subdir, shard_name)
+        try:
+            file_size = shard_path.stat().st_size
+            read_size = min(tail_bytes, file_size)
+            with open(shard_path, "rb") as f:
+                f.seek(max(0, file_size - read_size))
+                return (shard_name, subdir, f.read(read_size))
+        except (FileNotFoundError, OSError):
+            return (shard_name, subdir, None)
+
+    # Filter out computed columns (they don't have actual shard files)
+    actual_subdirs = [s for s in subdirs if s not in dataset.computed_columns]
+
+    if not actual_subdirs or not shards:
+        return []
+
+    # Create all combinations of shards and subdirs
+    tasks = [(shard, subdir) for shard in shards for subdir in actual_subdirs]
+
+    with ThreadPoolExecutor(max_workers=min(len(tasks), 64)) as executor:
+        results = list(executor.map(read_tail, tasks))
+
+    return results
