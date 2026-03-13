@@ -2,6 +2,7 @@ import functools
 import json
 import sqlite3
 from pathlib import Path
+
 from . import utils
 
 
@@ -16,10 +17,10 @@ class WSDSIndexWriter:
         self.fname.unlink(missing_ok=True)
         self.conn = sqlite3.connect(self.fname)
 
-        self.conn.execute('PRAGMA journal_mode = OFF;')
-        self.conn.execute('PRAGMA synchronous = 0;')
-        self.conn.execute('PRAGMA locking_mode = EXCLUSIVE;')
-        self.conn.execute('PRAGMA temp_store = MEMORY;')
+        self.conn.execute("PRAGMA journal_mode = OFF;")
+        self.conn.execute("PRAGMA synchronous = 0;")
+        self.conn.execute("PRAGMA locking_mode = EXCLUSIVE;")
+        self.conn.execute("PRAGMA temp_store = MEMORY;")
 
         self.conn.execute("""
         CREATE TABLE files (
@@ -35,10 +36,10 @@ class WSDSIndexWriter:
             shard TEXT NOT NULL,
             n_samples INTEGER NOT NULL,
             global_offset INTEGER NOT NULL,
-            dataset_path TEXT NULL
+            partition TEXT NULL
         );""")
         self.conn.execute("""
-        CREATE UNIQUE INDEX shard_name ON shards (shard, dataset_path);
+        CREATE UNIQUE INDEX shard_name ON shards (shard, partition);
         """)
         self.conn.execute("""
         CREATE UNIQUE INDEX shard_global_offset ON shards (global_offset);
@@ -59,8 +60,8 @@ class WSDSIndexWriter:
     def append(self, s):
         # we ensure plain Python types for everything passed in, otherwise sqlite will silently save invalid data
         shard_id = self.conn.execute(
-            "INSERT INTO shards (shard, n_samples, global_offset, dataset_path) VALUES (?, ?, ?, ?);",
-            (str(s["shard_name"]), int(s["n_samples"]), self.global_offset, str(s["dataset_path"])),
+            "INSERT INTO shards (shard, n_samples, global_offset, partition) VALUES (?, ?, ?, ?);",
+            (str(s["shard_name"]), int(s["n_samples"]), self.global_offset, str(s["partition"])),
         ).lastrowid
         for name, offset, audio_duration, speech_duration in s["index"]:
             try:
@@ -75,7 +76,9 @@ class WSDSIndexWriter:
                         (name,),
                     ).fetchone()
                     if audio_duration - old_duration < 10e-3:
-                        print(f"Skipping duplicate episode: {repr(name)} ({utils.format_duration(audio_duration)} long)")
+                        print(
+                            f"Skipping duplicate episode: {repr(name)} ({utils.format_duration(audio_duration)} long)"
+                        )
                         continue
                     raise ValueError(
                         f"Detected duplicate file name: {repr(name)} in shard \n{repr(s['shard_name'])}, previously seen in {repr(old_shard)}"
@@ -100,7 +103,14 @@ class WSIndex:
             raise ValueError(f"WSIndex not found: {fname}")
         # immutable=1,ro=True greatly speeds up all queries when the database is on a remote/cluster file system
         self.conn = sqlite3.connect(f"file:{fname}?immutable=1,ro=True", uri=True)
-        self.has_dataset_path = self.conn.execute("SELECT COUNT(*) FROM pragma_table_info('shards') WHERE name='dataset_path'").fetchone()[0]
+
+        # Detect index format: new indexes have a 'partition' column, old indexes have 'dataset_path'
+        columns = {
+            row[0]
+            for row in self.conn.execute("SELECT name FROM pragma_table_info('shards')").fetchall()
+        }
+        self.has_partition = "partition" in columns
+        self.has_dataset_path = "dataset_path" in columns
 
     @functools.cached_property
     def n_shards(self):
@@ -126,16 +136,82 @@ class WSIndex:
             return self.metadata["speech_duration"]
         return self.conn.execute("SELECT SUM(speech_duration) FROM files;").fetchone()[0]
 
+    @functools.cached_property
+    def _partition_col(self):
+        """SQL expression for the partition column, adapting to old/new index formats."""
+        if self.has_partition:
+            return "s.partition"
+        if self.has_dataset_path:
+            return "s.dataset_path"
+        return "''"
+
     def shards(self):
-        dataset_path = 'dataset_path' if self.has_dataset_path else "''"
-        return self.conn.execute(f"SELECT {dataset_path}, shard FROM shards ORDER BY rowid;")
+        return self.conn.execute(f"SELECT {self._partition_col}, shard FROM shards AS s ORDER BY rowid;")
+
+    def lookup_by_index(self, index: int):
+        """Look up a sample by global index. Returns (partition, shard_name, local_offset) or None."""
+        r = self.conn.execute(
+            f"SELECT s.shard, s.global_offset, {self._partition_col} FROM shards AS s"
+            f" WHERE s.global_offset <= ? ORDER BY s.global_offset DESC LIMIT 1",
+            (index,),
+        ).fetchone()
+        if not r:
+            return None
+        shard_name, shard_global_offset, partition = r
+        local_offset = index - shard_global_offset
+        return partition, shard_name, local_offset
+
+    def lookup_by_key(self, file_name: str, offset_of_key_wrt_file: int):
+        """Look up a sample by file name and offset within file.
+        Returns (partition, shard_name, local_offset, global_offset) or None."""
+        r = self.conn.execute(
+            f"SELECT s.shard, s.global_offset, f.offset, {self._partition_col}"
+            f" FROM files AS f, shards AS s WHERE f.name = ? AND s.shard_id == f.shard_id",
+            (file_name,),
+        ).fetchone()
+        if not r:
+            return None
+        shard_name, shard_global_offset, file_offset_in_shard, partition = r
+        local_offset = file_offset_in_shard + offset_of_key_wrt_file
+        global_offset = shard_global_offset + local_offset
+        return partition, shard_name, local_offset, global_offset
+
+    def _query_shard(self, columns, shard_ref):
+        """Query shard table columns for a given (partition, shard_name) ref."""
+        partition, shard_name = shard_ref
+        if self.has_partition or self.has_dataset_path:
+            return self.conn.execute(
+                f"SELECT {columns} FROM shards AS s WHERE {self._partition_col} = ? AND s.shard = ?",
+                (partition, shard_name),
+            ).fetchone()
+        else:
+            return self.conn.execute(
+                f"SELECT {columns} FROM shards WHERE shard = ?", (shard_name,)
+            ).fetchone()
+
+    def shard_n_samples(self, shard_ref):
+        """Return the number of samples in a shard, given a (partition, shard_name) ref."""
+        r = self._query_shard("n_samples", shard_ref)
+        if r is None:
+            raise IndexError(f"Shard not found: {shard_ref}")
+        return r[0]
+
+    def shard_global_offset(self, shard_ref):
+        """Return the global offset of a shard, given a (partition, shard_name) ref."""
+        r = self._query_shard("global_offset", shard_ref)
+        if r is None:
+            raise IndexError(f"Shard not found: {shard_ref}")
+        return r[0]
 
     def dataframe(self):
         import polars as pl
-        df = pl.read_database_uri("""
+
+        df = pl.read_database_uri(
+            """
             SELECT f.name, audio_duration, speech_duration, s.shard, s.n_samples
             FROM files as f, shards as s
-            WHERE f.shard_id == s.shard_id""", f"sqlite://{self.fname}"
+            WHERE f.shard_id == s.shard_id""",
+            f"sqlite://{self.fname}",
         )
         return df
 
