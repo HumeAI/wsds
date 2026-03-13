@@ -14,7 +14,7 @@ allow-direct-references = true
 files = ["requirements.txt"]
 
 [tool.hatch.build.targets.wheel]
-packages = ["."]
+packages = ["wsds"]
 
 [tool.ruff]
 line-length = 120
@@ -23,6 +23,12 @@ indent-width = 4
 [tool.ruff.lint]
 ignore = ["E203", "E501", "E731"]
 extend-select = ["I"]
+
+[project.optional-dependencies]
+test = ["pytest"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
 
 # --- build-data --- #
 [build-system]
