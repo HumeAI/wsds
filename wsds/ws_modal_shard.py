@@ -1,6 +1,6 @@
 import os
 import typing
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Optional, Tuple
 
 from .pupyarrow.file_reader import ModalFileReader
 from .pupyarrow.pupyarrow import FeatherFile, LazyBinaryArray
@@ -18,9 +18,9 @@ class WSModalShard(WSShardInterface):
     that only the IPC footer and the specific batch(es) needed are fetched,
     rather than downloading the entire shard file."""
 
-    def __init__(self, dataset: "WSDataset", volume_name: str, path: str, shard_name=None):
+    def __init__(self, dataset: "WSDataset", volume_name: str, path: str, shard_ref: Optional[Tuple[str, str]]=None):
         self.dataset = dataset
-        self.shard_name = shard_name
+        self.shard_ref = shard_ref
         self.volume_name = volume_name
         self.path = path
 
@@ -34,22 +34,22 @@ class WSModalShard(WSShardInterface):
         self._batch = None
 
     @classmethod
-    def from_link(cls, link, dataset, shard_name):
+    def from_link(cls, link, dataset, shard_ref):
         """Create a Modal shard from a link spec.
 
-        The volume path is built as ``<prefix>/<dataset_path>/<subdir>/<shard>.wsds``.
-        ``subdir`` comes from the link spec (required when the volume mirrors the
+        The volume path is built as ``<prefix>/<partition>/<column_dir>/<shard>.wsds``.
+        ``column_dir`` comes from the link spec (required when the volume mirrors the
         local dataset directory layout with per-column subdirectories)."""
-        dataset_path, shard = shard_name
+        partition, shard = shard_ref
         prefix = link.get("prefix", "")
-        subdir = link.get("subdir", "")
-        parts = [p for p in (prefix, dataset_path, subdir, f"{shard}.wsds") if p]
+        column_dir = link.get("subdir", "")
+        parts = [p for p in (prefix, partition, column_dir, f"{shard}.wsds") if p]
         path = os.path.normpath("/".join(parts))
-        # Strip leading "../" — dataset_path is relative to the index but
+        # Strip leading "../" — partition is relative to the index but
         # volume paths are absolute from the volume root.
         while path.startswith("../"):
             path = path[3:]
-        return cls(dataset, link["volume_name"], path, shard_name=shard_name)
+        return cls(dataset, link["volume_name"], path, shard_ref=shard_ref)
 
     @classmethod
     def get_columns(cls, link, dataset):

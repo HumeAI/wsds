@@ -16,13 +16,11 @@ if TYPE_CHECKING:
 
 
 class WSShardInterface:
-    shard_name: str
+    shard_ref: (str, str)
     """Used by WSDataset to invalidate cached shards."""
 
     @classmethod
-    def get_columns(
-        cls, link: dict, source_dataset: "WSDataset", derived_dataset: "WSDataset"
-    ) -> dict[str, str] | None:
+    def get_columns(cls, link: dict, dataset: "WSDataset") -> dict[str, str] | None:
         """Return columns this link provides: {column_name: column_name}.
 
         Override this to provide multiple columns from a single link.
@@ -44,9 +42,9 @@ class WSShard(WSShardInterface):
     batch_size: int
     dataset: "WSDataset"
 
-    def __init__(self, dataset, fname, shard_name=None):
+    def __init__(self, dataset, fname, shard_ref=None):
         self.dataset = dataset
-        self.shard_name = shard_name
+        self.shard_ref = shard_ref
         self.fname = fname
 
         try:
@@ -105,7 +103,7 @@ class WSSourceAudioShard(WSShardInterface):
 
     It is used via the `WSDataset.add_computed` method or the `.wsds-link` file mechanism."""
 
-    shard_name: str
+    shard_ref: (str, str)
     source_dataset: "WSDataset"  # noqa: F821
     derived_dataset: "WSDataset"  # noqa: F821
     vad_column: str
@@ -116,16 +114,16 @@ class WSSourceAudioShard(WSShardInterface):
     _source_reader: AudioReader = None
 
     @classmethod
-    def from_link(cls, link, dataset, shard_name):
+    def from_link(cls, link, dataset, shard_ref):
         source_dataset = dataset.get_linked_dataset(link["dataset_dir"])
-        return cls(shard_name, source_dataset, dataset, link["vad_column"])
+        return cls(shard_ref, source_dataset, dataset, link["vad_column"])
 
     def get_timestamps(self, segment_offset):
         return self._source_sample[self.vad_column][segment_offset]
 
     def get_sample(self, _column, offset):
         file_name, segment_offset = self.derived_dataset.parse_key(
-            WSSample(self.derived_dataset, self.shard_name, offset)["__key__"]
+            WSSample(self.derived_dataset, self.shard_ref, offset)["__key__"]
         )
 
         if self._source_file_name != file_name:
@@ -144,8 +142,8 @@ class WSYoutubeVideoShard(WSSourceAudioShard):
     re_pattern: re.Pattern[str]
 
     @classmethod
-    def from_link(cls, link, dataset, shard_name):
-        self = super().from_link(link, dataset, shard_name)
+    def from_link(cls, link, dataset, shard_ref):
+        self = super().from_link(link, dataset, shard_ref)
         self.re_pattern = re.compile(link["youtube_id_regexp"])
         return self
 
@@ -170,7 +168,7 @@ class WSSourceLink(WSShardInterface):
     {"dataset_dir": "../source", "loader": ["wsds.ws_shard", "WSSourceLink"], "key_prefix": "source."}
     """
 
-    shard_name: str
+    shard_ref: (str, str)
     source_dataset: "WSDataset"
     derived_dataset: "WSDataset"
     key_prefix: str
@@ -193,14 +191,14 @@ class WSSourceLink(WSShardInterface):
         return columns
 
     @classmethod
-    def from_link(cls, link, dataset, shard_name):
+    def from_link(cls, link, dataset, shard_ref):
         source_dataset = dataset.get_linked_dataset(link["dataset_dir"])
         key_prefix = link.get("key_prefix", "source.")
-        return cls(shard_name, source_dataset, dataset, key_prefix)
+        return cls(shard_ref, source_dataset, dataset, key_prefix)
 
     def get_sample(self, column: str, offset: int):
         # Parse the derived dataset's key to get the source file name
-        derived_key = WSSample(self.derived_dataset, self.shard_name, offset)["__key__"]
+        derived_key = WSSample(self.derived_dataset, self.shard_ref, offset)["__key__"]
         file_name, _segment_offset = self.derived_dataset.parse_key(derived_key)
 
         if self._source_file_name != file_name:
