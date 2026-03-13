@@ -568,3 +568,26 @@ def _remove_columns(*fnames, remove: str = ""):
             with AtomicFile(fname) as tmp:
                 with pa.ipc.new_file(tmp, table2.schema.with_metadata(reader.schema.metadata)) as sink:
                     sink.write_table(table2)
+
+def episode_stats(shard_path):
+    return (
+        pl.read_ipc(shard_path, memory_map=False)
+        .with_columns(
+            parsed_key = pl.col('__key__').str.extract_groups(r"(?<episode>.*)_(?<offset>[0-9]+)$")
+        )
+        .unnest('parsed_key')
+        .group_by('episode')
+        .agg(
+            consecutive = (pl.col('offset').cast(pl.Int32()).diff().fill_null(1) == 1).all(),
+            n_segments = pl.len()
+        )
+    )
+
+@command
+def diff_keys(source_shard : str, *shards : str):
+    base = pl.read_ipc(source_shard, memory_map=False).select(episode='__key__')
+    df = base
+    for shard in shards:
+        df = df.join(episode_stats(shard), on='episode', how='outer', suffix='_'+Path(shard).parent.name)
+    with pl.Config(tbl_rows=100):
+        print(df)
