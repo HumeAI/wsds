@@ -153,14 +153,14 @@ class validate:
 
         shard_names = list_all_shards(dataset, verbose=True, print_missing=False)
         print()
-        for subdir in Path(dataset).iterdir():
-            if not subdir.is_dir():
+        for column_dir in Path(dataset).iterdir():
+            if not column_dir.is_dir():
                 continue
-            shards = [(Path(dataset_path) / subdir / shard).with_suffix(".wsds") for dataset_path, shard in shard_names]
+            shards = [(Path(partition) / column_dir / shard).with_suffix(".wsds") for partition, shard in shard_names]
             schemas = {shard: get_shard_schema(shard) for shard in shards}
             unique = set(s for s in schemas.values() if s)
             if len(unique) > 1:
-                print(f"Found schema conflicts for {subdir}:\n")
+                print(f"Found schema conflicts for {column_dir}:\n")
                 for schema in unique:
                     matching_shards = [shard for shard, shard_schema in schemas.items() if schema == shard_schema]
                     prefix = f"  in {len(matching_shards)} shards: "
@@ -170,7 +170,7 @@ class validate:
                             print(indented(" " * len(prefix), shard))
                         print()
             if None not in schemas.values() and complete_in_progress:
-                os.rename(subdir, str(subdir).replace('.in-progress', ''))
+                os.rename(column_dir, str(column_dir).replace('.in-progress', ''))
 
     @staticmethod
     def load_test_yaml(test_yaml_path: Path):
@@ -306,39 +306,39 @@ class validate:
 
         dataset = Path(dataset)
         if next(dataset.iterdir()).suffix == ".wsds":
-            subdirs = [dataset]
+            column_dirs = [dataset]
             dataset = dataset.parent
         else:
-            subdirs = list(dataset.iterdir())
+            column_dirs = list(dataset.iterdir())
             if skip_audio:
-                subdirs = [dir for dir in subdirs if dir.name != "audio"]
+                column_dirs = [dir for dir in column_dirs if dir.name != "audio"]
 
         ds = WSDataset(dataset)
         shards = ds.get_shard_list()
         missing_shards = defaultdict(int)
         for shard in tqdm(shards, desc=str(dataset)):
             expected_keys = generate_all_keys_for_shard(ds.index, shard)
-            for subdir in subdirs:
-                if not subdir.is_dir():
+            for column_dir in column_dirs:
+                if not column_dir.is_dir():
                     continue
-                shard_fname = (Path(shard[0]) / subdir / shard[1]).with_suffix(".wsds")
+                shard_fname = (Path(shard[0]) / column_dir / shard[1]).with_suffix(".wsds")
                 if not shard_fname.exists():
-                    missing_shards[subdir] += 1
+                    missing_shards[column_dir] += 1
                 else:
                     try:
                         if not pl.scan_ipc(shard_fname).select((pl.col("__key__") == expected_keys).all()).collect().item():
-                            tqdm.write(f"Shard {shard} in {subdir} has keys that don't match the index.")
+                            tqdm.write(f"Shard {shard} in {column_dir} has keys that don't match the index.")
                     except pl.exceptions.ShapeError as err:
-                        tqdm.write(f"Shard {shard} in {subdir} has {pl.scan_ipc(shard_fname).select(pl.len()).collect().item()} keys while we expect {len(expected_keys)}.")
+                        tqdm.write(f"Shard {shard} in {column_dir} has {pl.scan_ipc(shard_fname).select(pl.len()).collect().item()} keys while we expect {len(expected_keys)}.")
                     reader = pa.RecordBatchFileReader(pa.memory_map(str(shard_fname)))
                     batch_size = int(reader.schema.metadata[b'batch_size'])
                     for i in range(reader.num_record_batches - 1):
                         batch = reader.get_batch(i)
                         if len(batch) != batch_size:
-                            tqdm.write(f"Batch {i} in shard {shard} in {subdir} has incorrect length.")
-        for subdir, count in missing_shards.items():
+                            tqdm.write(f"Batch {i} in shard {shard} in {column_dir} has incorrect length.")
+        for column_dir, count in missing_shards.items():
             tqdm.write("")
-            tqdm.write(f"{subdir}: missing {count} shards")
+            tqdm.write(f"{column_dir}: missing {count} shards")
 
     @staticmethod
     def all(base_path, skip_audio=True):
@@ -374,10 +374,14 @@ def get_shard_schema(fname):
 
 
 def generate_all_keys_for_shard(index, shard):
-    if index.has_dataset_path:
-        N, shard_id = index.query("SELECT n_samples, shard_id FROM shards WHERE shards.dataset_path = ? AND shards.shard = ?", *shard).fetchone()
+    partition, shard_name = shard
+    if index.has_partition or index.has_dataset_path:
+        N, shard_id = index.query(
+            f"SELECT n_samples, shard_id FROM shards AS s WHERE {index._partition_col} = ? AND s.shard = ?",
+            partition, shard_name,
+        ).fetchone()
     else:
-        N, shard_id = index.query("SELECT n_samples, shard_id FROM shards WHERE shards.shard = ?", shard[1]).fetchone()
+        N, shard_id = index.query("SELECT n_samples, shard_id FROM shards WHERE shards.shard = ?", shard_name).fetchone()
     files = index.query("SELECT name, offset FROM files WHERE files.shard_id == ?", shard_id).fetchall()
     df = pl.DataFrame(files, schema=["name", "offset"], orient="row")
     if not index.metadata["segmented"]:
@@ -420,7 +424,7 @@ def init(
         with WSDSIndexWriter(fname) as index:
             with multiprocessing.Pool(num_workers) as p:
                 for r in progress_bar(p.imap_unordered(shard_extractor, all_shards), total=len(all_shards)):
-                    r["dataset_path"] = ""
+                    r["partition"] = ""
                     try:
                         index.append(r)
                     except:
@@ -477,7 +481,7 @@ def init_split(
                 try:
                     with multiprocessing.Pool(num_workers) as p:
                         for r in p.imap_unordered(shard_extractor, all_shards):
-                            r["dataset_path"] = Path(split) / new_dataset
+                            r["partition"] = Path(split) / new_dataset
                             try:
                                 index.append(r)
                             except:
@@ -492,7 +496,7 @@ def init_split(
             new_fields = {
                 k: v
                 for k, v in ds.fields.items()
-                for (_subdir, col) in [v[0]]
+                for (_column_dir, col) in [v[0]]
                 if col not in ["sample_source_id", "src_key"]
             }
             if vad_column:
