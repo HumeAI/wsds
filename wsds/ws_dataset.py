@@ -356,6 +356,23 @@ class WSDataset:
 
     def _check_for_subsampling(self, shard_subsample):
         if shard_subsample is None:
+            # Check if we're running inside a PyTorch DataLoader worker
+            try:
+                import torch.utils.data as torch_data
+
+                worker_info = torch_data.get_worker_info()
+                if worker_info is not None:
+                    print("\n" + "=" * 80)
+                    print("WARNING: wsds is running in subsampling modee inside a PyTorch DataLoader!")
+                    print("Each worker will only load the same small subset of shards by default!")
+                    print("This is probably not what you want, so we abort.")
+                    print("")
+                    print("To fix this, explicitly pass shard_subsample=1 to the WSDataset constructor.")
+                    print("=" * 80 + "\n")
+                    raise ValueError("WSDataset was used in a dataloader without an explicit subsampling config")
+            except ImportError:
+                pass  # torch not installed
+
             if not self.index or self.index.n_shards < 150:
                 shard_subsample = 1
             else:
