@@ -38,7 +38,7 @@ def find_first_shard(path):
     return None
 
 
-def list_all_columns(ds_path, shard_name=None, include_in_progress=True, key_folder=None):
+def list_all_columns(ds_path, shard_name=None):
     """Given a dataset path, return a list of all columns.
 
     If you also give a shard name it greatly speeds it up
@@ -53,13 +53,12 @@ def list_all_columns(ds_path, shard_name=None, include_in_progress=True, key_fol
             continue
         if not p.is_dir():
             continue
-        is_in_progress = p.suffix == ".in-progress"
-        if is_in_progress and not include_in_progress:
-            continue
-        if shard_name is None or is_in_progress:
+        if shard_name is None:
             fname = find_first_shard(p)
         else:
             fname = (p / shard_name).with_suffix(".wsds")
+            if not fname.exists():
+                fname = find_first_shard(p)
         if fname and fname.exists():
             try:
                 columns = get_columns(fname)
@@ -68,10 +67,8 @@ def list_all_columns(ds_path, shard_name=None, include_in_progress=True, key_fol
                 continue
             for col in columns:
                 if col == "__key__":
-                    if not is_in_progress or key_folder == fname.parent.name:
-                        # We need a subdir that has all shards but we don't wanna list all of them (that's expensive)
-                        # so instead we rely on a subdir naming convention (the .in-progress suffix) and never use these
-                        key_col.append((fname.stat().st_size, p.name, col))
+                    # List all potential __key__ columns (they should be in each shard)
+                    key_col.append((fname.stat().st_size, p.name, col))
                     continue
                 # seems like we should fix this during the original conversion
                 if col in cols or col in dupes:
@@ -84,10 +81,7 @@ def list_all_columns(ds_path, shard_name=None, include_in_progress=True, key_fol
                 else:
                     cols[col] = (p.name, col)
     # use the smallest shards for __key__ (should be the fastest)
-    if key_folder is not None:
-        cols["__key__"] = next(col for col in key_col if key_folder == col[1])[1:]
-    elif len(key_col) > 0:
-        cols["__key__"] = sorted(key_col)[0][1:]
+    cols["__key__"] = [x[1:] for x in sorted(key_col)]
     return dict(sorted(cols.items()))
 
 

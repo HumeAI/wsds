@@ -448,7 +448,6 @@ def init_split(
     source_dataset: Path | None = None,
     vad_column: str | None = None,
     num_workers: int = 64,
-    include_in_progress: bool = False,
     index_path: str = ".",
 ):
     """Initialize a new dataset, from scratch or from a segmentation of an existing one."""

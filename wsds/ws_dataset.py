@@ -56,6 +56,11 @@ class WSDataset:
     def __init__(self, dataset_dir: str | Path, include_in_progress: bool = True, key_folder: str | None = None, disable_memory_map: bool = False):
         self.dataset_dir = self._resolve_path(dataset_dir)
 
+        if include_in_progress is not True:
+            print("NOTE: include_in_progress is deprecated and all subdirs are included by default")
+        if key_folder is not None:
+            print("NOTE: key_folder is deprecated and key folder is selected automatically")
+
         self.index = None
         self.segmented = False
         self.disable_memory_map = disable_memory_map
@@ -71,12 +76,8 @@ class WSDataset:
             self.fields = meta['fields']
         else:
             dataset_path, shard_name  = next(self.index.shards()) if self.index else ("", None)
-            self.fields = list_all_columns(
-                self.dataset_dir / dataset_path, shard_name, include_in_progress=include_in_progress
-            )
-            self.fields.update(list_all_columns(
-                self.dataset_dir, include_in_progress=include_in_progress, key_folder=key_folder
-            ))
+            self.fields = list_all_columns(self.dataset_dir / dataset_path, shard_name)
+            self.fields.update(list_all_columns(self.dataset_dir))
         if 'computed_columns' in meta:
             self.computed_columns = meta['computed_columns']
         else:
@@ -254,14 +255,19 @@ class WSDataset:
                     # __key__ exists in all shards
                     needed_special_columns.append(col)
                     continue
-                subdir, field = self.fields[col]
+                value = self.fields[col]
+                # FIXME: figure out a way to handle all candidates for __key__
+                if isinstance(value[0], str):
+                    subdir, field = value
+                else:
+                    subdir, field = value[0]
                 assert col == field, "renamed fields are not supported in SQL queries yet"
                 subdirs[subdir].append(field)
             exprs.append(expr)
 
         # If only __key__ is in the query, we need to load shards from at least one subdir
         key_value = self.fields["__key__"]
-        key_subdir = key_value[0]
+        key_subdir = key_value[0] if isinstance(key_value[0], str) else key_value[0][0]
         if needed_special_columns:
             if subdirs:
                 key_subdir = list(subdirs.keys())[0]
@@ -439,7 +445,8 @@ class WSDataset:
         return (Path(dir) / shard_name).with_suffix(".wsds")
 
     def _register_wsds_links(self):
-        for subdir, _ in self.fields.values():
+        for value in self.fields.values():
+            subdir = value[0] if isinstance(value[0], str) else value[0][0]
             if subdir.endswith(".wsds-link"):
                 spec = json.loads((self.dataset_dir / subdir).read_text())
                 self.computed_columns[subdir] = spec
@@ -481,8 +488,16 @@ class WSDataset:
         return shard
 
     def get_sample(self, shard_name, field, offset):
-        subdir, column = self.fields[field]
-        return self.get_shard(subdir, shard_name).get_sample(column, offset)
+        value = self.fields[field]
+        alternatives = [value] if isinstance(value[0], str) else value
+        last_err = None
+        for subdir, column in alternatives:
+            try:
+                return self.get_shard(subdir, shard_name).get_sample(column, offset)
+            except WSShardMissingError as e:
+                last_err = e
+                continue
+        raise last_err
 
     def parse_key(self, key):
         if self.segmented:
