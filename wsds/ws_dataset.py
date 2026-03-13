@@ -14,7 +14,7 @@ from .utils import (
     list_all_columns,
     list_all_shards,
     parse_key,
-    prefetch_shard_tails,
+    validate_shards,
     scan_ipc,
 )
 from .ws_index import WSIndex
@@ -274,16 +274,16 @@ class WSDataset:
             shard_list = rng.sample(shard_list, int(len(shard_list) * shard_subsample))
 
         # Prefetch shard tails concurrently to warm up the filesystem cache
-        prefetch_shard_tails(self, shard_list, list(subdirs.keys()))
+        verified_shard_list = validate_shards(self, shard_list, list(subdirs.keys()))
 
         row_merge = []
         subdir_samples = {}
         missing = defaultdict(list)
-        for shard in shard_list:
+        for shard, shard_ok in verified_shard_list:
             col_merge = []
             for subdir, fields in subdirs.items():
                 shard_path = self.get_shard_path(subdir, shard)
-                if shard_path.exists():
+                if shard_ok:
                     df = scan_ipc(shard_path, glob=False).select(fields)
                     if subdir not in subdir_samples:
                         subdir_samples[subdir] = df.clear().collect()

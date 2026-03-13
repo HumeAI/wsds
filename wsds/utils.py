@@ -1,5 +1,7 @@
+import os
 import re
-from concurrent.futures import ThreadPoolExecutor
+import traceback
+from concurrent.futures import ProcessPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -234,13 +236,27 @@ def format_duration(duration):
     else:
         return f"{hours:.2f} hours"
 
+def preload_shard(shard_fname):
+    try:
+        with open(shard_fname, "rb") as f:
+            f.seek(-6, os.SEEK_END)
+            if f.read() != b'ARROW1':
+                print(f"Invalid file format {shard_fname}: ARROW1 magic not found")
+                return False
+    except FileNotFoundError:
+        return False
+    except OSError as err:
+        traceback.print_exc()
+        print(f"OSError while loading {shard_fname}: {err}")
+        return False
+    return True
 
-def prefetch_shard_tails(
+def validate_shards(
     dataset: "WSDataset", shards: list[tuple[str, str]], subdirs: list[str], tail_bytes: int = 10240
 ):
-    """Prefetch the last `tail_bytes` of shard files for the given shards and subdirs.
+    """Prefetch and validate shard files for the given shards and subdirs.
 
-    Uses a ThreadPoolExecutor to load them concurrently, which helps with network filesystems
+    Uses a ProcessPoolExecutor to load them concurrently, which helps with network filesystems
     where latency is the bottleneck. This is useful before operations that need to read
     from multiple shards (like WSSample.__repr__ or SQL queries).
 
@@ -249,19 +265,10 @@ def prefetch_shard_tails(
         shards: List of (dataset_path, shard_name) tuples identifying the shards
         subdirs: List of subdirectory names to prefetch
         tail_bytes: Number of bytes to read from the end of each file (default 10KB)
-    """
 
-    def read_tail(args: tuple[tuple[str, str], str]) -> tuple[tuple[str, str], str, bytes | None]:
-        shard_name, subdir = args
-        shard_path = dataset.get_shard_path(subdir, shard_name)
-        try:
-            file_size = shard_path.stat().st_size
-            read_size = min(tail_bytes, file_size)
-            with open(shard_path, "rb") as f:
-                f.seek(max(0, file_size - read_size))
-                return (shard_name, subdir, f.read(read_size))
-        except (FileNotFoundError, OSError):
-            return (shard_name, subdir, None)
+    Returns:
+        List of shards that loaded successfully across all subdirs
+    """
 
     # Filter out computed columns (they don't have actual shard files)
     actual_subdirs = [s for s in subdirs if s not in dataset.computed_columns]
@@ -270,9 +277,12 @@ def prefetch_shard_tails(
         return []
 
     # Create all combinations of shards and subdirs
-    tasks = [(shard, subdir) for shard in shards for subdir in actual_subdirs]
+    shard_files = [dataset.get_shard_path(subdir, shard_name) for shard_name in shards for subdir in actual_subdirs]
 
-    with ThreadPoolExecutor(max_workers=min(len(tasks), 64)) as executor:
-        results = list(executor.map(read_tail, tasks))
+    with ProcessPoolExecutor(max_workers=min(len(shard_files), 64)) as executor:
+        results = list(executor.map(preload_shard, shard_files))
 
-    return results
+    # Check that all subdirs loaded successfully for each shard
+    # Return all given shards with an ok flag
+    num_subdirs = len(actual_subdirs)
+    return [(shard, all(results[i * num_subdirs : (i + 1) * num_subdirs])) for i, shard in enumerate(shards)]
