@@ -116,10 +116,14 @@ class WSIndex:
 
     @functools.cached_property
     def audio_duration(self):
+        if "audio_duration" in self.metadata:
+            return self.metadata["audio_duration"]
         return self.conn.execute("SELECT SUM(audio_duration) FROM files;").fetchone()[0]
 
     @functools.cached_property
     def speech_duration(self):
+        if "speech_duration" in self.metadata:
+            return self.metadata["speech_duration"]
         return self.conn.execute("SELECT SUM(speech_duration) FROM files;").fetchone()[0]
 
     def shards(self):
