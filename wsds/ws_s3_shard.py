@@ -1,15 +1,12 @@
 import os
-import pickle
 import typing
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Optional, Tuple
 from urllib.parse import urlparse
 
-import numpy as np
-
 from .pupyarrow.file_reader import S3FileReader
-from .pupyarrow.pupyarrow import FeatherFile
+from .pupyarrow.pupyarrow import FeatherFile, LazyBinaryArray
 from .utils import WSShardMissingError
-from .ws_audio import AudioReader
+from .ws_decode import decode_sample
 from .ws_shard import WSShardInterface
 
 if TYPE_CHECKING:
@@ -23,9 +20,9 @@ class WSS3Shard(WSShardInterface):
     IPC footer and the specific batch(es) needed are fetched, rather than
     downloading the entire shard file."""
 
-    def __init__(self, dataset: "WSDataset", bucket: str, key: str, shard_name=None, s3_client=None):
+    def __init__(self, dataset: "WSDataset", bucket: str, key: str, shard_ref: Optional[Tuple[str, str]]=None, s3_client=None):
         self.dataset = dataset
-        self.shard_name = shard_name
+        self.shard_ref = shard_ref
         self.bucket = bucket
         self.key = key
 
@@ -47,14 +44,14 @@ class WSS3Shard(WSShardInterface):
         self._batch = None
 
     @classmethod
-    def from_s3_url(cls, dataset: "WSDataset", url: str, shard_name=None, s3_client=None):
+    def from_s3_url(cls, dataset: "WSDataset", url: str, shard_ref: Optional[Tuple[str, str]]=None, s3_client=None):
         """Construct from an s3://bucket/key URL."""
         parsed = urlparse(url)
         if parsed.scheme != "s3":
             raise ValueError(f"expected s3:// URL, got: {url}")
         bucket = parsed.netloc
         key = parsed.path.lstrip("/")
-        return cls(dataset, bucket, key, shard_name=shard_name, s3_client=s3_client)
+        return cls(dataset, bucket, key, shard_ref=shard_ref, s3_client=s3_client)
 
     @classmethod
     def get_columns(cls, link, dataset):
@@ -65,13 +62,13 @@ class WSS3Shard(WSShardInterface):
         return {col: col for col in columns if col != "__key__"}
 
     @classmethod
-    def from_link(cls, link, dataset, shard_name):
+    def from_link(cls, link, dataset, shard_ref):
         """Create an S3 shard from a link spec."""
-        dataset_path, shard = shard_name
+        partition, shard = shard_ref
         prefix = link["prefix"]
-        key = f"{prefix}/{dataset_path}/{shard}.wsds" if dataset_path else f"{prefix}/{shard}.wsds"
+        key = f"{prefix}/{partition}/{shard}.wsds" if partition else f"{prefix}/{shard}.wsds"
         s3_client = cls._make_s3_client(link.get("endpoint_url"))
-        return cls(dataset, link["bucket"], os.path.normpath(key), shard_name=shard_name, s3_client=s3_client)
+        return cls(dataset, link["bucket"], os.path.normpath(key), shard_ref=shard_ref, s3_client=s3_client)
 
     @classmethod
     def _make_s3_client(cls, endpoint_url=None):
@@ -124,19 +121,12 @@ class WSS3Shard(WSShardInterface):
             raise KeyError(f"column {column} not found in shard {self._s3_path()}")
         data = col[j]
         try:
-            if column.endswith("npy"):
-                return np.load(data)
-            elif column.endswith("pyd"):
-                return pickle.load(data)
-            elif column.endswith("txt"):
-                return data if isinstance(data, str) else data.decode("utf-8")
-            elif column in self.dataset._audio_file_keys:
+            if isinstance(col, LazyBinaryArray):
                 data._optimal_read_size = 2 * 1024 * 1024
-                return AudioReader(data)
-            else:
-                return data
+                return decode_sample(column, data)
         except Exception as e:
             raise ValueError(f"Failed to decode column {column} in shard {self._s3_path()} (offset {offset}): {e}")
+        return data
 
     def __repr__(self):
         r = f"WSS3Shard('{self._s3_path()}')"

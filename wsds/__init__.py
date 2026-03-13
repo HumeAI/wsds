@@ -1,11 +1,7 @@
 """
-# wsds dataset library
 
-Usage example:
->>> from wsds import WSDataset
->>> dataset = WSDataset("librilight/v3-vad_ws")
->>> for sample in dataset.random_samples(5):
->>>     print(sample['__key__'], sample['txt'])
+.. include:: ../README.md
+.. include:: ../docs/dataset-structure.md
 
 """
 
