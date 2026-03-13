@@ -1,6 +1,6 @@
 import os
 import typing
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Optional, Tuple
 from urllib.parse import urlparse
 
 from .pupyarrow.file_reader import S3FileReader
@@ -20,9 +20,9 @@ class WSS3Shard(WSShardInterface):
     IPC footer and the specific batch(es) needed are fetched, rather than
     downloading the entire shard file."""
 
-    def __init__(self, dataset: "WSDataset", bucket: str, key: str, shard_name=None, s3_client=None):
+    def __init__(self, dataset: "WSDataset", bucket: str, key: str, shard_ref: Optional[Tuple[str, str]]=None, s3_client=None):
         self.dataset = dataset
-        self.shard_name = shard_name
+        self.shard_ref = shard_ref
         self.bucket = bucket
         self.key = key
 
@@ -44,14 +44,14 @@ class WSS3Shard(WSShardInterface):
         self._batch = None
 
     @classmethod
-    def from_s3_url(cls, dataset: "WSDataset", url: str, shard_name=None, s3_client=None):
+    def from_s3_url(cls, dataset: "WSDataset", url: str, shard_ref: Optional[Tuple[str, str]]=None, s3_client=None):
         """Construct from an s3://bucket/key URL."""
         parsed = urlparse(url)
         if parsed.scheme != "s3":
             raise ValueError(f"expected s3:// URL, got: {url}")
         bucket = parsed.netloc
         key = parsed.path.lstrip("/")
-        return cls(dataset, bucket, key, shard_name=shard_name, s3_client=s3_client)
+        return cls(dataset, bucket, key, shard_ref=shard_ref, s3_client=s3_client)
 
     @classmethod
     def get_columns(cls, link, dataset):
@@ -68,7 +68,7 @@ class WSS3Shard(WSShardInterface):
         prefix = link["prefix"]
         key = f"{prefix}/{partition}/{shard}.wsds" if partition else f"{prefix}/{shard}.wsds"
         s3_client = cls._make_s3_client(link.get("endpoint_url"))
-        return cls(dataset, link["bucket"], os.path.normpath(key), shard_name=shard_ref, s3_client=s3_client)
+        return cls(dataset, link["bucket"], os.path.normpath(key), shard_ref=shard_ref, s3_client=s3_client)
 
     @classmethod
     def _make_s3_client(cls, endpoint_url=None):

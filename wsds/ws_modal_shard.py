@@ -1,6 +1,6 @@
 import os
 import typing
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Optional, Tuple
 
 from .pupyarrow.file_reader import ModalFileReader
 from .pupyarrow.pupyarrow import FeatherFile, LazyBinaryArray
@@ -18,9 +18,9 @@ class WSModalShard(WSShardInterface):
     that only the IPC footer and the specific batch(es) needed are fetched,
     rather than downloading the entire shard file."""
 
-    def __init__(self, dataset: "WSDataset", volume_name: str, path: str, shard_name=None):
+    def __init__(self, dataset: "WSDataset", volume_name: str, path: str, shard_ref: Optional[Tuple[str, str]]=None):
         self.dataset = dataset
-        self.shard_name = shard_name
+        self.shard_ref = shard_ref
         self.volume_name = volume_name
         self.path = path
 
@@ -49,7 +49,7 @@ class WSModalShard(WSShardInterface):
         # volume paths are absolute from the volume root.
         while path.startswith("../"):
             path = path[3:]
-        return cls(dataset, link["volume_name"], path, shard_name=shard_ref)
+        return cls(dataset, link["volume_name"], path, shard_ref=shard_ref)
 
     @classmethod
     def get_columns(cls, link, dataset):
