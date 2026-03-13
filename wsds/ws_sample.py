@@ -195,5 +195,26 @@ class WSSample:
         return marimo.Html(html)
 
     def _ipython_display_(self):
-        from IPython.display import display, Markdown
-        display(Markdown(f"```python\n{self.__repr__()}\n```"))
+        import random
+
+        from IPython.display import HTML, display
+
+        special = {}
+
+        def ipython_repr(x):
+            if hasattr(x, "_repr_html_"):
+                rand_str = "__%030x__" % random.getrandbits(60)
+                special[rand_str] = x._repr_html_()
+                return rand_str
+            else:
+                return repr(x)
+
+        # Jupyter Markdown renders client-side so we cannot use the same trick as Marimo
+        html = ('<pre style="font-family: monospace; white-space: pre-wrap;">' +
+            self.__repr__(repr=ipython_repr).replace("<", "&lt;").replace(">", "&gt;") +
+            '</pre>')
+
+        for k, v in special.items():
+            html = html.replace(k, v)
+
+        display(HTML(html))
