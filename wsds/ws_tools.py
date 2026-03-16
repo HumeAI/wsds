@@ -610,62 +610,6 @@ def write_batch(batch, out_path, compression: str | None = None):
             sink.write(row)
 
 
-def convert_mka_to_audio(
-    input_dir: str,
-    output_dir: str,
-    output_format: str = "flac",
-    sort_files: bool = False,
-) -> list[Path]:
-    """Convert .mka files to another audio format, preserving duration.
-
-    MKA (Matroska audio) files from WebRTC recordings often contain timestamp
-    gaps. A naive ``ffmpeg -i in.mka out.flac`` silently drops the gaps,
-    producing a shorter file. This function uses ``-af aresample=async=1``
-    to fill gaps with silence so that the output duration matches the source.
-
-    Returns the list of output file paths.
-    """
-    import subprocess
-
-    from tqdm import tqdm
-
-    input_dir, output_dir = Path(input_dir), Path(output_dir)
-    output_dir.mkdir(parents=True, exist_ok=True)
-
-    file_iter = input_dir.rglob("*.mka")
-    files = sorted(file_iter) if sort_files else list(file_iter)
-    print(f"[INFO] Found {len(files)} .mka files under {input_dir}")
-
-    outputs: list[Path] = []
-    failed: list[Path] = []
-    for mka in tqdm(files, ncols=90, desc=f"Converting MKA → {output_format.upper()}"):
-        rel = mka.relative_to(input_dir).with_suffix(f".{output_format}")
-        out = output_dir / rel
-        out.parent.mkdir(parents=True, exist_ok=True)
-
-        r = subprocess.run(
-            [
-                "ffmpeg", "-nostdin", "-y", "-hide_banner", "-loglevel", "error",
-                "-i", str(mka),
-                "-af", "aresample=async=1",
-                str(out),
-            ],
-            capture_output=True,
-        )
-        if r.returncode != 0:
-            tqdm.write(f"[WARN] FAILED: {mka}")
-            tqdm.write(r.stderr.decode()[-200:])
-            failed.append(mka)
-        else:
-            outputs.append(out)
-
-    print(f"[DONE] {len(outputs)} converted, {len(failed)} failed.")
-    if failed:
-        for f in failed:
-            print(f"  FAILED: {f}")
-    return outputs
-
-
 @command
 def shard_from_audio_dir(
     input_dir: str,
