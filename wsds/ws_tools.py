@@ -74,7 +74,7 @@ def inspect_dataset(input_path, verbose=True):
 def inspect_shard(input_path):
     reader = pa.RecordBatchFileReader(pa.memory_map(str(input_path)))
     num_batches = reader.num_record_batches
-    total_rows = sum(reader.get_batch(i).num_rows for i in range(num_batches))
+    total_rows = int(reader.schema.metadata[b'batch_size']) * (reader.num_record_batches-1) + reader.get_batch(reader.num_record_batches-1).num_rows
 
     print(f"Batches: {num_batches}")
     print(f"Rows: {total_rows}")
