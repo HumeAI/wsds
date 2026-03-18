@@ -39,7 +39,7 @@ def _list(input_shard: str):
     else:
         has_invalid_batches = False
         reader = pa.RecordBatchFileReader(pa.memory_map(input_shard))
-        batch_size = int(reader.schema.metadata[b'batch_size'])
+        batch_size = int(reader.schema.metadata[b"batch_size"])
         try:
             for i in range(reader.num_record_batches):
                 b = reader.get_batch(i)
@@ -73,8 +73,11 @@ def inspect_dataset(input_path, verbose=True):
 
 def inspect_shard(input_path):
     reader = pa.RecordBatchFileReader(pa.memory_map(str(input_path)))
-    print(f"Batches: {reader.num_record_batches}")
-    print(f"Rows: {int(reader.schema.metadata[b'batch_size']) * reader.num_record_batches}")
+    num_batches = reader.num_record_batches
+    total_rows = sum(reader.get_batch(i).num_rows for i in range(num_batches))
+
+    print(f"Batches: {num_batches}")
+    print(f"Rows: {total_rows}")
     print(f"Schema:\n{reader.schema}")
     print_head(input_path)
 
@@ -170,7 +173,7 @@ class validate:
                             print(indented(" " * len(prefix), shard))
                         print()
             if None not in schemas.values() and complete_in_progress:
-                os.rename(column_dir, str(column_dir).replace('.in-progress', ''))
+                os.rename(column_dir, str(column_dir).replace(".in-progress", ""))
 
     @staticmethod
     def load_test_yaml(test_yaml_path: Path):
@@ -326,12 +329,19 @@ class validate:
                     missing_shards[column_dir] += 1
                 else:
                     try:
-                        if not pl.scan_ipc(shard_fname).select((pl.col("__key__") == expected_keys).all()).collect().item():
+                        if (
+                            not pl.scan_ipc(shard_fname)
+                            .select((pl.col("__key__") == expected_keys).all())
+                            .collect()
+                            .item()
+                        ):
                             tqdm.write(f"Shard {shard} in {column_dir} has keys that don't match the index.")
                     except pl.exceptions.ShapeError as err:
-                        tqdm.write(f"Shard {shard} in {column_dir} has {pl.scan_ipc(shard_fname).select(pl.len()).collect().item()} keys while we expect {len(expected_keys)}.")
+                        tqdm.write(
+                            f"Shard {shard} in {column_dir} has {pl.scan_ipc(shard_fname).select(pl.len()).collect().item()} keys while we expect {len(expected_keys)}."
+                        )
                     reader = pa.RecordBatchFileReader(pa.memory_map(str(shard_fname)))
-                    batch_size = int(reader.schema.metadata[b'batch_size'])
+                    batch_size = int(reader.schema.metadata[b"batch_size"])
                     for i in range(reader.num_record_batches - 1):
                         batch = reader.get_batch(i)
                         if len(batch) != batch_size:
@@ -378,10 +388,13 @@ def generate_all_keys_for_shard(index, shard):
     if index.has_partition or index.has_dataset_path:
         N, shard_id = index.query(
             f"SELECT n_samples, shard_id FROM shards AS s WHERE {index._partition_col} = ? AND s.shard = ?",
-            partition, shard_name,
+            partition,
+            shard_name,
         ).fetchone()
     else:
-        N, shard_id = index.query("SELECT n_samples, shard_id FROM shards WHERE shards.shard = ?", shard_name).fetchone()
+        N, shard_id = index.query(
+            "SELECT n_samples, shard_id FROM shards WHERE shards.shard = ?", shard_name
+        ).fetchone()
     files = index.query("SELECT name, offset FROM files WHERE files.shard_id == ?", shard_id).fetchall()
     df = pl.DataFrame(files, schema=["name", "offset"], orient="row")
     if not index.metadata["segmented"]:
@@ -418,7 +431,7 @@ def init(
 
     ds = WSDataset(source_dataset)
     shard_extractor = functools.partial(extract_index_for_shard, source_dataset, vad_column=vad_column)
-    all_shards = ds.get_shard_list(ignore_index = True)
+    all_shards = ds.get_shard_list(ignore_index=True)
 
     with AtomicFile(new_dataset / "index.sqlite3") as fname:
         with WSDSIndexWriter(fname) as index:
@@ -446,6 +459,7 @@ def init(
                         )
                     )
 
+
 @command
 def init_split(
     splits_path: Path,
@@ -468,15 +482,16 @@ def init_split(
     from . import AtomicFile, WSDataset
     from .ws_index import WSDSIndexWriter
 
-    with AtomicFile(Path(index_path)/"index.sqlite3") as fname:
+    with AtomicFile(Path(index_path) / "index.sqlite3") as fname:
         with WSDSIndexWriter(fname) as index:
-
             splits = [x for x in Path(splits_path).iterdir() if x.is_dir()]
 
             for split in progress_bar(splits):
                 ds = WSDataset(Path(split) / source_dataset)
-                shard_extractor = functools.partial(extract_index_for_shard, Path(split) / source_dataset, vad_column=vad_column)
-                all_shards = ds.get_shard_list(ignore_index = True)
+                shard_extractor = functools.partial(
+                    extract_index_for_shard, Path(split) / source_dataset, vad_column=vad_column
+                )
+                all_shards = ds.get_shard_list(ignore_index=True)
 
                 try:
                     with multiprocessing.Pool(num_workers) as p:
@@ -500,15 +515,20 @@ def init_split(
                 if col not in ["sample_source_id", "src_key"]
             }
             if vad_column:
-                index.append_metadata({"computed_columns": {
-                    "audio.wsds-computed": {
-                        "dataset_dir": os.path.relpath(source_dataset, new_dataset),
-                        "loader": ["wsds.ws_shard", "WSSourceAudioShard"],
-                        "vad_column": vad_column,
+                index.append_metadata(
+                    {
+                        "computed_columns": {
+                            "audio.wsds-computed": {
+                                "dataset_dir": os.path.relpath(source_dataset, new_dataset),
+                                "loader": ["wsds.ws_shard", "WSSourceAudioShard"],
+                                "vad_column": vad_column,
+                            }
+                        }
                     }
-                }})
+                )
                 new_fields["audio"] = [("audio.wsds-computed", "audio")]
             index.append_metadata({"fields": new_fields})
+
 
 def extract_index_for_shard(dataset, shard, vad_column=None):
     from . import WSDataset
@@ -530,7 +550,7 @@ def extract_index_for_shard(dataset, shard, vad_column=None):
             if vad.size > 0:
                 speech_duration = float((vad[:, -1] - vad[:, -2]).sum())  # tend - tstart
 
-        audio_duration = s['load_duration'] or s['est_duration'] or -1
+        audio_duration = s["load_duration"] or s["est_duration"] or -1
 
         if (
             n > 0
@@ -578,25 +598,22 @@ def _remove_columns(*fnames, remove: str = ""):
                 with pa.ipc.new_file(tmp, table2.schema.with_metadata(reader.schema.metadata)) as sink:
                     sink.write_table(table2)
 
+
 def episode_stats(shard_path):
     return (
         pl.read_ipc(shard_path, memory_map=False)
-        .with_columns(
-            parsed_key = pl.col('__key__').str.extract_groups(r"(?<episode>.*)_(?<offset>[0-9]+)$")
-        )
-        .unnest('parsed_key')
-        .group_by('episode')
-        .agg(
-            consecutive = (pl.col('offset').cast(pl.Int32()).diff().fill_null(1) == 1).all(),
-            n_segments = pl.len()
-        )
+        .with_columns(parsed_key=pl.col("__key__").str.extract_groups(r"(?<episode>.*)_(?<offset>[0-9]+)$"))
+        .unnest("parsed_key")
+        .group_by("episode")
+        .agg(consecutive=(pl.col("offset").cast(pl.Int32()).diff().fill_null(1) == 1).all(), n_segments=pl.len())
     )
 
+
 @command
-def diff_keys(source_shard : str, *shards : str):
-    base = pl.read_ipc(source_shard, memory_map=False).select(episode='__key__')
+def diff_keys(source_shard: str, *shards: str):
+    base = pl.read_ipc(source_shard, memory_map=False).select(episode="__key__")
     df = base
     for shard in shards:
-        df = df.join(episode_stats(shard), on='episode', how='outer', suffix='_'+Path(shard).parent.name)
+        df = df.join(episode_stats(shard), on="episode", how="outer", suffix="_" + Path(shard).parent.name)
     with pl.Config(tbl_rows=100):
         print(df)
