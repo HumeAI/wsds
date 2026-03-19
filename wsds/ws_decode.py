@@ -31,6 +31,8 @@ def decode_sample(column: str, data):
         return pickle.load(data)
     elif column.endswith("txt"):
         return data if isinstance(data, str) else data.read().decode("utf-8")
+    elif column.endswith(".json"):
+        return data if isinstance(data, bytes) else data.read()
     elif column in AUDIO_FILE_KEYS:
         return AudioReader(data)
     raise ValueError(f"Unknown binary column type: {column}")
