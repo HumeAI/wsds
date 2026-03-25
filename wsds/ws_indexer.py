@@ -275,16 +275,13 @@ def merge_batch_indices(
             episode_idxs.append(episode_idx)
             shard_idxs.append(shard_idx)
 
-            merge_field_errors = []
             with open(ds_path / "fields.json") as f:
                 for k, v in json.load(f).items():
                     if k not in merged_fields:
                         merged_fields[k] = v
-                    else:
-                        if v != merged_fields[k]:
-                            merge_field_errors.append(k)
-            if merge_field_errors:
-                errors.append((str(idx_file), "error merging fields", None, ", ".join(merge_field_errors)))
+                    elif isinstance(merged_fields[k], list) and isinstance(v, list):
+                        existing_set = {tuple(x) for x in merged_fields[k]}
+                        merged_fields[k] = merged_fields[k] + [x for x in v if tuple(x) not in existing_set]
         else:
             errors.append((str(idx_file), "missing file", None, None))
 
