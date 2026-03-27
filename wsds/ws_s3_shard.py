@@ -35,7 +35,7 @@ class WSS3Shard(WSShardInterface):
         try:
             self._feather = FeatherFile(self._reader)
         except s3_client.exceptions.ClientError as err:
-            raise WSShardMissingError.from_s3(s3_client, bucket, key, err)
+            raise WSShardMissingError.from_s3(s3_client, key, bucket, err)
         self.batch_size = int(self._feather.schema.custom_metadata["batch_size"])
 
         # cache
