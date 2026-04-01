@@ -71,7 +71,11 @@ class WSBatchedSink:
         try:
             record = pyarrow.RecordBatch.from_pylist(b, self._sink_schema)
         except Exception:
-            print(f"Error while serializing: {repr(b)}")
+            def _truncate(v, limit=200):
+                r = repr(v)
+                return r if len(r) <= limit else r[:limit] + f"... ({len(r)} chars)"
+            summary = [{k: _truncate(v) for k, v in row.items()} for row in b]
+            print(f"Error while serializing: {summary}")
             raise
         if self._sink is None:
             if not flush and self.min_batch_size_bytes:
