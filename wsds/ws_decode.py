@@ -5,7 +5,7 @@ import typing
 import numpy as np
 import pyarrow as pa
 
-from .ws_audio import AudioReader
+from .ws_audio import WSAudioEpisode
 
 AUDIO_FILE_KEYS = frozenset(
     [
@@ -50,7 +50,7 @@ def decode_sample(column: str, data):
         import json
         return json.load(fd)
     elif ext in AUDIO_FILE_KEYS:
-        return AudioReader(fd)
+        return WSAudioEpisode(fd)
     else:
         return fd.read()
 
@@ -90,7 +90,7 @@ def get_audio(sample, audio_columns=None):
         audio_columns: Optional list of column names to try. Defaults to AUDIO_FILE_KEYS.
 
     Returns:
-        The audio value (typically an AudioReader or WSAudio).
+        The audio value (typically a WSAudioEpisode or WSAudioSegment).
 
     Raises:
         KeyError: If no audio column is found in the sample.
