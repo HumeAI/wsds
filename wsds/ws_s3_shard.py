@@ -13,10 +13,36 @@ if TYPE_CHECKING:
     from .ws_dataset import WSDataset
 
 
-class WSS3Shard(WSShardInterface):
-    """A shard reader that loads data from S3 via boto3 range requests.
+def create_s3_client(link=None):
+    """Create a shared aiobotocore S3 client.
 
-    Uses pupyarrow's FeatherFile with an S3File wrapper so that only the
+    Reads `endpoint_url` and AWS credentials from `link` (falling back to the
+    WSDS_S3_ENDPOINT_URL env var for the endpoint). Returns the entered client
+    and its context manager (for cleanup). The client should be shared across
+    all S3FileReader instances.
+    """
+    from aiobotocore.session import AioSession
+    from botocore.config import Config
+
+    from .pupyarrow.file_reader import _get_io_loop
+
+    link = link or {}
+    kwargs = {"config": Config(max_pool_connections=50)}
+    endpoint_url = link.get("endpoint_url") or os.environ.get("WSDS_S3_ENDPOINT_URL")
+    if endpoint_url:
+        kwargs["endpoint_url"] = endpoint_url
+    for k in ("aws_access_key_id", "aws_secret_access_key", "aws_session_token", "region_name"):
+        if link.get(k):
+            kwargs[k] = link[k]
+    ctx = AioSession().create_client("s3", **kwargs)
+    client = _get_io_loop().run(ctx.__aenter__())
+    return client, ctx
+
+
+class WSS3Shard(WSShardInterface):
+    """A shard reader that loads data from S3 via aiobotocore range requests.
+
+    Uses pupyarrow's FeatherFile with an S3FileReader so that only the
     IPC footer and the specific batch(es) needed are fetched, rather than
     downloading the entire shard file."""
 
@@ -27,9 +53,7 @@ class WSS3Shard(WSShardInterface):
         self.key = key
 
         if s3_client is None:
-            import boto3
-
-            s3_client = boto3.client("s3")
+            s3_client, _ = create_s3_client()
 
         self._reader = S3FileReader(s3_client, bucket, key)
         try:
@@ -68,36 +92,30 @@ class WSS3Shard(WSShardInterface):
         prefix = link.get("prefix", "")
         column_dir = link.get("subdir", "")
         parts = [p for p in (prefix, partition, column_dir, f"{shard}.wsds") if p]
-        key = os.path.normpath("/".join(parts))
-        # Strip leading "../" — partition is relative to the index but S3 paths are absolute from bucket root.
-        while key.startswith("../"):
-            key = key[3:]
-        s3_client = cls._make_s3_client(link)
+        # we make it an absolute path so any initial ../ are stripped out
+        key = os.path.normpath("/" + "/".join(parts))
+        s3_client, _ = create_s3_client(link)
         return cls(dataset, link["bucket"], key, shard_ref=shard_ref, s3_client=s3_client)
-
-    @classmethod
-    def _make_s3_client(cls, link=None):
-        import boto3
-
-        link = link or {}
-        keys = ("endpoint_url", "aws_access_key_id", "aws_secret_access_key", "aws_session_token", "region_name")
-        kwargs = {k: link[k] for k in keys if link.get(k)}
-        kwargs.setdefault("endpoint_url", os.environ.get("WSDS_S3_ENDPOINT_URL"))
-        return boto3.client("s3", **{k: v for k, v in kwargs.items() if v})
 
     @classmethod
     def _discover_columns_from_s3(cls, link):
         """Read one shard's footer from S3 to discover column names."""
-        s3_client = cls._make_s3_client(link)
+        from .pupyarrow.file_reader import _get_io_loop
+
         bucket = link["bucket"]
         prefix = link["prefix"]
-        response = s3_client.list_objects_v2(Bucket=bucket, Prefix=prefix, MaxKeys=10)
-        for obj in response.get("Contents", []):
-            if obj["Key"].endswith(".wsds"):
-                reader = S3FileReader(s3_client, bucket, obj["Key"])
-                feather = FeatherFile(reader)
-                return feather.schema.names
-        raise ValueError(f"No .wsds files found in s3://{bucket}/{prefix}")
+        s3_client, _ = create_s3_client(link)
+
+        async def _discover():
+            response = await s3_client.list_objects_v2(Bucket=bucket, Prefix=prefix, MaxKeys=10)
+            for obj in response.get("Contents", []):
+                if obj["Key"].endswith(".wsds"):
+                    reader = S3FileReader(s3_client, bucket, obj["Key"])
+                    feather = FeatherFile(reader)
+                    return feather.schema.names
+            raise ValueError(f"No .wsds files found in s3://{bucket}/{prefix}")
+
+        return _get_io_loop().run(_discover())
 
     def _s3_path(self) -> str:
         return f"s3://{self.bucket}/{self.key}"
