@@ -8,6 +8,8 @@ from pathlib import Path
 
 import pyarrow
 
+from .ws_decode import encode_value
+
 
 def indented(prefix, obj):
     lines = str(obj).split("\n")
@@ -58,7 +60,7 @@ class WSBatchedSink:
         self._sink_schema = schema
 
     def write(self, x):
-        self._buffer.append(x)
+        self._buffer.append({k: encode_value(k, v) for k, v in x.items()})
         if len(self._buffer) >= self.batch_size:
             self.write_batch(self._buffer)
 
