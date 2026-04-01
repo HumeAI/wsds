@@ -936,6 +936,8 @@ class RecordBatch:
     @staticmethod
     def _get_num_buffers_for_type(type_id: ArrowType) -> int:
         """Return the number of buffers used by a type."""
+        if type_id == ArrowType.Null:
+            return 0
         if type_id in (ArrowType.Utf8, ArrowType.Binary):
             return 3
         if type_id in (ArrowType.LargeUtf8, ArrowType.LargeBinary):
