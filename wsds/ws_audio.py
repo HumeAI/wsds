@@ -3,7 +3,7 @@ from __future__ import annotations
 import typing
 from dataclasses import dataclass
 
-from .audio_codec import audio_to_html, create_decoder, encode_mp3
+from .audio_codec import audio_to_html, create_decoder, encode_audio
 from .pupyarrow import pupyarrow
 
 
@@ -97,7 +97,7 @@ class WSAudioEpisode:
     def _display_(self):
         import marimo
 
-        return marimo.audio(encode_mp3(self.read_segment()))
+        return marimo.audio(encode_audio(self.read_segment()))
 
 
 @dataclass(frozen=True)
@@ -170,4 +170,4 @@ class WSAudioSegment:
     def _display_(self):
         import marimo
 
-        return marimo.audio(encode_mp3(self.load()))
+        return marimo.audio(encode_audio(self.load()))
