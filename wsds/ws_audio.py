@@ -26,8 +26,6 @@ class WSAudioEpisode:
     src: typing.Any
     _decoder: typing.Any = None
     _sample_rate: int | None = None
-    skip_samples: int = 0
-
     def __repr__(self):
         return f"WSAudioEpisode(src={type(self.src)}, sample_rate={self._sample_rate})"
 
@@ -46,22 +44,11 @@ class WSAudioEpisode:
 
     def get_decoder(self, sample_rate=None):
         """Lazily creates/caches decoder via audio_codec.create_decoder()."""
-        sample_rate_switch = False
-        if self._sample_rate is not None:
-            sample_rate_switch = self._sample_rate != sample_rate
-
-        if self._decoder is None or sample_rate_switch:
-            decoder = create_decoder(to_filelike(self.src), sample_rate=sample_rate)
-            # mp3 has encoder delays that are not handled well when seeking
-            if decoder.metadata.codec == "mp3":
-                self.skip_samples = 1105
-
-            if sample_rate is None:
-                sample_rate = decoder.metadata.sample_rate
-
-            self._decoder = decoder
-            self._sample_rate = sample_rate
-
+        requested_sr = sample_rate or (self._decoder and self._decoder.metadata.sample_rate)
+        if self._decoder is None or requested_sr != self._sample_rate:
+            self.src.seek(0)
+            self._decoder = create_decoder(self.src, sample_rate=sample_rate)
+            self._sample_rate = sample_rate or self._decoder.metadata.sample_rate
         return self._decoder, self._sample_rate
 
     @property
@@ -76,14 +63,9 @@ class WSAudioEpisode:
 
     def read_segment(self, start=0, end=None, sample_rate=None):
         decoder, sample_rate = self.get_decoder(sample_rate)
-        seek_adjustment = self.skip_samples / sample_rate if start > 0 else 0
-        _samples = decoder.get_samples_played_in_range(
-            start + seek_adjustment, end + seek_adjustment if end is not None else None
-        )
-        if hasattr(_samples, "data"):
-            samples = _samples.data
-        else:
-            samples = _samples
+        samples = decoder.get_samples_played_in_range(start, end)
+        if hasattr(samples, "data"):
+            samples = samples.data
         samples.sample_rate = sample_rate
         return samples
 
