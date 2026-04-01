@@ -3,23 +3,25 @@ from __future__ import annotations
 import typing
 from dataclasses import dataclass
 
-from .audio_codec import audio_to_html, create_decoder, encode_mp3, to_filelike
+from .audio_codec import audio_to_html, create_decoder, encode_mp3
+from .pupyarrow import pupyarrow
 
-
-def load_segment(src, start, end, sample_rate=None):
-    """Efficiently loads an audio segment from `src` (see below) `tstart` to `tend` seconds while
-    optionally resampling it to `sample_rate`.
-
-    `src` can be one of:
-    - a file-like object
-    - a byte string
-    - a PyArrow binary buffer in memory"""
-    return AudioReader(src).read_segment(start, end, sample_rate=sample_rate)
 
 
 @dataclass()
-class AudioReader:
-    """A lazy seeking-capable audio reader for random-access to recordings stored in wsds shards."""
+class WSAudioEpisode:
+    """A lazy seeking-capable audio reader for random-access to recordings stored in wsds shards.
+
+    >>> from wsds import WSDataset
+    >>> ds = WSDataset("librilight/source")
+    >>> audio = ds[0].get_audio()
+    >>> audio.load().shape
+    torch.Size([1, 17884909])
+    >>> audio.read_segment(start=2, end=5).shape
+    torch.Size([1, 48000])
+    >>> audio.read_segment(start=2, end=5, sample_rate=8000).shape
+    torch.Size([1, 24000])
+    """
 
     src: typing.Any
     _decoder: typing.Any = None
@@ -27,7 +29,7 @@ class AudioReader:
     skip_samples: int = 0
 
     def __repr__(self):
-        return f"AudioReader(src={type(self.src)}, sample_rate={self._sample_rate})"
+        return f"WSAudioEpisode(src={type(self.src)}, sample_rate={self._sample_rate})"
 
     def unwrap(self):
         """Return the raw audio bytes"""
@@ -35,8 +37,12 @@ class AudioReader:
             return self.src.as_buffer().to_pybytes()
         elif isinstance(self.src, (bytes, bytearray)):
             return self.src
+        elif isinstance(self.src, pupyarrow.LazyBuffer):
+            return self.src.read()
         else:
-            raise TypeError(f"Unsupported AudioReader src type: {type(self.src)}")
+            raise TypeError(f"Unsupported src type: {type(self.src)}")
+
+    to_bytes = unwrap
 
     def get_decoder(self, sample_rate=None):
         """Lazily creates/caches decoder via audio_codec.create_decoder()."""
@@ -95,52 +101,56 @@ class AudioReader:
 
 
 @dataclass(frozen=True)
-class WSAudio:
-    """A lazy reference to a single sample from a segmented audio file."""
+class WSAudioSegment:
+    """A lazy reference to a single sample from a segmented audio file.
+    """
 
-    audio_reader: AudioReader
+    episode: WSAudioEpisode
     tstart: float
     tend: float
+
+    def __repr__(self) -> str:
+        return f"WSAudioSegment(episode={self.episode}, tstart={self.tstart!s}, tend={self.tend!s})"
 
     @property
     def duration(self) -> float:
         """Duration of the audio segment in seconds."""
         return self.tend - self.tstart
 
-    def with_context(self, before: float = 0, after: float = 0) -> "WSAudio":
-        """Return a new WSAudio with expanded timestamps to include surrounding context.
+    def with_context(self, before: float = 0, after: float = 0) -> "WSAudioSegment":
+        """Return a new WSAudioSegment with expanded timestamps to include surrounding context.
 
         Args:
             before: Seconds of context to add before the segment start (will not go below 0)
             after: Seconds of context to add after the segment end
 
         Returns:
-            A new WSAudio instance with adjusted timestamps
+            A new WSAudioSegment instance with adjusted timestamps
         """
-        return WSAudio(
-            audio_reader=self.audio_reader,
+        return WSAudioSegment(
+            episode=self.episode,
             tstart=max(0, self.tstart - before),
             tend=self.tend + after,
         )
 
-    def with_timestamps(self, tstart: float | None = None, tend: float | None = None) -> "WSAudio":
-        """Return a new WSAudio with modified timestamps.
+    def with_timestamps(self, tstart: float | None = None, tend: float | None = None) -> "WSAudioSegment":
+        """Return a new WSAudioSegment with modified timestamps.
 
         Args:
             tstart: New start time in seconds (None to keep current)
             tend: New end time in seconds (None to keep current)
 
         Returns:
-            A new WSAudio instance with the specified timestamps
+            A new WSAudioSegment instance with the specified timestamps
         """
-        return WSAudio(
-            audio_reader=self.audio_reader,
+        return WSAudioSegment(
+            episode=self.episode,
             tstart=tstart if tstart is not None else self.tstart,
             tend=tend if tend is not None else self.tend,
         )
 
     def load(self, sample_rate=None, pad_to_seconds=None):
-        samples = self.audio_reader.read_segment(self.tstart, self.tend, sample_rate)
+        samples = self.episode.read_segment(self.tstart, self.tend, sample_rate)
         sample_rate = samples.sample_rate
         if pad_to_seconds is not None:
             import torch
@@ -152,7 +162,7 @@ class WSAudio:
 
     @property
     def metadata(self):
-        return self.audio_reader.metadata
+        return self.episode.metadata
 
     def _repr_html_(self):
         return audio_to_html(self.load())
