@@ -4,5 +4,4 @@ numpy
 polars>=1.36.1
 pyarrow>=20
 torch
-torchaudio
 # torchcodec – optional, it causes serious performance regressions
