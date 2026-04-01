@@ -201,37 +201,58 @@ def decode_segment(src, start=0, end=None, sample_rate=None):
     return samples
 
 
-def encode_mp3(samples) -> bytes:
-    """Encode a torch tensor to MP3 bytes.
+def encode_audio(samples, format="mp3", sample_rate=None, bitrate=None) -> bytes:
+    """Encode a torch tensor to audio bytes.
 
-    Tries torchffmpeg -> torchcodec -> torchaudio as encoder backends.
+    Tries humecodec -> torchcodec -> torchaudio as encoder backends.
+
+    >>> from wsds import WSDataset
+    >>> audio = WSDataset("librilight/source")[0].get_audio()
+    >>> samples = audio.read_segment(start=0, end=2.0, sample_rate=16000)
+    >>> mp3 = encode_audio(samples, format="mp3")
+    >>> mp3[:3] == b"ID3" or mp3[:2] in (b"\\xff\\xfb", b"\\xff\\xf3")
+    True
+    >>> ogg = encode_audio(samples, format="ogg")  # doctest: +SKIP
+    >>> ogg[:4] == b"OggS"  # doctest: +SKIP
+    True
 
     Args:
         samples: A torch.Tensor with a .sample_rate attribute. Shape: (channels, frames).
+        format: Output format, e.g. "mp3", "ogg" (Opus). Default: "mp3".
+        sample_rate: Target sample rate (defaults to samples.sample_rate).
+        bitrate: Bitrate in bps. Only used for formats that support it (e.g. Opus).
 
     Returns:
-        MP3-encoded bytes.
+        Encoded audio bytes.
     """
+    if sample_rate is None:
+        sample_rate = int(samples.sample_rate)
+
     out = io.BytesIO()
     try:
-        from torchffmpeg import MediaEncoder
+        from humecodec import MediaEncoder
 
-        sample_rate = int(samples.sample_rate)
-        # samples is (channels, frames), write_audio_chunk expects (frames, channels)
         waveform = samples.mT.float().contiguous()
-        enc = MediaEncoder(out, "mp3")
-        enc.add_audio_stream(sample_rate=sample_rate, num_channels=waveform.size(1), format="flt")
+        enc = MediaEncoder(out, format)
+        stream_kwargs = dict(sample_rate=sample_rate, num_channels=waveform.size(1), format="flt")
+        if format == "ogg":
+            from humecodec import CodecConfig
+
+            stream_kwargs.update(encoder="libopus", encoder_format="flt")
+            if bitrate:
+                stream_kwargs["codec_config"] = CodecConfig(bit_rate=bitrate)
+        enc.add_audio_stream(**stream_kwargs)
         with enc.open():
             enc.write_audio_chunk(0, waveform)
     except ImportError:
         try:
             from torchcodec.encoders import AudioEncoder
 
-            AudioEncoder(samples, sample_rate=int(samples.sample_rate)).to_file_like(out, "mp3")
+            AudioEncoder(samples, sample_rate=sample_rate).to_file_like(out, format)
         except ImportError:
             import torchaudio
 
-            torchaudio.save(out, samples, int(samples.sample_rate), format="mp3")
+            torchaudio.save(out, samples, sample_rate, format=format)
 
     return out.getvalue()
 
@@ -247,5 +268,5 @@ def audio_to_html(samples) -> str:
     """
     import base64
 
-    mp3_data = base64.b64encode(encode_mp3(samples)).decode("ascii")
+    mp3_data = base64.b64encode(encode_audio(samples, format="mp3")).decode("ascii")
     return f'<audio controls src="data:audio/mp3;base64,{mp3_data}"></audio>'
