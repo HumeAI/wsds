@@ -66,7 +66,7 @@ shape: (5_271_939, 3)
 
 ```pycon
 >>> x['audio']
-WSAudio(audio_reader=AudioReader(src=<class '_io.BytesIO'>, sample_rate=None), tstart=614.46246, tend=627.3976)
+WSAudioSegment(episode=WSAudioEpisode(src=<class 'pyarrow.lib.BufferReader'>, sample_rate=None), tstart=614.46246, tend=627.3976)
 
 ```
 

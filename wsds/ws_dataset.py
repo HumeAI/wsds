@@ -39,8 +39,8 @@ class WSDataset:
     >>> sample = dataset["large/5304/the_tinted_venus_1408_librivox_64kb_mp3/tintedvenus_05_anstey_64kb_090"]
     >>> print(repr(sample["transcription_wslang_raw.txt"]))
     ' I will accompany you," she said.'
-    >>> sample['audio']
-    WSAudio(audio_reader=AudioReader(src=<class '_io.BytesIO'>, sample_rate=None), tstart=1040.2133, tend=1042.8413)
+    >>> sample['audio'].load().shape
+    torch.Size([1, 42049])
     """
 
     dataset_root: Path
