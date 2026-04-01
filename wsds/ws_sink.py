@@ -42,6 +42,7 @@ class WSBatchedSink:
         min_batch_size_bytes: int = 4 * 1024 * 1024,  # minimum size of a batch in bytes (1MB by default)
         compression: str | None = "zstd",
         throwaway=False,  # discard the temp file, useful for testing and benchmarking
+        schema: pyarrow.Schema | dict | None = None,  # optional schema to enforce type coercion
     ):
         self.fname = fname
         self.batch_size = 1
@@ -52,6 +53,9 @@ class WSBatchedSink:
 
         self._buffer = []
         self._sink = None
+        if isinstance(schema, dict):
+            schema = pyarrow.schema(list(schema.items()))
+        self._sink_schema = schema
 
     def write(self, x):
         self._buffer.append(x)
@@ -63,7 +67,7 @@ class WSBatchedSink:
         import pyarrow
 
         try:
-            record = pyarrow.RecordBatch.from_pylist(b, self._sink_schema if self._sink else None)
+            record = pyarrow.RecordBatch.from_pylist(b, self._sink_schema)
         except Exception:
             print(f"Error while serializing: {repr(b)}")
             raise
@@ -132,6 +136,7 @@ def WSSink(
     compression: str | None = "zstd",  # pass None to disable compression
     min_batch_size_bytes: int = 4 * 1024 * 1024,  # auto-increase the batch size until it's at least this size in bytes
     ephemeral: bool = False,  # discard the temp file, useful for testing and benchmarking
+    schema: pyarrow.Schema | dict | None = None,  # optional schema to enforce type coercion
 ):
     """Context manager to atomically create a `.wsds` shard.
 
@@ -142,5 +147,7 @@ def WSSink(
     ```
     """
     with AtomicFile(fname, ephemeral) as fname:
-        with WSBatchedSink(fname, min_batch_size_bytes, compression) as sink:
+        with WSBatchedSink(
+            fname, min_batch_size_bytes=min_batch_size_bytes, compression=compression, schema=schema
+        ) as sink:
             yield sink
