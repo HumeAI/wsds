@@ -52,7 +52,6 @@ class WSBatchedSink:
 
         self._buffer = []
         self._sink = None
-        self.bytes_written = 0  # estimated uncompressed bytes flushed to disk
 
     def write(self, x):
         self._buffer.append(x)
@@ -81,7 +80,6 @@ class WSBatchedSink:
         if record.schema != self._sink_schema:
             raise SampleFormatChanged(self._sink_schema, record.schema)
         self._sink.write(record)
-        self.bytes_written += record.nbytes
         self._buffer.clear()
 
     def close(self):
@@ -151,30 +149,17 @@ def WSSink(
 DEFAULT_MAX_SHARD_BYTES = 10 * 1024 * 1024 * 1024  # 10 GB
 
 
-def _estimate_sample_bytes(sample: dict) -> int:
-    """Rough estimate of a sample's size in bytes."""
-    total = 0
-    for v in sample.values():
-        if isinstance(v, (bytes, bytearray)):
-            total += len(v)
-        elif isinstance(v, str):
-            total += len(v.encode("utf-8", errors="replace"))
-        else:
-            total += 8  # scalar
-    return total
-
-
 class ShardedSink:
-    """Write samples across multiple shard files, rotating when a shard exceeds a size limit.
+    """Write samples across multiple .wsds shard files, rotating on size or count.
 
-    Generates shard filenames as ``{output_dir}/{prefix}-{index:05d}.wsds``.
+    Generates filenames as ``{output_dir}/{prefix}-{index:05d}.wsds``.
 
     Example::
 
         with ShardedSink("output/audio") as sink:
             for sample in samples:
                 sink.write(sample)
-        print(sink.shard_paths)  # list of written shard files
+        print(sink.shard_paths)
     """
 
     def __init__(
@@ -194,53 +179,63 @@ class ShardedSink:
 
         self._shard_index = 0
         self._samples_in_shard = 0
-        self._sink = None
-        self._atomic = None
+        self._current_sink = None   # WSBatchedSink
+        self._current_atomic = None  # AtomicFile
         self._shard_paths: list[Path] = []
 
     @property
     def shard_paths(self) -> list[Path]:
         return list(self._shard_paths)
 
-    def _shard_fname(self) -> Path:
+    def _shard_path(self) -> Path:
         return self.output_dir / f"{self.prefix}-{self._shard_index:05d}.wsds"
 
     def _open_shard(self):
         self.output_dir.mkdir(parents=True, exist_ok=True)
-        fname = self._shard_fname()
-        self._atomic = AtomicFile(fname)
-        tmp_name = self._atomic.__enter__()
-        self._sink = WSBatchedSink(tmp_name, compression=self.compression)
-        self._sink.__enter__()
+        self._current_atomic = AtomicFile(self._shard_path())
+        tmp = self._current_atomic.__enter__()
+        self._current_sink = WSBatchedSink(tmp, compression=self.compression)
+        self._current_sink.__enter__()
         self._samples_in_shard = 0
 
     def _close_shard(self):
-        if self._sink is not None:
-            self._sink.__exit__(None, None, None)
-            self._atomic.__exit__(None, None, None)
-            self._shard_paths.append(self._shard_fname())
-            self._sink = None
-            self._atomic = None
-            self._shard_index += 1
-
-    def _estimated_shard_bytes(self) -> int:
-        if self._sink is None:
-            return 0
-        # bytes_written tracks flushed batches; also estimate buffered data
-        buf_estimate = sum(_estimate_sample_bytes(s) for s in self._sink._buffer)
-        return self._sink.bytes_written + buf_estimate
+        if self._current_sink is None:
+            return
+        try:
+            self._current_sink.__exit__(None, None, None)
+            self._current_atomic.__exit__(None, None, None)
+        except Exception:
+            # Best-effort cleanup on failure
+            try:
+                self._current_atomic.__exit__(*([Exception] * 3))
+            except Exception:
+                pass
+            raise
+        self._shard_paths.append(self._shard_path())
+        self._current_sink = None
+        self._current_atomic = None
+        self._shard_index += 1
 
     def _should_rotate(self) -> bool:
+        sink = self._current_sink
+        if sink is None:
+            return False
         if self.max_samples_per_shard is not None and self._samples_in_shard >= self.max_samples_per_shard:
             return True
-        if self._estimated_shard_bytes() >= self.max_shard_bytes:
-            return True
+        # Check on-disk file size (accurate after batches flush).
+        # For large samples (audio), each sample exceeds the 4MB batch threshold
+        # so batches flush immediately and file size is accurate.
+        try:
+            if os.path.getsize(sink.fname) >= self.max_shard_bytes:
+                return True
+        except OSError:
+            pass
         return False
 
     def write(self, sample: dict):
-        if self._sink is None:
+        if self._current_sink is None:
             self._open_shard()
-        self._sink.write(sample)
+        self._current_sink.write(sample)
         self._samples_in_shard += 1
         if self._should_rotate():
             self._close_shard()
@@ -251,7 +246,6 @@ class ShardedSink:
     def __exit__(self, exc_type, exc_value, traceback):
         if exc_type is None:
             self._close_shard()
-        elif self._sink is not None:
-            # Discard partial shard on error
-            self._sink.__exit__(exc_type, exc_value, traceback)
-            self._atomic.__exit__(exc_type, exc_value, traceback)
+        elif self._current_sink is not None:
+            self._current_sink.__exit__(exc_type, exc_value, traceback)
+            self._current_atomic.__exit__(exc_type, exc_value, traceback)
