@@ -26,6 +26,10 @@ class AudioDecoder:
         self.debug = False
         self.codec_delay = codec_delay
         self.init_skip_samples = getattr(metadata, 'start_skip_samples', 0) or 0
+        # Codecs where flush produces unreliable output (wrong skip_samples,
+        # wrong frame sizes). For these, always read from the start and trim.
+        codec_name = getattr(metadata, 'codec', '') or ''
+        self._seek_unreliable = codec_name in ('wmav2', 'wmapro')
 
     def get_samples_played_in_range(self, tstart=0, tend=None, margin=.25):
         import torch
@@ -34,13 +38,21 @@ class AudioDecoder:
         while chunk is not None:
             (chunk,) = self.reader.pop_chunks()
 
-        seek_adj = self.init_skip_samples / self.metadata.sample_rate if tstart > 0 else 0
-        tstart += seek_adj
-        if tend is not None:
-            tend += seek_adj
+        # For short seeks and unreliable codecs, read from the start.
+        # This avoids seek accuracy issues for tstart < 5s (tiny cost) and
+        # codec flush bugs for wmav2/wmapro.
+        read_from_start = self._seek_unreliable or tstart < 5.0
 
-        # rough seek
-        self.reader.seek(max(0, tstart - margin), "key")
+        # Only adjust for start_skip_samples when actually seeking — when
+        # reading from start, the decoder applies skip_samples automatically.
+        seek_adj = 0.0
+        if not read_from_start:
+            seek_adj = self.init_skip_samples / self.metadata.sample_rate
+            tstart += seek_adj
+            if tend is not None:
+                tend += seek_adj
+        seek_target = 0.0 if read_from_start else max(0, tstart - margin)
+        self.reader.seek(seek_target, "key")
 
         chunks = []
         more_data = True
@@ -52,11 +64,8 @@ class AudioDecoder:
             if tend is not None and chunk.pts + chunk.shape[0] / self.sample_rate > tend + margin:
                 break
 
-        # If the seek landed at (or near) the start of the stream, treat it
-        # the same as tstart=0: ignore the first-chunk PTS so that the timeline
-        # matches what ffmpeg CLI / torchaudio produce for a full decode.
-        seek_landed_at_start = tstart == 0 or chunks[0].pts < margin
-        chunk0_pts = 0.0 if seek_landed_at_start else chunks[0].pts
+        # When reading from start, ignore PTS so timeline matches ffmpeg CLI.
+        chunk0_pts = 0.0 if read_from_start else chunks[0].pts
         prefix = round(tstart * self.sample_rate) - round(chunk0_pts * self.sample_rate)
 
         if self.debug:
