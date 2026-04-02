@@ -8,7 +8,7 @@
 from .ws_dataset import WSDataset
 from .ws_sample import WSSample
 from .ws_shard import WSSourceAudioShard
-from .ws_sink import AtomicFile, SampleFormatChanged, WSSink
+from .ws_sink import AtomicFile, SampleFormatChanged, ShardedSink, WSSink
 
 __all__ = [
     WSDataset,
@@ -16,5 +16,6 @@ __all__ = [
     WSSourceAudioShard,
     AtomicFile,
     SampleFormatChanged,
+    ShardedSink,
     WSSink,
 ]
