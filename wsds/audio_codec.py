@@ -19,14 +19,13 @@ import pyarrow as pa
 class AudioDecoder:
     """Unified audio decoder that works with humecodec or torchaudio backends."""
 
-    def __init__(self, reader, metadata, sample_rate):
+    def __init__(self, reader, metadata, sample_rate, codec_delay=0):
         self.reader = reader
         self.metadata = metadata
         self.sample_rate = sample_rate
         self.debug = False
-        # ffmpeg's demuxer skips start_skip_samples at pts=0 (start of stream)
-        # but NOT after seeking. We compensate by adjusting the trim point.
-        self.start_skip_samples = getattr(metadata, 'start_skip_samples', 0) or 0
+        self.codec_delay = codec_delay
+        self.init_skip_samples = getattr(metadata, 'start_skip_samples', 0) or 0
 
     def get_samples_played_in_range(self, tstart=0, tend=None, margin=.25):
         import torch
@@ -35,46 +34,39 @@ class AudioDecoder:
         while chunk is not None:
             (chunk,) = self.reader.pop_chunks()
 
-        # ffmpeg's demuxer sets start_skip_samples (e.g. mp3 encoder delay)
-        # and applies it only at pts=0 via side data. After seeking, the skip
-        # is NOT applied, so the decoded audio starts start_skip_samples
-        # earlier than expected. We add the delay to tstart to skip past it.
-        seek_adj = self.start_skip_samples / self.metadata.sample_rate if tstart > 0 else 0
+        seek_adj = self.init_skip_samples / self.metadata.sample_rate if tstart > 0 else 0
         tstart += seek_adj
         if tend is not None:
             tend += seek_adj
 
         # rough seek
         self.reader.seek(max(0, tstart - margin), "key")
-        if tend is None:
-            n_samples = float('inf')
-        else:
-            # does not need to be precise
-            n_samples = round((tend - tstart + margin * 2) * self.sample_rate)
 
         chunks = []
         more_data = True
-        while more_data and n_samples > 0:
+        while more_data:
             if self.reader.fill_buffer() == 1:
                 more_data = False
             (chunk,) = self.reader.pop_chunks()
-            n_samples -= chunk.shape[0]
             chunks.append(chunk)
-        # Round each term to integer samples independently to avoid float
-        # precision loss from subtracting two close timestamps before scaling.
-        # When starting from 0, ignore the first chunk's PTS and use all
-        # decoded samples. This matches torchaudio/ffmpeg CLI behavior which
-        # treats the first output sample as t=0 regardless of encoder delay
-        # (negative PTS) or skip_samples (positive PTS).
-        chunk0_pts = 0.0 if tstart == 0 else chunks[0].pts
+            if tend is not None and chunk.pts + chunk.shape[0] / self.sample_rate > tend + margin:
+                break
+
+        # If the seek landed at (or near) the start of the stream, treat it
+        # the same as tstart=0: ignore the first-chunk PTS so that the timeline
+        # matches what ffmpeg CLI / torchaudio produce for a full decode.
+        seek_landed_at_start = tstart == 0 or chunks[0].pts < margin
+        chunk0_pts = 0.0 if seek_landed_at_start else chunks[0].pts
         prefix = round(tstart * self.sample_rate) - round(chunk0_pts * self.sample_rate)
 
         if self.debug:
-            c0 = chunks[0]
+            import torch as _t
+            total_samples = sum(c.shape[0] for c in chunks)
             print(f"    [decode] codec={self.metadata.codec} sr={self.sample_rate} "
-                  f"tstart={tstart:.4f} seek_adj={seek_adj:.4f} "
-                  f"chunk0.pts={c0.pts:.6f} chunk0.samples={c0.shape[0]} "
-                  f"n_chunks={len(chunks)} prefix={prefix}", flush=True)
+                  f"tstart_orig={tstart - seek_adj:.4f} tstart_adj={tstart:.4f} "
+                  f"seek_adj={seek_adj:.6f} (init_skip={self.init_skip_samples} codec_delay={self.codec_delay}) "
+                  f"chunk0.pts={chunks[0].pts:.6f} chunk0_pts_used={chunk0_pts:.6f} "
+                  f"n_chunks={len(chunks)} total_samples={total_samples} prefix={prefix}", flush=True)
 
         if prefix < 0:
             if self.debug:
@@ -175,7 +167,15 @@ def create_decoder(src, sample_rate=None):
         decoder_option={"threads": "4", "thread_type": "frame"},
     )
 
-    return AudioDecoder(reader, metadata, sample_rate)
+    # Get codec_delay from the decoder (available after add_audio_stream opens the codec)
+    codec_delay = 0
+    try:
+        out_info = reader.get_out_stream_info(0)
+        codec_delay = getattr(out_info, 'codec_delay', 0) or 0
+    except Exception:
+        pass
+
+    return AudioDecoder(reader, metadata, sample_rate, codec_delay=codec_delay)
 
 
 
