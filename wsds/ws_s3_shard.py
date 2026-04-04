@@ -65,10 +65,15 @@ class WSS3Shard(WSShardInterface):
     def from_link(cls, link, dataset, shard_ref):
         """Create an S3 shard from a link spec."""
         partition, shard = shard_ref
-        prefix = link["prefix"]
-        key = f"{prefix}/{partition}/{shard}.wsds" if partition else f"{prefix}/{shard}.wsds"
+        prefix = link.get("prefix", "")
+        column_dir = link.get("subdir", "")
+        parts = [p for p in (prefix, partition, column_dir, f"{shard}.wsds") if p]
+        key = os.path.normpath("/".join(parts))
+        # Strip leading "../" — partition is relative to the index but S3 paths are absolute from bucket root.
+        while key.startswith("../"):
+            key = key[3:]
         s3_client = cls._make_s3_client(link.get("endpoint_url"))
-        return cls(dataset, link["bucket"], os.path.normpath(key), shard_ref=shard_ref, s3_client=s3_client)
+        return cls(dataset, link["bucket"], key, shard_ref=shard_ref, s3_client=s3_client)
 
     @classmethod
     def _make_s3_client(cls, endpoint_url=None):
