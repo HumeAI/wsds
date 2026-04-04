@@ -369,6 +369,83 @@ def _decompress_buffer(raw_data: bytes, compression: str | None) -> bytes:
         raise ValueError(f"Unknown compression codec: {compression}")
 
 
+class BlockCache:
+    """Sorted interval cache for byte ranges.
+
+    Stores non-overlapping ``(start, end, data)`` intervals, merging on insert.
+    Designed for caching S3 range-read results so that ffmpeg's AVIO reads
+    hit local memory instead of issuing new HTTP requests.
+
+    >>> cache = BlockCache()
+    >>> cache.put(100, b'hello')
+    >>> cache.put(105, b'world')
+    >>> cache.get(100, 10)
+    b'helloworld'
+    >>> cache.get(103, 4)
+    b'lowo'
+    >>> cache.get(100, 11) is None  # extends past cached range
+    True
+
+    Adjacent/overlapping ranges are merged:
+
+    >>> cache2 = BlockCache()
+    >>> cache2.put(0, b'AAAA')
+    >>> cache2.put(10, b'BBBB')
+    >>> cache2.put(4, b'CCCCCC')
+    >>> cache2.get(0, 14)
+    b'AAAACCCCCCBBBB'
+    """
+
+    __slots__ = ("_ranges",)
+
+    def __init__(self):
+        self._ranges: list[tuple[int, int, bytes]] = []
+
+    def get(self, offset: int, length: int) -> bytes | None:
+        """Return data if ``[offset, offset+length)`` is fully cached, else None."""
+        end = offset + length
+        for start, rend, data in self._ranges:
+            if start <= offset and rend >= end:
+                return data[offset - start : offset - start + length]
+        return None
+
+    def put(self, offset: int, data: bytes) -> None:
+        """Insert a range, merging with any overlapping/adjacent intervals."""
+        if not data:
+            return
+        new_start = offset
+        new_end = offset + len(data)
+        new_data = bytearray(data)
+
+        merged = []
+        for start, end, rdata in self._ranges:
+            if end < new_start or start > new_end:
+                # No overlap — keep as-is
+                merged.append((start, end, rdata))
+            else:
+                # Overlap or adjacent — merge into new range
+                if start < new_start:
+                    prefix = rdata[: new_start - start]
+                    new_data = bytearray(prefix) + new_data
+                    new_start = start
+                if end > new_end:
+                    suffix = rdata[new_end - start :]
+                    new_data = new_data + bytearray(suffix)
+                    new_end = end
+
+        merged.append((new_start, new_end, bytes(new_data)))
+        merged.sort(key=lambda r: r[0])
+        self._ranges = merged
+
+    @property
+    def total_bytes(self) -> int:
+        return sum(end - start for start, end, _ in self._ranges)
+
+    def __repr__(self) -> str:
+        parts = [f"[{s}:{e}]" for s, e, _ in self._ranges]
+        return f"BlockCache({', '.join(parts)}, total={self.total_bytes})"
+
+
 class LazyBuffer:
     """
     A lazy buffer that reads data on demand and implements the file-like interface.
@@ -384,9 +461,14 @@ class LazyBuffer:
     same reader with adjusted offset/length.  For uncompressed buffers the
     slice goes directly to the reader; for compressed buffers the parent data
     is decompressed once and the slice is pre-populated.
+
+    For audio seeking, call ``enable_cache()`` to activate a block cache with
+    readahead.  Then ``prepopulate(ranges)`` pre-fetches byte ranges in
+    parallel.  ffmpeg/humecodec reads hit the cache and only fetch from S3 on
+    miss.
     """
 
-    # __slots__ = ("_reader", "_offset", "_length", "_data", "_compression", "_pos")
+    READAHEAD = 256 * 1024  # readahead on cache miss
 
     def __init__(self, reader: FileReader, offset: int, length: int, compression: str | None = None):
         self._reader = reader
@@ -395,6 +477,28 @@ class LazyBuffer:
         self._data: bytes | None = None
         self._compression = compression
         self._pos = 0
+        self._cache: BlockCache | None = None
+
+    def enable_cache(self, readahead: int = 256 * 1024) -> "LazyBuffer":
+        """Activate block cache with readahead for seeking workloads."""
+        self._cache = BlockCache()
+        self.READAHEAD = readahead
+        return self
+
+    def prepopulate(self, ranges: list[tuple[int, int]]) -> None:
+        """Pre-fetch byte ranges (relative to buffer start) into the cache.
+
+        Each range is ``(offset, length)``.  Ranges are fetched via the
+        underlying reader (which may coalesce nearby reads).
+        """
+        if self._cache is None:
+            self.enable_cache()
+        for rel_offset, length in ranges:
+            length = min(length, self._length - rel_offset)
+            if length <= 0:
+                continue
+            data = self._reader.read(self._offset + rel_offset, length)
+            self._cache.put(rel_offset, data)
 
     @property
     def offset(self) -> int:
@@ -452,14 +556,26 @@ class LazyBuffer:
         """Read a byte range from the (decompressed) buffer.
 
         If the buffer is already cached, slices it. If uncompressed,
-        reads directly from the range without reading the whole buffer.
-        If compressed, falls back to a full read and slices.
+        reads directly from the range (via block cache if enabled, or
+        the reader directly). If compressed, falls back to a full read.
         """
         if self._data is not None:
             return self._data[start:end]
-        if self._compression is None:
-            return self._reader.read(self._offset + start, end - start)
-        return self._read_all()[start:end]
+        if self._compression is not None:
+            return self._read_all()[start:end]
+        # Uncompressed path — use block cache if enabled
+        length = end - start
+        if self._cache is not None:
+            cached = self._cache.get(start, length)
+            if cached is not None:
+                return cached
+            # Cache miss — fetch with readahead
+            fetch_len = max(length, self.READAHEAD)
+            fetch_len = min(fetch_len, self._length - start)
+            data = self._reader.read(self._offset + start, fetch_len)
+            self._cache.put(start, data)
+            return data[:length]
+        return self._reader.read(self._offset + start, length)
 
     def slice(self, start: int, end: int) -> "LazyBuffer":
         """Create a sub-buffer over the byte range [start, end).
@@ -496,12 +612,36 @@ class LazyBuffer:
         data = await self.async_read_all()
         return np.frombuffer(data, dtype=dtype)
 
+    async def async_prepopulate(self, ranges: list[tuple[int, int]]) -> None:
+        """Async pre-fetch of byte ranges into the cache."""
+        if self._cache is None:
+            self.enable_cache()
+        coros = []
+        for rel_offset, length in ranges:
+            length = min(length, self._length - rel_offset)
+            if length <= 0:
+                continue
+            coros.append(self._async_fetch_range(rel_offset, length))
+        if coros:
+            await asyncio.gather(*coros)
+
+    async def _async_fetch_range(self, rel_offset: int, length: int) -> None:
+        data = await self._reader.async_read(self._offset + rel_offset, length)
+        self._cache.put(rel_offset, data)
+
+    def seekable(self) -> bool:
+        return True
+
+    def readable(self) -> bool:
+        return True
+
     def __len__(self) -> int:
         return self._length
 
     def __repr__(self) -> str:
+        cached = f", cache={self._cache}" if self._cache else ""
         loaded = "loaded" if self._data is not None else "not loaded"
-        return f"LazyBuffer(offset={self._offset}, length={self._length}, {loaded})"
+        return f"LazyBuffer(offset={self._offset}, length={self._length}, {loaded}{cached})"
 
 
 class LazyArray:
