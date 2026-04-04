@@ -29,7 +29,38 @@ class AudioDecoder:
         # Codecs where flush produces unreliable output (wrong skip_samples,
         # wrong frame sizes). For these, always read from the start and trim.
         codec_name = getattr(metadata, 'codec', '') or ''
-        self._seek_unreliable = codec_name in ('wmav2', 'wmapro')
+        self._seek_unreliable = codec_name in ('wmav2', 'wmapro', 'vorbis')
+        # Raw MPEG audio formats: timestamp seek does sequential scan,
+        # byte-offset seek with our own index is much faster.
+        self._use_byte_index = codec_name in ('mp3', 'mp2', 'mp1')
+        self._packet_index = None
+
+    def _build_index(self):
+        """Build a sparse packet index for byte-offset seeking."""
+        if self._packet_index is not None:
+            return
+        try:
+            idx = self.reader.build_packet_index(
+                self.reader.default_audio_stream, 128 * 1024)
+            if idx and len(idx) > 1:
+                self._packet_index = idx
+        except Exception:
+            self._packet_index = []
+
+    def _indexed_seek(self, target_time):
+        """Seek via byte offset using the packet index. Returns the index entry's PTS or None."""
+        self._build_index()
+        if not self._packet_index:
+            return None
+        # Find last entry with pts <= target_time
+        best = self._packet_index[0]
+        for entry in self._packet_index:
+            if entry.pts_seconds <= target_time:
+                best = entry
+            else:
+                break
+        self.reader.seek_to_byte_offset(best.pos)
+        return best.pts_seconds
 
     def get_samples_played_in_range(self, tstart=0, tend=None, margin=.25):
         import torch
@@ -40,19 +71,31 @@ class AudioDecoder:
 
         # For short seeks and unreliable codecs, read from the start.
         # This avoids seek accuracy issues for tstart < 5s (tiny cost) and
-        # codec flush bugs for wmav2/wmapro.
+        # codec flush bugs for wmav2/wmapro/vorbis.
         read_from_start = self._seek_unreliable or tstart < 5.0
 
         # Only adjust for start_skip_samples when actually seeking — when
         # reading from start, the decoder applies skip_samples automatically.
         seek_adj = 0.0
+        index_pts = None
         if not read_from_start:
-            seek_adj = self.init_skip_samples / self.metadata.sample_rate
-            tstart += seek_adj
-            if tend is not None:
-                tend += seek_adj
-        seek_target = 0.0 if read_from_start else max(0, tstart - margin)
-        self.reader.seek(seek_target, "key")
+            # For raw MPEG formats, use indexed byte seek (fast, avoids sequential scan).
+            # No seek_adj needed: the index PTS and decoded audio are both in
+            # the raw timeline (skip_samples is not applied after byte seek).
+            if self._use_byte_index:
+                index_pts = self._indexed_seek(tstart - margin)
+            else:
+                # Timestamp seek: the demuxer applies start_skip_samples at
+                # pts=0 but not after seeking, so adjust tstart to compensate.
+                seek_adj = self.init_skip_samples / self.metadata.sample_rate
+                tstart += seek_adj
+                if tend is not None:
+                    tend += seek_adj
+
+        if index_pts is None:
+            # Fall back to timestamp seek (or read from start)
+            seek_target = 0.0 if read_from_start else max(0, tstart - margin)
+            self.reader.seek(seek_target, "key")
 
         chunks = []
         more_data = True
@@ -61,11 +104,23 @@ class AudioDecoder:
                 more_data = False
             (chunk,) = self.reader.pop_chunks()
             chunks.append(chunk)
-            if tend is not None and chunk.pts + chunk.shape[0] / self.sample_rate > tend + margin:
-                break
+            if tend is not None:
+                chunk_end_pts = chunk.pts + chunk.shape[0] / self.sample_rate
+                if index_pts is not None:
+                    # PTS not updated by demuxer after byte seek — estimate from index
+                    elapsed = sum(c.shape[0] for c in chunks) / self.sample_rate
+                    chunk_end_pts = index_pts + elapsed
+                if chunk_end_pts > tend + margin:
+                    break
 
-        # When reading from start, ignore PTS so timeline matches ffmpeg CLI.
-        chunk0_pts = 0.0 if read_from_start else chunks[0].pts
+        # Determine the reference PTS for trimming
+        if read_from_start:
+            chunk0_pts = 0.0
+        elif index_pts is not None:
+            # Byte seek: demuxer PTS is stale, use our index entry
+            chunk0_pts = index_pts
+        else:
+            chunk0_pts = chunks[0].pts
         prefix = round(tstart * self.sample_rate) - round(chunk0_pts * self.sample_rate)
 
         if self.debug:
