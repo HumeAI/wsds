@@ -68,6 +68,52 @@ class SampleCountMismatchError(BaseException):
         )
 
 
+def _find_reference_shard(shard_path: Path) -> Path | None:
+    """Find the smallest sibling shard to use as __key__ reference.
+
+    Mirrors the read-side logic in list_all_columns() (utils.py) which sorts
+    __key__ sources by ascending shard file size to avoid loading heavy artifacts.
+    """
+    column_dir = shard_path.parent
+    dataset_dir = column_dir.parent
+    shard_name = shard_path.name
+
+    candidates: list[tuple[int, Path]] = []
+    for sibling in dataset_dir.iterdir():
+        if sibling == column_dir:
+            continue
+        if sibling.suffix in (".wsds-link", ".wsds-computed"):
+            continue
+        if not sibling.is_dir():
+            continue
+        sibling_shard = sibling / shard_name
+        if sibling_shard.exists():
+            candidates.append((sibling_shard.stat().st_size, sibling_shard))
+
+    if not candidates:
+        return None
+    candidates.sort()
+    return candidates[0][1]
+
+
+def _read_shard_keys(shard_path: Path) -> list[str]:
+    """Read all __key__ values from a shard, in order."""
+    reader = pyarrow.ipc.open_file(pyarrow.memory_map(str(shard_path)))
+    return reader.read_all().column("__key__").to_pylist()
+
+
+def _resolve_reference_keys(shard_path: Path) -> list[str] | None:
+    """Find the smallest sibling artifact and read its __key__ column as reference.
+
+    Returns None (with a printed warning) if no sibling artifacts exist.
+    """
+    ref_shard = _find_reference_shard(shard_path)
+    if ref_shard is None:
+        print(f"Warning: no sibling artifacts found for {shard_path}, skipping key validation")
+        return None
+    return _read_shard_keys(ref_shard)
+
+
 class WSBatchedSink:
     """A helper for writing data to a PyArrow feather file.
 
@@ -188,7 +234,7 @@ def WSSink(
     compression: str | None = "zstd",  # pass None to disable compression
     min_batch_size_bytes: int = 4 * 1024 * 1024,  # auto-increase the batch size until it's at least this size in bytes
     ephemeral: bool = False,  # discard the temp file, useful for testing and benchmarking
-    reference_keys: Sequence[str] | None = None,  # expected __key__ values, validated per-sample
+    validate_keys: bool = False,  # validate __key__ values against the smallest sibling artifact
 ):
     """Context manager to atomically create a `.wsds` shard.
 
@@ -198,6 +244,7 @@ def WSSink(
             sink.write({quality_metric: 5, transcript: "Hello, World!"})
     ```
     """
-    with AtomicFile(fname, ephemeral) as fname:
-        with WSBatchedSink(fname, min_batch_size_bytes, compression, reference_keys=reference_keys) as sink:
+    reference_keys = _resolve_reference_keys(Path(fname)) if validate_keys else None
+    with AtomicFile(fname, ephemeral) as tmp_fname:
+        with WSBatchedSink(tmp_fname, min_batch_size_bytes, compression, reference_keys=reference_keys) as sink:
             yield sink

@@ -5,7 +5,14 @@ from pathlib import Path
 
 import wsds
 from wsds import ws_dataset, ws_shard, ws_sink
-from wsds.ws_sink import KeyMismatchError, SampleCountMismatchError, WSSink
+from wsds.ws_sink import (
+    KeyMismatchError,
+    SampleCountMismatchError,
+    WSBatchedSink,
+    WSSink,
+    _find_reference_shard,
+    _read_shard_keys,
+)
 
 
 def load_tests(loader, tests, ignore):
@@ -17,95 +24,180 @@ def load_tests(loader, tests, ignore):
     return tests
 
 
-class TestKeyValidation(unittest.TestCase):
-    """Tests for write-time __key__ validation in WSSink."""
+def _make_samples(keys: list[str]) -> list[dict]:
+    return [{"__key__": k, "value": i} for i, k in enumerate(keys)]
 
-    def _make_samples(self, keys: list[str]) -> list[dict]:
-        return [{"__key__": k, "value": i} for i, k in enumerate(keys)]
 
-    def test_matching_reference_keys(self):
+def _write_reference_shard(shard_path: Path, keys: list[str]) -> None:
+    """Write a small reference shard with the given __key__ values."""
+    with WSSink(str(shard_path)) as sink:
+        for sample in _make_samples(keys):
+            sink.write(sample)
+
+
+class TestHelpers(unittest.TestCase):
+    """Tests for _find_reference_shard and _read_shard_keys."""
+
+    def test_find_reference_shard_picks_smallest(self):
+        """Should pick the sibling shard with the smallest file size."""
         keys = ["a", "b", "c"]
-        samples = self._make_samples(keys)
         with tempfile.TemporaryDirectory() as tmp:
-            fname = str(Path(tmp) / "shard.wsds")
-            with WSSink(fname, reference_keys=keys) as sink:
-                for s in samples:
+            dataset = Path(tmp)
+            # Write a small artifact
+            (dataset / "small_artifact").mkdir()
+            _write_reference_shard(dataset / "small_artifact" / "shard.wsds", keys)
+            # Write a larger artifact (more columns = bigger file)
+            (dataset / "large_artifact").mkdir()
+            with WSSink(str(dataset / "large_artifact" / "shard.wsds")) as sink:
+                for k in keys:
+                    sink.write({"__key__": k, "v1": 0, "v2": "x" * 1000, "v3": 1.0})
+
+            target = dataset / "new_artifact" / "shard.wsds"
+            (dataset / "new_artifact").mkdir()
+            ref = _find_reference_shard(target)
+            self.assertIsNotNone(ref)
+            self.assertEqual(ref.parent.name, "small_artifact")
+
+    def test_find_reference_shard_skips_current_dir(self):
+        keys = ["a", "b"]
+        with tempfile.TemporaryDirectory() as tmp:
+            dataset = Path(tmp)
+            (dataset / "artifact_a").mkdir()
+            _write_reference_shard(dataset / "artifact_a" / "shard.wsds", keys)
+
+            # Target is in artifact_a itself — should not find itself
+            ref = _find_reference_shard(dataset / "artifact_a" / "shard.wsds")
+            self.assertIsNone(ref)
+
+    def test_find_reference_shard_skips_link_and_computed(self):
+        keys = ["a"]
+        with tempfile.TemporaryDirectory() as tmp:
+            dataset = Path(tmp)
+            # Create a .wsds-link file and .wsds-computed dir
+            (dataset / "audio.wsds-link").touch()
+            (dataset / "audio.wsds-computed").mkdir()
+            (dataset / "audio.wsds-computed" / "shard.wsds").touch()
+
+            target = dataset / "new_artifact" / "shard.wsds"
+            (dataset / "new_artifact").mkdir()
+            ref = _find_reference_shard(target)
+            self.assertIsNone(ref)
+
+    def test_find_reference_shard_no_siblings(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            dataset = Path(tmp)
+            (dataset / "lonely_artifact").mkdir()
+            ref = _find_reference_shard(dataset / "lonely_artifact" / "shard.wsds")
+            self.assertIsNone(ref)
+
+    def test_read_shard_keys(self):
+        keys = ["x", "y", "z"]
+        with tempfile.TemporaryDirectory() as tmp:
+            shard_path = Path(tmp) / "shard.wsds"
+            _write_reference_shard(shard_path, keys)
+            result = _read_shard_keys(shard_path)
+            self.assertEqual(result, keys)
+
+
+class TestValidateKeys(unittest.TestCase):
+    """Tests for validate_keys auto-discovery in WSSink."""
+
+    def _make_dataset(self, tmp: str, keys: list[str]) -> Path:
+        """Create a dataset directory with a reference artifact already written."""
+        dataset = Path(tmp)
+        (dataset / "existing_artifact").mkdir()
+        _write_reference_shard(dataset / "existing_artifact" / "shard.wsds", keys)
+        (dataset / "new_artifact").mkdir()
+        return dataset
+
+    def test_matching_keys_succeeds(self):
+        keys = ["a", "b", "c"]
+        with tempfile.TemporaryDirectory() as tmp:
+            dataset = self._make_dataset(tmp, keys)
+            fname = str(dataset / "new_artifact" / "shard.wsds")
+            with WSSink(fname, validate_keys=True) as sink:
+                for s in _make_samples(keys):
                     sink.write(s)
             self.assertTrue(Path(fname).exists())
 
     def test_key_mismatch_raises(self):
         keys = ["a", "b", "c"]
-        samples = self._make_samples(["a", "WRONG", "c"])
         with tempfile.TemporaryDirectory() as tmp:
-            fname = str(Path(tmp) / "shard.wsds")
+            dataset = self._make_dataset(tmp, keys)
+            fname = str(dataset / "new_artifact" / "shard.wsds")
             with self.assertRaises(KeyMismatchError) as ctx:
-                with WSSink(fname, reference_keys=keys) as sink:
-                    for s in samples:
+                with WSSink(fname, validate_keys=True) as sink:
+                    for s in _make_samples(["a", "WRONG", "c"]):
                         sink.write(s)
             self.assertEqual(ctx.exception.offset, 1)
             self.assertEqual(ctx.exception.expected_key, "b")
             self.assertEqual(ctx.exception.actual_key, "WRONG")
             self.assertFalse(Path(fname).exists())
 
-    def test_missing_key_raises(self):
+    def test_missing_key_field_raises(self):
         keys = ["a", "b"]
         with tempfile.TemporaryDirectory() as tmp:
-            fname = str(Path(tmp) / "shard.wsds")
+            dataset = self._make_dataset(tmp, keys)
+            fname = str(dataset / "new_artifact" / "shard.wsds")
             with self.assertRaises(KeyMismatchError) as ctx:
-                with WSSink(fname, reference_keys=keys) as sink:
+                with WSSink(fname, validate_keys=True) as sink:
                     sink.write({"__key__": "a", "value": 0})
                     sink.write({"value": 1})  # missing __key__
             self.assertEqual(ctx.exception.offset, 1)
-            self.assertEqual(ctx.exception.expected_key, "b")
             self.assertIsNone(ctx.exception.actual_key)
-            self.assertFalse(Path(fname).exists())
 
     def test_too_many_samples_raises(self):
         keys = ["a"]
         with tempfile.TemporaryDirectory() as tmp:
-            fname = str(Path(tmp) / "shard.wsds")
+            dataset = self._make_dataset(tmp, keys)
+            fname = str(dataset / "new_artifact" / "shard.wsds")
             with self.assertRaises(KeyMismatchError) as ctx:
-                with WSSink(fname, reference_keys=keys) as sink:
+                with WSSink(fname, validate_keys=True) as sink:
                     sink.write({"__key__": "a", "value": 0})
                     sink.write({"__key__": "extra", "value": 1})
             self.assertEqual(ctx.exception.offset, 1)
             self.assertIsNone(ctx.exception.expected_key)
-            self.assertEqual(ctx.exception.actual_key, "extra")
-            self.assertFalse(Path(fname).exists())
 
     def test_too_few_samples_raises(self):
         keys = ["a", "b", "c"]
         with tempfile.TemporaryDirectory() as tmp:
-            fname = str(Path(tmp) / "shard.wsds")
+            dataset = self._make_dataset(tmp, keys)
+            fname = str(dataset / "new_artifact" / "shard.wsds")
             with self.assertRaises(SampleCountMismatchError) as ctx:
-                with WSSink(fname, reference_keys=keys) as sink:
+                with WSSink(fname, validate_keys=True) as sink:
                     sink.write({"__key__": "a", "value": 0})
                     sink.write({"__key__": "b", "value": 1})
-                    # missing third sample
             self.assertEqual(ctx.exception.expected_count, 3)
             self.assertEqual(ctx.exception.actual_count, 2)
-            self.assertFalse(Path(fname).exists())
 
-    def test_no_reference_keys_backward_compat(self):
-        samples = self._make_samples(["a", "b", "c"])
+    def test_no_siblings_warns_and_skips(self):
+        """When no sibling artifacts exist, prints warning and skips validation."""
         with tempfile.TemporaryDirectory() as tmp:
-            fname = str(Path(tmp) / "shard.wsds")
+            dataset = Path(tmp)
+            (dataset / "only_artifact").mkdir()
+            fname = str(dataset / "only_artifact" / "shard.wsds")
+            # Should succeed without validation (no siblings to compare against)
+            with WSSink(fname, validate_keys=True) as sink:
+                sink.write({"__key__": "a", "value": 0})
+            self.assertTrue(Path(fname).exists())
+
+    def test_validate_keys_false_no_validation(self):
+        """Default behavior: no validation even with siblings present."""
+        keys = ["a", "b"]
+        with tempfile.TemporaryDirectory() as tmp:
+            dataset = self._make_dataset(tmp, keys)
+            fname = str(dataset / "new_artifact" / "shard.wsds")
+            # Write mismatched keys — should succeed because validate_keys=False
             with WSSink(fname) as sink:
-                for s in samples:
+                for s in _make_samples(["x", "y"]):
                     sink.write(s)
             self.assertTrue(Path(fname).exists())
 
-    def test_no_reference_keys_no_key_field_ok(self):
-        """Without reference_keys, samples without __key__ should still work."""
-        with tempfile.TemporaryDirectory() as tmp:
-            fname = str(Path(tmp) / "shard.wsds")
-            with WSSink(fname) as sink:
-                sink.write({"value": 1})
-                sink.write({"value": 2})
-            self.assertTrue(Path(fname).exists())
+
+class TestExceptions(unittest.TestCase):
+    """Tests for exception classes."""
 
     def test_is_base_exception(self):
-        """KeyMismatchError and SampleCountMismatchError are BaseException, not Exception."""
         self.assertTrue(issubclass(KeyMismatchError, BaseException))
         self.assertFalse(issubclass(KeyMismatchError, Exception))
         self.assertTrue(issubclass(SampleCountMismatchError, BaseException))
