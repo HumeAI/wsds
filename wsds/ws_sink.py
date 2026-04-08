@@ -5,8 +5,12 @@ import random
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import pyarrow
+
+if TYPE_CHECKING:
+    from collections.abc import Sequence
 
 
 def indented(prefix, obj):
@@ -27,6 +31,43 @@ class SampleFormatChanged(BaseException):
         )
 
 
+@dataclass
+class KeyMismatchError(BaseException):
+    fname: str
+    offset: int
+    expected_key: str | None
+    actual_key: str | None
+
+    def __str__(self):
+        if self.expected_key is None:
+            return (
+                f"Too many samples in {self.fname}: "
+                f"unexpected sample at offset {self.offset} with key '{self.actual_key}'"
+            )
+        if self.actual_key is None:
+            return (
+                f"Sample at offset {self.offset} in {self.fname} is missing '__key__' "
+                f"(expected '{self.expected_key}')"
+            )
+        return (
+            f"Key mismatch at offset {self.offset} in {self.fname}: "
+            f"expected '{self.expected_key}' but got '{self.actual_key}'"
+        )
+
+
+@dataclass
+class SampleCountMismatchError(BaseException):
+    fname: str
+    expected_count: int
+    actual_count: int
+
+    def __str__(self):
+        return (
+            f"Sample count mismatch in {self.fname}: "
+            f"expected {self.expected_count} samples but wrote {self.actual_count}"
+        )
+
+
 class WSBatchedSink:
     """A helper for writing data to a PyArrow feather file.
 
@@ -42,6 +83,7 @@ class WSBatchedSink:
         min_batch_size_bytes: int = 4 * 1024 * 1024,  # minimum size of a batch in bytes (1MB by default)
         compression: str | None = "zstd",
         throwaway=False,  # discard the temp file, useful for testing and benchmarking
+        reference_keys: Sequence[str] | None = None,  # expected __key__ values, validated per-sample
     ):
         self.fname = fname
         self.batch_size = 1
@@ -49,11 +91,23 @@ class WSBatchedSink:
         self.max_batch_size = 16384
         self.compression = compression
         self.throwaway = throwaway
+        self.reference_keys = reference_keys
 
         self._buffer = []
         self._sink = None
+        self._offset = 0
 
     def write(self, x):
+        if self.reference_keys is not None:
+            actual_key = x.get("__key__") if isinstance(x, dict) else None
+            if self._offset >= len(self.reference_keys):
+                raise KeyMismatchError(self.fname, self._offset, None, actual_key)
+            expected_key = self.reference_keys[self._offset]
+            if actual_key is None:
+                raise KeyMismatchError(self.fname, self._offset, expected_key, None)
+            if actual_key != expected_key:
+                raise KeyMismatchError(self.fname, self._offset, expected_key, actual_key)
+        self._offset += 1
         self._buffer.append(x)
         if len(self._buffer) >= self.batch_size:
             self.write_batch(self._buffer)
@@ -85,6 +139,8 @@ class WSBatchedSink:
     def close(self):
         if self._buffer:
             self.write_batch(self._buffer, flush=True)  # flush the last batch
+        if self.reference_keys is not None and self._offset != len(self.reference_keys):
+            raise SampleCountMismatchError(self.fname, len(self.reference_keys), self._offset)
         assert self._sink is not None, "closing a WSSink that was never written to"
         self._sink.close()
 
@@ -132,6 +188,7 @@ def WSSink(
     compression: str | None = "zstd",  # pass None to disable compression
     min_batch_size_bytes: int = 4 * 1024 * 1024,  # auto-increase the batch size until it's at least this size in bytes
     ephemeral: bool = False,  # discard the temp file, useful for testing and benchmarking
+    reference_keys: Sequence[str] | None = None,  # expected __key__ values, validated per-sample
 ):
     """Context manager to atomically create a `.wsds` shard.
 
@@ -142,5 +199,5 @@ def WSSink(
     ```
     """
     with AtomicFile(fname, ephemeral) as fname:
-        with WSBatchedSink(fname, min_batch_size_bytes, compression) as sink:
+        with WSBatchedSink(fname, min_batch_size_bytes, compression, reference_keys=reference_keys) as sink:
             yield sink
