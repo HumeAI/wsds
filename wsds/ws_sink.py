@@ -5,8 +5,12 @@ import random
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import pyarrow
+
+if TYPE_CHECKING:
+    from collections.abc import Sequence
 
 from .ws_decode import encode_value
 
@@ -29,6 +33,89 @@ class SampleFormatChanged(BaseException):
         )
 
 
+@dataclass
+class KeyMismatchError(BaseException):
+    fname: str
+    offset: int
+    expected_key: str | None
+    actual_key: str | None
+
+    def __str__(self):
+        if self.expected_key is None:
+            return (
+                f"Too many samples in {self.fname}: "
+                f"unexpected sample at offset {self.offset} with key '{self.actual_key}'"
+            )
+        if self.actual_key is None:
+            return (
+                f"Sample at offset {self.offset} in {self.fname} is missing '__key__' "
+                f"(expected '{self.expected_key}')"
+            )
+        return (
+            f"Key mismatch at offset {self.offset} in {self.fname}: "
+            f"expected '{self.expected_key}' but got '{self.actual_key}'"
+        )
+
+
+@dataclass
+class SampleCountMismatchError(BaseException):
+    fname: str
+    expected_count: int
+    actual_count: int
+
+    def __str__(self):
+        return (
+            f"Sample count mismatch in {self.fname}: "
+            f"expected {self.expected_count} samples but wrote {self.actual_count}"
+        )
+
+
+def _find_reference_shard(shard_path: Path) -> Path | None:
+    """Find the smallest sibling shard to use as __key__ reference.
+
+    Mirrors the read-side logic in list_all_columns() (utils.py) which sorts
+    __key__ sources by ascending shard file size to avoid loading heavy artifacts.
+    """
+    column_dir = shard_path.parent
+    dataset_dir = column_dir.parent
+    shard_name = shard_path.name
+
+    candidates: list[tuple[int, Path]] = []
+    for sibling in dataset_dir.iterdir():
+        if sibling == column_dir:
+            continue
+        if sibling.suffix in (".wsds-link", ".wsds-computed"):
+            continue
+        if not sibling.is_dir():
+            continue
+        sibling_shard = sibling / shard_name
+        if sibling_shard.exists():
+            candidates.append((sibling_shard.stat().st_size, sibling_shard))
+
+    if not candidates:
+        return None
+    candidates.sort()
+    return candidates[0][1]
+
+
+def _read_shard_keys(shard_path: Path) -> list[str]:
+    """Read all __key__ values from a shard, in order."""
+    reader = pyarrow.ipc.open_file(pyarrow.memory_map(str(shard_path)))
+    return reader.read_all().column("__key__").to_pylist()
+
+
+def _resolve_reference_keys(shard_path: Path) -> list[str] | None:
+    """Find the smallest sibling artifact and read its __key__ column as reference.
+
+    Returns None (with a printed warning) if no sibling artifacts exist.
+    """
+    ref_shard = _find_reference_shard(shard_path)
+    if ref_shard is None:
+        print(f"Warning: no sibling artifacts found for {shard_path}, skipping key validation")
+        return None
+    return _read_shard_keys(ref_shard)
+
+
 class WSBatchedSink:
     """A helper for writing data to a PyArrow feather file.
 
@@ -45,6 +132,7 @@ class WSBatchedSink:
         compression: str | None = "zstd",
         throwaway=False,  # discard the temp file, useful for testing and benchmarking
         schema: pyarrow.Schema | dict | None = None,  # optional schema to enforce type coercion
+        reference_keys: Sequence[str] | None = None,  # expected __key__ values, validated per-sample
     ):
         self.fname = fname
         self.batch_size = 1
@@ -52,14 +140,26 @@ class WSBatchedSink:
         self.max_batch_size = 16384
         self.compression = compression
         self.throwaway = throwaway
+        self.reference_keys = reference_keys
 
         self._buffer = []
         self._sink = None
+        self._offset = 0
         if isinstance(schema, dict):
             schema = pyarrow.schema(list(schema.items()))
         self._sink_schema = schema
 
     def write(self, x):
+        if self.reference_keys is not None:
+            actual_key = x.get("__key__") if isinstance(x, dict) else None
+            if self._offset >= len(self.reference_keys):
+                raise KeyMismatchError(self.fname, self._offset, None, actual_key)
+            expected_key = self.reference_keys[self._offset]
+            if actual_key is None:
+                raise KeyMismatchError(self.fname, self._offset, expected_key, None)
+            if actual_key != expected_key:
+                raise KeyMismatchError(self.fname, self._offset, expected_key, actual_key)
+        self._offset += 1
         self._buffer.append({k: encode_value(k, v) for k, v in x.items()})
         if len(self._buffer) >= self.batch_size:
             self.write_batch(self._buffer)
@@ -95,6 +195,8 @@ class WSBatchedSink:
     def close(self):
         if self._buffer:
             self.write_batch(self._buffer, flush=True)  # flush the last batch
+        if self.reference_keys is not None and self._offset != len(self.reference_keys):
+            raise SampleCountMismatchError(self.fname, len(self.reference_keys), self._offset)
         assert self._sink is not None, "closing a WSSink that was never written to"
         self._sink.close()
 
@@ -143,6 +245,7 @@ def WSSink(
     min_batch_size_bytes: int = 4 * 1024 * 1024,  # auto-increase the batch size until it's at least this size in bytes
     ephemeral: bool = False,  # discard the temp file, useful for testing and benchmarking
     schema: pyarrow.Schema | dict | None = None,  # optional schema to enforce type coercion
+    validate_keys: bool = False,  # validate __key__ values against the smallest sibling artifact
 ):
     """Context manager to atomically create a `.wsds` shard.
 
@@ -152,8 +255,10 @@ def WSSink(
             sink.write({quality_metric: 5, transcript: "Hello, World!"})
     ```
     """
-    with AtomicFile(fname, ephemeral) as fname:
+    reference_keys = _resolve_reference_keys(Path(fname)) if validate_keys else None
+    with AtomicFile(fname, ephemeral) as tmp_fname:
         with WSBatchedSink(
-            fname, min_batch_size_bytes=min_batch_size_bytes, compression=compression, schema=schema
+            tmp_fname, min_batch_size_bytes=min_batch_size_bytes, compression=compression,
+            schema=schema, reference_keys=reference_keys,
         ) as sink:
             yield sink
