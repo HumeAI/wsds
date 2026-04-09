@@ -82,10 +82,12 @@ class WSShard(WSShardInterface):
         if self._data.schema.get_field_index(column) == -1:
             raise KeyError(f"column {column} not found in shard {self.fname}")
         data = self._data[column][j]
+        if not data.is_valid:
+            return None # Return None for any null pyarrow scalars
         col_type = self._data.schema.field(column).type
         try:
             if pa.types.is_binary(col_type) or pa.types.is_large_binary(col_type):
-                return decode_sample(column, io.BytesIO(data.as_buffer()))
+                return decode_sample(column, data)
             return data.as_py(maps_as_pydicts="strict")
         except Exception as e:
             raise ValueError(f"Failed to decode column {column} in shard {self.fname} (offset {offset}): {e}")
