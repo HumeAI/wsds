@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import itertools
 import os
 import random
 from contextlib import contextmanager
@@ -8,12 +9,22 @@ from pathlib import Path
 
 import pyarrow
 
+from .utils import WSShardMissingError
+from .ws_dataset import WSDataset
 from .ws_decode import encode_value
 
 
 def indented(prefix, obj):
     lines = str(obj).split("\n")
     return "\n".join(p + ln for p, ln in zip([prefix] + [" " * len(prefix)] * (len(lines) - 1), lines))
+
+
+@dataclass(frozen=True)
+class KeyMismatchError(Exception):
+    message: str
+
+    def __str__(self):
+        return self.message
 
 
 @dataclass(frozen=True)
@@ -45,6 +56,7 @@ class WSBatchedSink:
         compression: str | None = "zstd",
         throwaway=False,  # discard the temp file, useful for testing and benchmarking
         schema: pyarrow.Schema | dict | None = None,  # optional schema to enforce type coercion
+        key_iter=None,  # optional iterator of expected __key__ strings
     ):
         self.fname = fname
         self.batch_size = 1
@@ -58,8 +70,20 @@ class WSBatchedSink:
         if isinstance(schema, dict):
             schema = pyarrow.schema(list(schema.items()))
         self._sink_schema = schema
+        self._key_iter = key_iter
+        self._last_key = None
 
     def write(self, x):
+        if self._key_iter is not None:
+            expected = next(self._key_iter, None)
+            if expected is None:
+                raise KeyMismatchError(
+                    f"dest dataset has fewer samples than the new data being written"
+                    f" (last matching key: {self._last_key!r}, new key: {x.get('__key__')!r})"
+                )
+            if x.get("__key__") != expected:
+                raise KeyMismatchError(f"__key__ mismatch: expected {expected!r}, got {x.get('__key__')!r}")
+            self._last_key = expected
         self._buffer.append({k: encode_value(k, v) for k, v in x.items()})
         if len(self._buffer) >= self.batch_size:
             self.write_batch(self._buffer)
@@ -95,6 +119,13 @@ class WSBatchedSink:
     def close(self):
         if self._buffer:
             self.write_batch(self._buffer, flush=True)  # flush the last batch
+        if self._key_iter is not None:
+            remaining = next(self._key_iter, None)
+            if remaining is not None:
+                raise KeyMismatchError(
+                    f"new data exhausted before dest dataset"
+                    f" (last written key: {self._last_key!r}, next expected: {remaining!r})"
+                )
         assert self._sink is not None, "closing a WSSink that was never written to"
         self._sink.close()
 
@@ -136,6 +167,20 @@ class AtomicFile:
                 os.remove(self._tmp_name)
 
 
+def _build_key_iter(fname):
+    """Return __key__ iterator from an existing sibling column, or None if this is the first column."""
+    p = Path(fname)
+    parent_dir = p.parent.parent
+
+    try:
+        ds = WSDataset(parent_dir, ignore_index=True)
+        it = (s["__key__"] for s in ds.iter_shard(("", p.stem)))
+        first = next(it)
+        return itertools.chain([first], it)
+    except (OSError, WSShardMissingError, StopIteration):
+        return None
+
+
 @contextmanager
 def WSSink(
     fname: str,  # final output file name, intermediate output goes into a temporary file
@@ -146,14 +191,17 @@ def WSSink(
 ):
     """Context manager to atomically create a `.wsds` shard.
 
+    Validates `__key__` alignment against existing columns when writing to an existing dataset.
+
     Example:
     ```
         with WSSink('output.wsds') as sink:
             sink.write({quality_metric: 5, transcript: "Hello, World!"})
     ```
     """
+    key_iter = _build_key_iter(fname)
     with AtomicFile(fname, ephemeral) as fname:
         with WSBatchedSink(
-            fname, min_batch_size_bytes=min_batch_size_bytes, compression=compression, schema=schema
+            fname, min_batch_size_bytes=min_batch_size_bytes, compression=compression, schema=schema, key_iter=key_iter
         ) as sink:
             yield sink
