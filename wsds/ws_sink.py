@@ -12,6 +12,8 @@ import pyarrow
 if TYPE_CHECKING:
     from collections.abc import Sequence
 
+from .ws_decode import encode_value
+
 
 def indented(prefix, obj):
     lines = str(obj).split("\n")
@@ -129,6 +131,7 @@ class WSBatchedSink:
         min_batch_size_bytes: int = 4 * 1024 * 1024,  # minimum size of a batch in bytes (1MB by default)
         compression: str | None = "zstd",
         throwaway=False,  # discard the temp file, useful for testing and benchmarking
+        schema: pyarrow.Schema | dict | None = None,  # optional schema to enforce type coercion
         reference_keys: Sequence[str] | None = None,  # expected __key__ values, validated per-sample
     ):
         self.fname = fname
@@ -142,6 +145,9 @@ class WSBatchedSink:
         self._buffer = []
         self._sink = None
         self._offset = 0
+        if isinstance(schema, dict):
+            schema = pyarrow.schema(list(schema.items()))
+        self._sink_schema = schema
 
     def write(self, x):
         if self.reference_keys is not None:
@@ -154,7 +160,7 @@ class WSBatchedSink:
             if actual_key != expected_key:
                 raise KeyMismatchError(self.fname, self._offset, expected_key, actual_key)
         self._offset += 1
-        self._buffer.append(x)
+        self._buffer.append({k: encode_value(k, v) for k, v in x.items()})
         if len(self._buffer) >= self.batch_size:
             self.write_batch(self._buffer)
 
@@ -163,9 +169,13 @@ class WSBatchedSink:
         import pyarrow
 
         try:
-            record = pyarrow.RecordBatch.from_pylist(b, self._sink_schema if self._sink else None)
+            record = pyarrow.RecordBatch.from_pylist(b, self._sink_schema)
         except Exception:
-            print(f"Error while serializing: {repr(b)}")
+            def _truncate(v, limit=200):
+                r = repr(v)
+                return r if len(r) <= limit else r[:limit] + f"... ({len(r)} chars)"
+            summary = [{k: _truncate(v) for k, v in row.items()} for row in b]
+            print(f"Error while serializing: {summary}")
             raise
         if self._sink is None:
             if not flush and self.min_batch_size_bytes:
@@ -234,6 +244,7 @@ def WSSink(
     compression: str | None = "zstd",  # pass None to disable compression
     min_batch_size_bytes: int = 4 * 1024 * 1024,  # auto-increase the batch size until it's at least this size in bytes
     ephemeral: bool = False,  # discard the temp file, useful for testing and benchmarking
+    schema: pyarrow.Schema | dict | None = None,  # optional schema to enforce type coercion
     validate_keys: bool = False,  # validate __key__ values against the smallest sibling artifact
 ):
     """Context manager to atomically create a `.wsds` shard.
@@ -246,5 +257,8 @@ def WSSink(
     """
     reference_keys = _resolve_reference_keys(Path(fname)) if validate_keys else None
     with AtomicFile(fname, ephemeral) as tmp_fname:
-        with WSBatchedSink(tmp_fname, min_batch_size_bytes, compression, reference_keys=reference_keys) as sink:
+        with WSBatchedSink(
+            tmp_fname, min_batch_size_bytes=min_batch_size_bytes, compression=compression,
+            schema=schema, reference_keys=reference_keys,
+        ) as sink:
             yield sink
