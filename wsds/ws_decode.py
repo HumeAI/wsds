@@ -48,7 +48,12 @@ def decode_sample(column: str, data):
         return fd.read().decode("utf-8")
     elif ext == "json":
         import json
-        return json.load(fd)
+        raw = fd.read()
+        try:
+            json.loads(raw)
+        except json.JSONDecodeError as e:
+            return b"{}"
+        return raw
     elif ext in AUDIO_FILE_KEYS:
         return AudioReader(fd)
     else:
