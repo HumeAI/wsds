@@ -48,10 +48,12 @@ class WSShard(WSShardInterface):
         self.fname = fname
 
         try:
-            if dataset.disable_memory_map:
-                self.reader = pa.RecordBatchFileReader(pa.OSFile(str(fname)))
+            disable_mmap = dataset is not None and dataset.disable_memory_map
+            if disable_mmap:
+                self._source_file = pa.OSFile(str(fname))
             else:
-                self.reader = pa.RecordBatchFileReader(pa.memory_map(str(fname)))
+                self._source_file = pa.memory_map(str(fname))
+            self.reader = pa.RecordBatchFileReader(self._source_file)
         except FileNotFoundError:
             raise WSShardMissingError(fname) from None
 
@@ -60,6 +62,12 @@ class WSShard(WSShardInterface):
         # cache
         self._start = None
         self._end = None
+        self._data = None
+
+    def close(self):
+        """Close the underlying Arrow file, releasing the OS file handle."""
+        if hasattr(self, "_source_file") and self._source_file is not None and not self._source_file.closed:
+            self._source_file.close()
         self._data = None
 
     def get_sample(self, column: str, offset: int) -> typing.Any:
