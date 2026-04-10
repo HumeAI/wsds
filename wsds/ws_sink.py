@@ -128,6 +128,10 @@ class WSBatchedSink:
                 )
         assert self._sink is not None, "closing a WSSink that was never written to"
         self._sink.close()
+        # pyarrow RecordBatchFileWriter.close() does NOT release the fd — only GC does.
+        # Drop the reference and force collection so volume.reload() won't be blocked.
+        self._sink = None
+        import gc; gc.collect()
 
     def __enter__(self):
         assert self._sink is None, "WSSink is not re-entrant"
@@ -136,6 +140,13 @@ class WSBatchedSink:
     def __exit__(self, exc_type, exc_value, traceback):
         if exc_type is None:
             self.close()
+        elif self._sink is not None:
+            try:
+                self._sink.close()
+            except Exception:
+                pass
+            self._sink = None
+            import gc; gc.collect()
 
 
 class AtomicFile:
@@ -172,12 +183,20 @@ def _build_key_iter(fname):
     p = Path(fname)
     parent_dir = p.parent.parent
 
+    ds = None
     try:
         ds = WSDataset(parent_dir, ignore_index=True)
-        it = (s["__key__"] for s in ds.iter_shard(("", p.stem)))
-        first = next(it)
-        return itertools.chain([first], it)
-    except (OSError, WSShardMissingError, StopIteration):
+        keys = [s["__key__"] for s in ds.iter_shard(("", p.stem))]
+        ds.close()
+        if not keys:
+            return None
+        return iter(keys)
+    except (OSError, WSShardMissingError, StopIteration, KeyError):
+        if ds is not None:
+            try:
+                ds.close()
+            except Exception:
+                pass
         return None
 
 
