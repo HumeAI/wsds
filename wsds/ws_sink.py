@@ -177,7 +177,7 @@ def _build_key_iter(fname):
         it = (s["__key__"] for s in ds.iter_shard(("", p.stem)))
         first = next(it)
         return itertools.chain([first], it)
-    except (OSError, WSShardMissingError, StopIteration):
+    except (OSError, WSShardMissingError, StopIteration, KeyError):
         return None
 
 
