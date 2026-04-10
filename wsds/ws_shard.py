@@ -49,9 +49,10 @@ class WSShard(WSShardInterface):
 
         try:
             if dataset.disable_memory_map:
-                self.reader = pa.RecordBatchFileReader(pa.OSFile(str(fname)))
+                self._source_file = pa.OSFile(str(fname))
             else:
-                self.reader = pa.RecordBatchFileReader(pa.memory_map(str(fname)))
+                self._source_file = pa.memory_map(str(fname))
+            self.reader = pa.RecordBatchFileReader(self._source_file)
         except FileNotFoundError:
             raise WSShardMissingError(fname) from None
 
@@ -91,6 +92,17 @@ class WSShard(WSShardInterface):
             return data.as_py(maps_as_pydicts="strict")
         except Exception as e:
             raise ValueError(f"Failed to decode column {column} in shard {self.fname} (offset {offset}): {e}")
+
+    def close(self):
+        """Close the underlying pyarrow file handle."""
+        self.reader = None
+        self._data = None
+        if hasattr(self, "_source_file") and self._source_file is not None:
+            try:
+                self._source_file.close()
+            except Exception:
+                pass
+            self._source_file = None
 
     def __repr__(self):
         r = f"WSShard({repr(self.fname)})"
