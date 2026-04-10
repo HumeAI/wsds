@@ -110,6 +110,13 @@ class WSDataset:
 
         self._register_wsds_links()
 
+    def close(self):
+        """Close all cached open shards, releasing file handles."""
+        for shard in self._open_shards.values():
+            if hasattr(shard, "close"):
+                shard.close()
+        self._open_shards.clear()
+
     def enable_filter(self, filter_name: str, filter_df: pl.DataFrame):
         """
         Enabling a filter adds extra columns to the dataset, each column representing a filter.
