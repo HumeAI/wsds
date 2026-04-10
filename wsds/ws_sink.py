@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import itertools
 import os
 import random
 from contextlib import contextmanager
@@ -179,18 +178,20 @@ class AtomicFile:
 
 
 def _build_key_iter(fname):
-    """Return __key__ iterator from an existing sibling column, or None if this is the first column."""
+    """Return __key__ iterator from an existing sibling column, or None if this is the first column.
+
+    Uses a lazy closing iterator so that keys are streamed on-demand (avoiding
+    upfront materialization of the entire key list) while still guaranteeing
+    the underlying WSDataset is closed when the iterator is exhausted or GC'd.
+    """
     p = Path(fname)
     parent_dir = p.parent.parent
 
     ds = None
     try:
         ds = WSDataset(parent_dir, ignore_index=True)
-        keys = [s["__key__"] for s in ds.iter_shard(("", p.stem))]
-        ds.close()
-        if not keys:
-            return None
-        return iter(keys)
+        it = ds.iter_shard(("", p.stem))
+        first = next(it)  # peek to verify the shard is non-empty
     except (OSError, WSShardMissingError, StopIteration, KeyError):
         if ds is not None:
             try:
@@ -198,6 +199,18 @@ def _build_key_iter(fname):
             except Exception:
                 pass
         return None
+
+    # Wrap in a generator so ds.close() runs when the iterator finishes
+    # (or is garbage-collected), preventing file-descriptor leaks.
+    def _closing_iter():
+        try:
+            yield first["__key__"]
+            for s in it:
+                yield s["__key__"]
+        finally:
+            ds.close()
+
+    return _closing_iter()
 
 
 @contextmanager
