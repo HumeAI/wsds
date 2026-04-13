@@ -7,7 +7,7 @@ from typing import TYPE_CHECKING
 import pyarrow as pa
 
 from .utils import WSShardMissingError
-from .ws_audio import AudioReader, WSAudio
+from .ws_audio import WSAudioEpisode, WSAudioSegment
 from .ws_decode import decode_sample
 from .ws_sample import WSSample
 
@@ -111,7 +111,7 @@ class WSSourceAudioShard(WSShardInterface):
     # cache
     _source_file_name: str = None
     _source_sample: WSSample = None
-    _source_reader: AudioReader = None
+    _source_reader: WSAudioEpisode = None
 
     @classmethod
     def from_link(cls, link, dataset, shard_ref):
@@ -135,7 +135,7 @@ class WSSourceAudioShard(WSShardInterface):
             self._source_file_name = file_name
 
         tstart, tend = self.get_timestamps(segment_offset)
-        return WSAudio(self._source_reader, tstart, tend)
+        return WSAudioSegment(self._source_reader, tstart, tend)
 
 
 class WSYoutubeVideoShard(WSSourceAudioShard):
