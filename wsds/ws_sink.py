@@ -106,8 +106,9 @@ class WSBatchedSink:
                     self.batch_size *= 2
                     return
             schema = record.schema.with_metadata({"batch_size": str(len(b))})
+            self._native_file = pyarrow.output_stream(self.fname)
             self._sink = pyarrow.RecordBatchFileWriter(
-                self.fname, schema, options=pyarrow.ipc.IpcWriteOptions(compression=self.compression)
+                self._native_file, schema, options=pyarrow.ipc.IpcWriteOptions(compression=self.compression)
             )
             self._sink_schema = schema
         if record.schema != self._sink_schema:
@@ -127,10 +128,8 @@ class WSBatchedSink:
                 )
         assert self._sink is not None, "closing a WSSink that was never written to"
         self._sink.close()
-        # pyarrow RecordBatchFileWriter.close() does NOT release the fd — only GC does.
-        # Drop the reference and force collection so volume.reload() won't be blocked.
+        self._native_file.close()
         self._sink = None
-        import gc; gc.collect()
 
     def __enter__(self):
         assert self._sink is None, "WSSink is not re-entrant"
