@@ -2,236 +2,299 @@
 
 This module contains all audio encoding/decoding logic, separated from the
 data model layer in ws_audio.py. It provides:
-- Decoder backends (TorchFFmpegAudioDecoder, CompatAudioDecoder)
-- A factory for creating decoders with automatic backend selection
-- MP3 encoding with multi-backend fallback
+- AudioDecoder: unified decoder with automatic backend selection (humecodec or torchaudio)
+- encode_audio(): multi-backend encoder (humecodec -> torchcodec -> torchaudio)
 - HTML audio rendering utility
 """
 
 from __future__ import annotations
 
 import io
+import traceback
 import typing
 
 import pyarrow as pa
 
 
-def to_filelike(src: typing.Any) -> typing.BinaryIO:
-    """Coerces files, byte-strings and PyArrow binary buffers into file-like objects."""
-    if hasattr(src, "read"):  # an open file
-        return src
-    # if not an open file then we assume some kind of binary data in memory
-    if hasattr(src, "as_buffer"):  # PyArrow binary data
-        return pa.BufferReader(src.as_buffer())
-    return io.BytesIO(src)
+class AudioDecoder:
+    """Unified audio decoder that works with humecodec or torchaudio backends."""
 
-
-class TorchFFmpegAudioDecoder:
-    def __init__(self, src, sample_rate):
-        from torchffmpeg import MediaDecoder
-
-        if hasattr(src, "_optimal_read_size"):
-            buffer_size = src._optimal_read_size
-        else:
-            buffer_size = 128 * 1024
-        self.src = src
-        self.reader = MediaDecoder(to_filelike(self.src), buffer_size=buffer_size)
-        self.metadata = self.reader.get_src_stream_info(self.reader.default_audio_stream)
-
-        if sample_rate is None:
-            sample_rate = int(self.metadata.sample_rate)
-
+    def __init__(self, reader, metadata, sample_rate, codec_delay=0):
+        self.reader = reader
+        self.metadata = metadata
         self.sample_rate = sample_rate
+        self.debug = False
+        self.codec_delay = codec_delay
+        self.init_skip_samples = getattr(metadata, 'start_skip_samples', 0) or 0
+        # Codecs where flush produces unreliable output (wrong skip_samples,
+        # wrong frame sizes). For these, always read from the start and trim.
+        codec_name = getattr(metadata, 'codec', '') or ''
+        self._seek_unreliable = codec_name in ('wmav2', 'wmapro', 'vorbis')
+        # Raw MPEG audio formats: timestamp seek does sequential scan,
+        # byte-offset seek with our own index is much faster.
+        self._use_byte_index = codec_name in ('mp3', 'mp2', 'mp1')
+        self._packet_index = None
 
-        self.reader.add_basic_audio_stream(
-            frames_per_chunk=int(32 * sample_rate),
-            sample_rate=sample_rate,
-            decoder_option={"threads": "4", "thread_type": "frame"},
-        )
+    def _build_index(self):
+        """Build a sparse packet index for byte-offset seeking."""
+        if self._packet_index is not None:
+            return
+        try:
+            idx = self.reader.build_packet_index(
+                self.reader.default_audio_stream, 128 * 1024)
+            if idx and len(idx) > 1:
+                self._packet_index = idx
+        except Exception:
+            self._packet_index = []
 
-    def get_samples_played_in_range(self, tstart=0, tend=None):
+    def _indexed_seek(self, target_time):
+        """Seek via byte offset using the packet index. Returns the index entry's PTS or None."""
+        self._build_index()
+        if not self._packet_index:
+            return None
+        # Find last entry with pts <= target_time
+        best = self._packet_index[0]
+        for entry in self._packet_index:
+            if entry.pts_seconds <= target_time:
+                best = entry
+            else:
+                break
+        self.reader.seek_to_byte_offset(best.pos)
+        return best.pts_seconds
+
+    def get_samples_played_in_range(self, tstart=0, tend=None, margin=.25):
         import torch
 
-        self.reader.seek(max(0, tstart - 1), "key")
-
-        if tend is None:
-            chunks = []
-            more_data = True
-            while more_data:
-                if self.reader.fill_buffer() == 1:
-                    more_data = False
-                (chunk,) = self.reader.pop_chunks()
-                if chunk is not None:
-                    chunks.append(chunk)
-            prefix = int((tstart - chunks[0].pts) * self.sample_rate)
-            if prefix < 0:
-                prefix = 0
-            return torch.cat(chunks)[prefix:].mT
-
-        self.reader.fill_buffer()
-        (chunk,) = self.reader.pop_chunks()
-        prefix = int((tstart - chunk.pts) * self.sample_rate)
-        if prefix < 0:
-            prefix = 0
-        if tend:
-            samples = chunk[prefix : prefix + int((tend - tstart) * self.sample_rate)].mT
-        else:
-            samples = chunk[prefix:].mT
+        chunk = True
         while chunk is not None:
             (chunk,) = self.reader.pop_chunks()
-        return samples
 
+        # For short seeks and unreliable codecs, read from the start.
+        # This avoids seek accuracy issues for tstart < 5s (tiny cost) and
+        # codec flush bugs for wmav2/wmapro/vorbis.
+        read_from_start = self._seek_unreliable or tstart < 5.0
 
-class CompatAudioDecoder:
-    def __init__(self, src, sample_rate):
-        import torchaudio
+        # Only adjust for start_skip_samples when actually seeking — when
+        # reading from start, the decoder applies skip_samples automatically.
+        seek_adj = 0.0
+        index_pts = None
+        if not read_from_start:
+            # For raw MPEG formats, use indexed byte seek (fast, avoids sequential scan).
+            # No seek_adj needed: the index PTS and decoded audio are both in
+            # the raw timeline (skip_samples is not applied after byte seek).
+            if self._use_byte_index:
+                index_pts = self._indexed_seek(tstart - margin)
+            else:
+                # Timestamp seek: the demuxer applies start_skip_samples at
+                # pts=0 but not after seeking, so adjust tstart to compensate.
+                seek_adj = self.init_skip_samples / self.metadata.sample_rate
+                tstart += seek_adj
+                if tend is not None:
+                    tend += seek_adj
 
-        if not hasattr(torchaudio, "io"):
-            raise ImportError("You need either torchaudio<2.9 or torchcodec installed")
-        self.src = src
-        if hasattr(src, "_optimal_read_size"):
-            buffer_size = src._optimal_read_size
-        else:
-            buffer_size = 128 * 1024
-        self.reader = torchaudio.io.StreamReader(src=to_filelike(self.src), buffer_size=buffer_size)
-        self.metadata = self.reader.get_src_stream_info(0)
+        if index_pts is None:
+            # Fall back to timestamp seek (or read from start)
+            seek_target = 0.0 if read_from_start else max(0, tstart - margin)
+            self.reader.seek(seek_target, "key")
 
-        if sample_rate is None:
-            sample_rate = self.metadata.sample_rate
-
-        self.sample_rate = sample_rate
-
-        # fetch 32 seconds because we likely need 30s at maximum but the seeking may be imprecise (and we seek 1s early)
-        # FIXME: check if we can get away with some better settings here (-1, maybe 10s + concatenate the chunks in a loop)
-        self.reader.add_basic_audio_stream(
-            frames_per_chunk=int(32 * sample_rate),
-            sample_rate=sample_rate,
-            decoder_option={"threads": "4", "thread_type": "frame"},
-        )
-
-    def get_samples_played_in_range(self, tstart=0, tend=None):
-        # rought seek
-        self.reader.seek(max(0, tstart - 1), "key")
-
-        if tend is None:
-            import torch
-
-            chunks = []
-            more_data = True
-            while more_data:
-                if self.reader.fill_buffer() == 1:
-                    more_data = False
-                (chunk,) = self.reader.pop_chunks()
-                chunks.append(chunk)
-            prefix = int((tstart - chunks[0].pts) * self.sample_rate)
-            if prefix < 0:
-                prefix = 0
-            return torch.cat(chunks)[prefix:].mT
-
-        self.reader.fill_buffer()
-        (chunk,) = self.reader.pop_chunks()
-        # tight crop (seems accurate down to 1 sample in my tests)
-        prefix = int((tstart - chunk.pts) * self.sample_rate)
-        if prefix < 0:
-            prefix = 0
-        if tend:
-            samples = chunk[prefix : prefix + int((tend - tstart) * self.sample_rate)].mT
-        else:
-            samples = chunk[prefix:].mT
-        # clear out any remaining data
-        while chunk is not None:
+        chunks = []
+        more_data = True
+        while more_data:
+            if self.reader.fill_buffer() == 1:
+                more_data = False
             (chunk,) = self.reader.pop_chunks()
-        return samples
+            chunks.append(chunk)
+            if tend is not None:
+                chunk_end_pts = chunk.pts + chunk.shape[0] / self.sample_rate
+                if index_pts is not None:
+                    # PTS not updated by demuxer after byte seek — estimate from index
+                    elapsed = sum(c.shape[0] for c in chunks) / self.sample_rate
+                    chunk_end_pts = index_pts + elapsed
+                if chunk_end_pts > tend + margin:
+                    break
+
+        # Determine the reference PTS for trimming
+        if read_from_start:
+            chunk0_pts = 0.0
+        elif index_pts is not None:
+            # Byte seek: demuxer PTS is stale, use our index entry
+            chunk0_pts = index_pts
+        else:
+            chunk0_pts = chunks[0].pts
+        prefix = round(tstart * self.sample_rate) - round(chunk0_pts * self.sample_rate)
+
+        if self.debug:
+            import torch as _t
+            total_samples = sum(c.shape[0] for c in chunks)
+            print(f"    [decode] codec={self.metadata.codec} sr={self.sample_rate} "
+                  f"tstart_orig={tstart - seek_adj:.4f} tstart_adj={tstart:.4f} "
+                  f"seek_adj={seek_adj:.6f} (init_skip={self.init_skip_samples} codec_delay={self.codec_delay}) "
+                  f"chunk0.pts={chunks[0].pts:.6f} chunk0_pts_used={chunk0_pts:.6f} "
+                  f"n_chunks={len(chunks)} total_samples={total_samples} prefix={prefix}", flush=True)
+
+        if prefix < 0:
+            if self.debug:
+                print(f"    [trim] negative prefix {prefix}, clamping to 0", flush=True)
+            prefix = 0
+        samples = torch.cat(chunks)
+        if tend is not None:
+            return samples[prefix : prefix + round(tend * self.sample_rate) - round(tstart * self.sample_rate)].mT
+        else:
+            return samples[prefix:].mT
+
+def _create_reader_humecodec(src, buffer_size):
+    from humecodec import MediaDecoder
+
+    reader = MediaDecoder(src=src, buffer_size=buffer_size)
+    metadata = reader.get_src_stream_info(reader.default_audio_stream)
+    return reader, metadata
+
+
+def _create_reader_torchaudio(src, buffer_size):
+    from torchaudio.io import StreamReader
+
+    reader = StreamReader(src=src, buffer_size=buffer_size)
+    metadata = reader.get_src_stream_info(reader.default_audio_stream)
+    return reader, metadata
+
+
+def _create_decoder_torchcodec(src, sample_rate):
+    """Create a torchcodec-backed decoder that matches the AudioDecoder interface."""
+    from types import SimpleNamespace
+
+    from torchcodec.decoders import AudioDecoder as TorchcodecDecoder
+
+    # torchcodec accepts bytes but not BytesIO
+    decoder = TorchcodecDecoder(src, sample_rate=sample_rate)
+    metadata = decoder.metadata
+
+    class TorchcodecAdapter:
+        def __init__(self):
+            self.metadata = metadata
+            self.sample_rate = sample_rate if sample_rate is not None else int(metadata.sample_rate)
+
+        def get_samples_played_in_range(self, tstart=0, tend=None):
+            return decoder.get_samples_played_in_range(tstart, tend)
+
+    return TorchcodecAdapter()
+
+
+_STREAMING_BACKENDS = [
+    (_create_reader_humecodec, "humecodec"),
+    (_create_reader_torchaudio, "torchaudio.io"),
+]
+
+_chosen_backend = None
 
 
 def create_decoder(src, sample_rate=None):
-    """Factory: tries torchffmpeg -> torchcodec -> torchaudio, returns a decoder instance.
+    """Factory: tries humecodec -> torchaudio -> torchcodec, returns a decoder instance.
 
     Args:
-        src: A file-like object or bytes-like source for audio data.
+        src: A file-like object for audio data.
         sample_rate: Optional target sample rate for resampling.
 
     Returns:
-        A decoder instance with .metadata, .sample_rate, and .get_samples_played_in_range() interface.
+        A decoder with .metadata, .sample_rate, and .get_samples_played_in_range().
     """
-    try:
-        from torchffmpeg import MediaDecoder as _  # noqa: F401
+    global _chosen_backend
 
-        AudioDecoder = TorchFFmpegAudioDecoder
-    except ImportError:
-        try:
-            from torchcodec.decoders import AudioDecoder
-        except ImportError:
-            AudioDecoder = CompatAudioDecoder
+    buffer_size = getattr(src, "_optimal_read_size", 128 * 1024)
 
-    return AudioDecoder(src, sample_rate=sample_rate)
-
-
-def decode_segment(src, start=0, end=None, sample_rate=None):
-    """One-shot decode: creates decoder, reads segment, returns tensor with .sample_rate attr.
-
-    Handles MP3 skip_samples compensation automatically.
-
-    Args:
-        src: Audio source (file-like, bytes, or PyArrow buffer).
-        start: Start time in seconds.
-        end: End time in seconds (None for rest of file).
-        sample_rate: Optional target sample rate.
-
-    Returns:
-        A torch.Tensor with a .sample_rate attribute.
-    """
-    filelike = to_filelike(src)
-    decoder = create_decoder(filelike, sample_rate)
-
-    skip_samples = 0
-    if decoder.metadata.codec == "mp3":
-        skip_samples = 1105
+    if _chosen_backend is not None:
+        if _chosen_backend == "torchcodec":
+            return _create_decoder_torchcodec(src, sample_rate)
+        reader, metadata = _chosen_backend(src, buffer_size)
+    else:
+        for factory, module in _STREAMING_BACKENDS:
+            try:
+                reader, metadata = factory(src, buffer_size)
+                _chosen_backend = factory
+                break
+            except ImportError:
+                continue
+        else:
+            # Fall back to torchcodec (different API, no streaming reader)
+            try:
+                decoder = _create_decoder_torchcodec(src, sample_rate)
+                _chosen_backend = "torchcodec"
+                return decoder
+            except ImportError:
+                raise ImportError("Neither humecodec, torchaudio, nor torchcodec is installed.")
 
     if sample_rate is None:
-        sample_rate = decoder.metadata.sample_rate
+        sample_rate = int(metadata.sample_rate)
 
-    seek_adjustment = skip_samples / sample_rate if start > 0 else 0
-    samples = decoder.get_samples_played_in_range(
-        start + seek_adjustment, end + seek_adjustment if end is not None else None
+    reader.add_basic_audio_stream(
+        frames_per_chunk=int(1 * sample_rate),
+        sample_rate=sample_rate,
+        decoder_option={"threads": "4", "thread_type": "frame"},
     )
-    if hasattr(samples, "data"):
-        samples = samples.data
-    samples.sample_rate = sample_rate
-    return samples
+
+    # Get codec_delay from the decoder (available after add_audio_stream opens the codec)
+    codec_delay = 0
+    try:
+        out_info = reader.get_out_stream_info(0)
+        codec_delay = getattr(out_info, 'codec_delay', 0) or 0
+    except Exception:
+        pass
+
+    return AudioDecoder(reader, metadata, sample_rate, codec_delay=codec_delay)
 
 
-def encode_mp3(samples) -> bytes:
-    """Encode a torch tensor to MP3 bytes.
 
-    Tries torchffmpeg -> torchcodec -> torchaudio as encoder backends.
+def encode_audio(samples, format="mp3", sample_rate=None, bitrate=None) -> bytes:
+    """Encode a torch tensor to audio bytes.
+
+    Tries humecodec -> torchcodec -> torchaudio as encoder backends.
+
+    >>> from wsds import WSDataset
+    >>> audio = WSDataset("librilight/source")[0].get_audio()
+    >>> samples = audio.read_segment(start=0, end=2.0, sample_rate=16000)
+    >>> mp3 = encode_audio(samples, format="mp3")
+    >>> mp3[:3] == b"ID3" or mp3[:2] in (b"\\xff\\xfb", b"\\xff\\xf3")
+    True
+    >>> ogg = encode_audio(samples, format="ogg")  # doctest: +SKIP
+    >>> ogg[:4] == b"OggS"  # doctest: +SKIP
+    True
 
     Args:
         samples: A torch.Tensor with a .sample_rate attribute. Shape: (channels, frames).
+        format: Output format, e.g. "mp3", "ogg" (Opus). Default: "mp3".
+        sample_rate: Target sample rate (defaults to samples.sample_rate).
+        bitrate: Bitrate in bps. Only used for formats that support it (e.g. Opus).
 
     Returns:
-        MP3-encoded bytes.
+        Encoded audio bytes.
     """
+    if sample_rate is None:
+        sample_rate = int(samples.sample_rate)
+
     out = io.BytesIO()
     try:
-        from torchffmpeg import MediaEncoder
+        from humecodec import MediaEncoder
 
-        sample_rate = int(samples.sample_rate)
-        # samples is (channels, frames), write_audio_chunk expects (frames, channels)
         waveform = samples.mT.float().contiguous()
-        enc = MediaEncoder(out, "mp3")
-        enc.add_audio_stream(sample_rate=sample_rate, num_channels=waveform.size(1), format="flt")
+        enc = MediaEncoder(out, format)
+        stream_kwargs = dict(sample_rate=sample_rate, num_channels=waveform.size(1), format="flt")
+        if format == "ogg":
+            from humecodec import CodecConfig
+
+            stream_kwargs.update(encoder="libopus", encoder_format="flt")
+            if bitrate:
+                stream_kwargs["codec_config"] = CodecConfig(bit_rate=bitrate)
+        enc.add_audio_stream(**stream_kwargs)
         with enc.open():
             enc.write_audio_chunk(0, waveform)
     except ImportError:
         try:
             from torchcodec.encoders import AudioEncoder
 
-            AudioEncoder(samples, sample_rate=int(samples.sample_rate)).to_file_like(out, "mp3")
+            AudioEncoder(samples, sample_rate=sample_rate).to_file_like(out, format)
         except ImportError:
             import torchaudio
 
-            torchaudio.save(out, samples, int(samples.sample_rate), format="mp3")
+            torchaudio.save(out, samples, sample_rate, format=format)
 
     return out.getvalue()
 
@@ -247,5 +310,5 @@ def audio_to_html(samples) -> str:
     """
     import base64
 
-    mp3_data = base64.b64encode(encode_mp3(samples)).decode("ascii")
+    mp3_data = base64.b64encode(encode_audio(samples, format="mp3")).decode("ascii")
     return f'<audio controls src="data:audio/mp3;base64,{mp3_data}"></audio>'

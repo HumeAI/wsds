@@ -25,7 +25,7 @@ Use <kbd>[</kbd> and <kbd>]</kbd> to selectively mute the left or right channel.
         background: #98E;
         padding: 4px 7px;
         box-sizing: border-box;
-        width: 560px;
+        max-width: 560px;
         margin: 5px auto;
         border-radius: 7px;
     }
@@ -47,7 +47,6 @@ Use <kbd>[</kbd> and <kbd>]</kbd> to selectively mute the left or right channel.
     }
     .middle-box {
         margin: auto;
-        width: 600px;
         display: flex;
     }
     .col-separator {
@@ -370,11 +369,12 @@ class ColumnList:
 
 
 class ConvPlayer:
-    def __init__(self, path, snd, sr, rmdir=False, pixels_per_second=50):
+    def __init__(self, path, snd, sr, rmdir=False, pixels_per_second=50, mel_width=80):
         if isinstance(path, str):
             path = Path(path)
         self.path = path
         self.pixels_per_second = pixels_per_second
+        self.mel_width = mel_width
 
         self.left = ColumnList(self, "left")
         self.right = ColumnList(self, "right")
@@ -397,8 +397,9 @@ class ConvPlayer:
         self.right.append_img("ticks", ticks[::-1], scaley=2, repeat_y=True)
         for i, snd in enumerate(torch.split(snd, 5 * 60 * sr)):
             mels = mel_img(snd, sr)
-            for c, i in zip([self.left, self.right], mels):
-                c.append_img("mel", i, scaley=100 / self.pixels_per_second)
+            mel_scalex = mels.shape[1] / self.mel_width
+            for c, m in zip([self.left, self.right], mels):
+                c.append_img("mel", m, scalex=mel_scalex, scaley=100 / self.pixels_per_second)
 
     def close(self, zip=False, show=False):
         self.html.write('<div class="middle-box">\n')
