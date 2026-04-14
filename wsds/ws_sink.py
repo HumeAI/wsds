@@ -39,13 +39,40 @@ class SampleFormatChanged(BaseException):
         )
 
 
+def _cast_batch(batch, target_schema):
+    """Cast a RecordBatch to target_schema, adding null columns for missing fields."""
+    arrays = []
+    for field in target_schema:
+        if batch.schema.get_field_index(field.name) >= 0:
+            arrays.append(batch.column(field.name).cast(field.type))
+        else:
+            arrays.append(pyarrow.nulls(batch.num_rows, type=field.type))
+    return pyarrow.RecordBatch.from_arrays(arrays, schema=target_schema)
+
+
 class WSBatchedSink:
     """A helper for writing data to a PyArrow feather file.
 
     Automatically batches data and infers the schema from the first batch.
+    If the schema changes (new columns, type promotions, null -> concrete type),
+    the file is transparently rewritten with a unified schema.
 
     Example:
     >>> with WSBatchedSink('output.feather', throwaway=True) as sink: sink.write({'a': 1, 'b': 'x'})
+
+    Schema evolution -- int to float, null to string, new column:
+    >>> import tempfile, pyarrow as pa
+    >>> f = tempfile.NamedTemporaryFile(suffix='.wsds')
+    >>> sink = WSBatchedSink(f.name, min_batch_size_bytes=0); sink.__enter__()  # doctest: +ELLIPSIS
+    <...WSBatchedSink...>
+    >>> sink.write({'x': 1, 'y': None})
+    >>> sink.write({'x': 2.5, 'y': 'hello', 'z': True})
+    >>> sink.close()
+    >>> r = pa.ipc.open_file(f.name)
+    >>> r.get_batch(0).to_pydict()
+    {'x': [1.0], 'y': [None], 'z': [None]}
+    >>> r.get_batch(1).to_pydict()
+    {'x': [2.5], 'y': ['hello'], 'z': [True]}
     """
 
     def __init__(
@@ -71,6 +98,7 @@ class WSBatchedSink:
         self._sink_schema = schema
         self._key_iter = key_iter
         self._last_key = None
+        self._fixed_schema = schema is not None
 
     def write(self, x):
         if self._key_iter is not None:
@@ -87,12 +115,61 @@ class WSBatchedSink:
         if len(self._buffer) >= self.batch_size:
             self.write_batch(self._buffer)
 
+    def _rewrite_with_new_schema(self, new_record):
+        """Rewrite the file with a unified schema when a schema conflict is detected.
+
+        Checks schema compatibility first, then streams old batches through an unlinked
+        file handle to avoid loading everything into memory at once.
+        Raises SampleFormatChanged if unification fails.
+        """
+        # Check compatibility before doing any I/O
+        old_schema_no_meta = self._sink_schema.remove_metadata()
+        new_schema_no_meta = new_record.schema.remove_metadata()
+        try:
+            unified_no_meta = pyarrow.unify_schemas([old_schema_no_meta, new_schema_no_meta], promote_options="permissive")
+        except pyarrow.ArrowInvalid:
+            raise SampleFormatChanged(self._sink_schema, new_record.schema)
+        unified = unified_no_meta.with_metadata(self._sink_schema.metadata)
+
+        # Close writer, open reader on the old file, then unlink it.
+        # The open file handle keeps the data accessible while we overwrite the path.
+        self._sink.close()
+        old_file = pyarrow.OSFile(self.fname)
+        reader = pyarrow.RecordBatchFileReader(old_file)
+        os.unlink(self.fname)
+
+        self._native_file = pyarrow.output_stream(self.fname)
+        self._sink = pyarrow.RecordBatchFileWriter(
+            self._native_file, unified, options=pyarrow.ipc.IpcWriteOptions(compression=self.compression)
+        )
+        self._sink_schema = unified
+
+        for i in range(reader.num_record_batches):
+            self._sink.write(_cast_batch(reader.get_batch(i), unified))
+        self._sink.write(_cast_batch(new_record, unified))
+
     # TODO: test writing batches of data straight from a PyTorch batched processing loop
     def write_batch(self, b, flush=False):
         import pyarrow
 
         try:
+            if self._sink is not None and not self._fixed_schema:
+                # Subsequent batch: use natural inference to detect schema evolution
+                # (from_pylist with an explicit schema silently drops new columns and coerces types)
+                record = pyarrow.RecordBatch.from_pylist(b)
+                if record.schema != self._sink_schema:
+                    self._rewrite_with_new_schema(record)
+                    self._buffer.clear()
+                    return
+                self._sink.write(record)
+                self._buffer.clear()
+                return
             record = pyarrow.RecordBatch.from_pylist(b, self._sink_schema)
+        except (pyarrow.ArrowInvalid, pyarrow.ArrowTypeError):
+            if self._fixed_schema:
+                actual = pyarrow.RecordBatch.from_pylist(b).schema
+                raise SampleFormatChanged(self._sink_schema.remove_metadata(), actual) from None
+            raise
         except Exception:
             def _truncate(v, limit=200):
                 r = repr(v)
