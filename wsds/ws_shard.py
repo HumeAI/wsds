@@ -42,16 +42,20 @@ class WSShard(WSShardInterface):
     batch_size: int
     dataset: "WSDataset"
 
-    def __init__(self, dataset, fname, shard_ref=None):
+    def __init__(self, dataset, fname, shard_ref=None, *, disable_memory_map: bool = False):
         self.dataset = dataset
         self.shard_ref = shard_ref
         self.fname = fname
 
         try:
-            if dataset.disable_memory_map:
+            if disable_memory_map:
                 self._source_file = pa.OSFile(str(fname))
             else:
-                self._source_file = pa.memory_map(str(fname))
+                try:
+                    self._source_file = pa.memory_map(str(fname))
+                except OSError:
+                    # filesystem doesn't support mmap (NFS, some container FS) — fall back
+                    self._source_file = pa.OSFile(str(fname))
             self.reader = pa.RecordBatchFileReader(self._source_file)
         except FileNotFoundError:
             raise WSShardMissingError(fname) from None
