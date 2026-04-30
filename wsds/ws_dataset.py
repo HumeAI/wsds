@@ -107,6 +107,8 @@ class WSDataset:
 
         self._open_shards = {}
         self._linked_datasets = {}
+        # column-dirs tuple -> set of shard refs that already passed validate_shards
+        self._validated_shards: dict[tuple[str, ...], set] = {}
 
         self._register_wsds_links()
 
@@ -118,6 +120,7 @@ class WSDataset:
         for ds in self._linked_datasets.values():
             ds.close()
         self._linked_datasets.clear()
+        self._validated_shards.clear()
 
     def enable_filter(self, filter_name: str, filter_df: pl.DataFrame):
         """
