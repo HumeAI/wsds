@@ -1,7 +1,8 @@
 import os
 import re
+import sys
 import traceback
-from concurrent.futures import ProcessPoolExecutor
+from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -248,56 +249,131 @@ def format_duration(duration):
         return f"{hours:.2f} hours"
 
 
+_O_NOATIME = getattr(os, "O_NOATIME", 0)  # 0 on non-Linux platforms
+
+
 def preload_shard(shard_fname):
+    """Open a shard file and verify the trailing 6-byte ARROW1 magic.
+
+    Uses raw os.open/lseek/read/close (bypassing Python's BufferedReader) and
+    O_NOATIME on Linux (skips a per-open atime write back to the FS server).
+    Falls back to plain O_RDONLY on EPERM (file not owned by us).
+    """
+    fname = str(shard_fname)
     try:
-        with open(shard_fname, "rb") as f:
-            f.seek(-6, os.SEEK_END)
-            if f.read() != b"ARROW1":
-                print(f"Invalid file format {shard_fname}: ARROW1 magic not found")
-                return False
+        try:
+            fd = os.open(fname, os.O_RDONLY | _O_NOATIME)
+        except PermissionError:
+            fd = os.open(fname, os.O_RDONLY)
     except FileNotFoundError:
         return False
     except OSError as err:
         traceback.print_exc()
-        print(f"OSError while loading {shard_fname}: {err}")
+        print(f"OSError while loading {fname}: {err}")
         return False
+    try:
+        os.lseek(fd, -6, os.SEEK_END)
+        if os.read(fd, 6) != b"ARROW1":
+            print(f"Invalid file format {fname}: ARROW1 magic not found")
+            return False
+    except OSError as err:
+        traceback.print_exc()
+        print(f"OSError while loading {fname}: {err}")
+        return False
+    finally:
+        os.close(fd)
     return True
 
 
+def _in_debugger() -> bool:
+    """True under pdb/debugpy. Used to skip ProcessPoolExecutor — child
+    processes aren't traced and can hang on breakpoints."""
+    return sys.gettrace() is not None or "debugpy" in sys.modules
+
+
+def _choose_validation_params(n_ops: int, cpus: int | None = None) -> tuple[int, int]:
+    """Pick (n_processes, n_threads) for `validate_shards` based on workload size.
+
+    Calibrated empirically on Weka with ~50µs/op effective latency:
+    - debugger:        1 process, threads only (process pool breaks tracing)
+    - n_ops <=  512:   1 process, few threads. Threadpool setup itself matters here.
+    - n_ops <= 4096:   1 process, many threads. Process fork (~50–100ms each)
+                       still dominates over the parallelism gain.
+    - n_ops >  4096:   spread across cpu_count processes, 32 threads each.
+    """
+    cpus = cpus or os.cpu_count() or 8
+    if _in_debugger():
+        return 1, min(64, max(1, -(-n_ops // 32)))
+    if n_ops <= 512:
+        return 1, min(32, max(1, -(-n_ops // 16)))
+    if n_ops <= 4096:
+        return 1, min(128, max(8, -(-n_ops // 32)))
+    n_threads = 32
+    desired_threads = max(cpus, -(-n_ops // 32))
+    n_processes = min(cpus, max(2, -(-desired_threads // n_threads)))
+    return n_processes, n_threads
+
+
+def _validate_shard_chunk(args):
+    """Top-level worker (must be picklable for ProcessPoolExecutor).
+
+    Receives (shard_path_chunk, n_threads). Splits the chunk into per-thread
+    sub-chunks and runs `preload_shard` on each file sequentially within a
+    thread.
+    """
+    shard_path_chunk, n_threads = args
+    sub_size = max(1, -(-len(shard_path_chunk) // n_threads))
+    sub_chunks = [shard_path_chunk[i:i + sub_size] for i in range(0, len(shard_path_chunk), sub_size)]
+
+    def check_sub(sub):
+        return [(shard, all(preload_shard(p) for p in paths)) for shard, paths in sub]
+
+    with ThreadPoolExecutor(max_workers=n_threads) as ex:
+        results = list(ex.map(check_sub, sub_chunks))
+    return [item for sub in results for item in sub]
+
+
 def validate_shards(
-    dataset: "WSDataset", shards: list[tuple[str, str]], column_dirs: list[str], tail_bytes: int = 10240
+    dataset: "WSDataset",
+    shards: list[tuple[str, str]],
+    column_dirs: list[str],
 ):
     """Prefetch and validate shard files for the given shards and column dirs.
 
-    Uses a ProcessPoolExecutor to load them concurrently, which helps with network filesystems
-    where latency is the bottleneck. This is useful before operations that need to read
-    from multiple shards (like WSSample.__repr__ or SQL queries).
+    Verifies each shard's ARROW1 magic across every column dir. Auto-tunes
+    its concurrency (single-process threads for small workloads, process pool
+    for large ones) via `_choose_validation_params`.
 
-    Args:
-        dataset: The WSDataset instance
-        shards: List of (partition, shard_name) tuples identifying the shards
-        column_dirs: List of column directory names to prefetch
-        tail_bytes: Number of bytes to read from the end of each file (default 10KB)
+    Already-validated shards on `dataset` (tracked in
+    `dataset._validated_shards`) are skipped and returned with `ok=True`.
 
-    Returns:
-        List of shards that loaded successfully across all column dirs
+    Returns a list of `(shard_ref, ok)` for every input shard.
     """
-
-    # Filter out computed columns (they don't have actual shard files)
-    actual_column_dirs = [s for s in column_dirs if s not in dataset.computed_columns]
-
+    actual_column_dirs = [c for c in column_dirs if c not in dataset.computed_columns]
     if not actual_column_dirs or not shards:
-        return []
+        return [(s, True) for s in shards]
 
-    # Create all combinations of shards and column dirs
-    shard_files = [
-        dataset.get_shard_path(column_dir, shard_name) for shard_name in shards for column_dir in actual_column_dirs
+    cache_key = tuple(sorted(actual_column_dirs))
+    cache: set = dataset._validated_shards.setdefault(cache_key, set())
+    pending = [s for s in shards if s not in cache]
+    if not pending:
+        return [(s, True) for s in shards]
+
+    shard_paths = [
+        (s, [dataset.get_shard_path(cd, s) for cd in actual_column_dirs])
+        for s in pending
     ]
+    n_processes, n_threads = _choose_validation_params(len(shard_paths) * len(actual_column_dirs))
 
-    with ProcessPoolExecutor(max_workers=min(len(shard_files), 64)) as executor:
-        results = list(executor.map(preload_shard, shard_files))
+    if n_processes <= 1:
+        verified = _validate_shard_chunk((shard_paths, n_threads))
+    else:
+        chunk_size = max(1, -(-len(shard_paths) // n_processes))
+        chunks = [shard_paths[i:i + chunk_size] for i in range(0, len(shard_paths), chunk_size)]
+        with ProcessPoolExecutor(max_workers=n_processes) as ex:
+            chunk_results = list(ex.map(_validate_shard_chunk, [(c, n_threads) for c in chunks]))
+        verified = [item for chunk in chunk_results for item in chunk]
 
-    # Check that all column dirs loaded successfully for each shard
-    # Return all given shards with an ok flag
-    num_column_dirs = len(actual_column_dirs)
-    return [(shard, all(results[i * num_column_dirs : (i + 1) * num_column_dirs])) for i, shard in enumerate(shards)]
+    verified_map = dict(verified)
+    cache.update(s for s, ok in verified if ok)
+    return [(s, True) if s in cache else (s, verified_map.get(s, False)) for s in shards]
