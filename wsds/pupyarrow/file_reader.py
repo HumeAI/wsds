@@ -62,7 +62,6 @@ class FileReader:
             return self._tail_data[start : start + length]
         actual_n = max(needed, BLOCK_SIZE)
         t0 = time.monotonic()
-        print(self, self._raw_read_end)
         self._tail_data = self._raw_read_end(actual_n)
         dt = time.monotonic() - t0
         self.io_time += dt
