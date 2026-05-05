@@ -67,23 +67,23 @@ class WSS3Shard(WSShardInterface):
         partition, shard = shard_ref
         prefix = link["prefix"]
         key = f"{prefix}/{partition}/{shard}.wsds" if partition else f"{prefix}/{shard}.wsds"
-        s3_client = cls._make_s3_client(link.get("endpoint_url"))
+        s3_client = cls._make_s3_client(link)
         return cls(dataset, link["bucket"], os.path.normpath(key), shard_ref=shard_ref, s3_client=s3_client)
 
     @classmethod
-    def _make_s3_client(cls, endpoint_url=None):
+    def _make_s3_client(cls, link=None):
         import boto3
 
-        endpoint_url = endpoint_url or os.environ.get("WSDS_S3_ENDPOINT_URL")
-        kwargs = {}
-        if endpoint_url:
-            kwargs["endpoint_url"] = endpoint_url
-        return boto3.client("s3", **kwargs)
+        link = link or {}
+        keys = ("endpoint_url", "aws_access_key_id", "aws_secret_access_key", "aws_session_token", "region_name")
+        kwargs = {k: link[k] for k in keys if link.get(k)}
+        kwargs.setdefault("endpoint_url", os.environ.get("WSDS_S3_ENDPOINT_URL"))
+        return boto3.client("s3", **{k: v for k, v in kwargs.items() if v})
 
     @classmethod
     def _discover_columns_from_s3(cls, link):
         """Read one shard's footer from S3 to discover column names."""
-        s3_client = cls._make_s3_client(link.get("endpoint_url"))
+        s3_client = cls._make_s3_client(link)
         bucket = link["bucket"]
         prefix = link["prefix"]
         response = s3_client.list_objects_v2(Bucket=bucket, Prefix=prefix, MaxKeys=10)
