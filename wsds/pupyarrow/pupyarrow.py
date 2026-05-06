@@ -12,11 +12,12 @@ Features:
 
 from __future__ import annotations
 
+import asyncio
 import struct
 from dataclasses import dataclass
 from enum import IntEnum
 from pathlib import Path
-from typing import Any, BinaryIO, Iterator
+from typing import Any, Iterator
 
 import numpy as np
 
@@ -368,6 +369,83 @@ def _decompress_buffer(raw_data: bytes, compression: str | None) -> bytes:
         raise ValueError(f"Unknown compression codec: {compression}")
 
 
+class BlockCache:
+    """Sorted interval cache for byte ranges.
+
+    Stores non-overlapping ``(start, end, data)`` intervals, merging on insert.
+    Designed for caching S3 range-read results so that ffmpeg's AVIO reads
+    hit local memory instead of issuing new HTTP requests.
+
+    >>> cache = BlockCache()
+    >>> cache.put(100, b'hello')
+    >>> cache.put(105, b'world')
+    >>> cache.get(100, 10)
+    b'helloworld'
+    >>> cache.get(103, 4)
+    b'lowo'
+    >>> cache.get(100, 11) is None  # extends past cached range
+    True
+
+    Adjacent/overlapping ranges are merged:
+
+    >>> cache2 = BlockCache()
+    >>> cache2.put(0, b'AAAA')
+    >>> cache2.put(10, b'BBBB')
+    >>> cache2.put(4, b'CCCCCC')
+    >>> cache2.get(0, 14)
+    b'AAAACCCCCCBBBB'
+    """
+
+    __slots__ = ("_ranges",)
+
+    def __init__(self):
+        self._ranges: list[tuple[int, int, bytes]] = []
+
+    def get(self, offset: int, length: int) -> bytes | None:
+        """Return data if ``[offset, offset+length)`` is fully cached, else None."""
+        end = offset + length
+        for start, rend, data in self._ranges:
+            if start <= offset and rend >= end:
+                return data[offset - start : offset - start + length]
+        return None
+
+    def put(self, offset: int, data: bytes) -> None:
+        """Insert a range, merging with any overlapping/adjacent intervals."""
+        if not data:
+            return
+        new_start = offset
+        new_end = offset + len(data)
+        new_data = bytearray(data)
+
+        merged = []
+        for start, end, rdata in self._ranges:
+            if end < new_start or start > new_end:
+                # No overlap — keep as-is
+                merged.append((start, end, rdata))
+            else:
+                # Overlap or adjacent — merge into new range
+                if start < new_start:
+                    prefix = rdata[: new_start - start]
+                    new_data = bytearray(prefix) + new_data
+                    new_start = start
+                if end > new_end:
+                    suffix = rdata[new_end - start :]
+                    new_data = new_data + bytearray(suffix)
+                    new_end = end
+
+        merged.append((new_start, new_end, bytes(new_data)))
+        merged.sort(key=lambda r: r[0])
+        self._ranges = merged
+
+    @property
+    def total_bytes(self) -> int:
+        return sum(end - start for start, end, _ in self._ranges)
+
+    def __repr__(self) -> str:
+        parts = [f"[{s}:{e}]" for s, e, _ in self._ranges]
+        return f"BlockCache({', '.join(parts)}, total={self.total_bytes})"
+
+
 class LazyBuffer:
     """
     A lazy buffer that reads data on demand and implements the file-like interface.
@@ -383,9 +461,14 @@ class LazyBuffer:
     same reader with adjusted offset/length.  For uncompressed buffers the
     slice goes directly to the reader; for compressed buffers the parent data
     is decompressed once and the slice is pre-populated.
+
+    For audio seeking, call ``enable_cache()`` to activate a block cache with
+    readahead.  Then ``prepopulate(ranges)`` pre-fetches byte ranges in
+    parallel.  ffmpeg/humecodec reads hit the cache and only fetch from S3 on
+    miss.
     """
 
-    # __slots__ = ("_reader", "_offset", "_length", "_data", "_compression", "_pos")
+    READAHEAD = 256 * 1024  # readahead on cache miss
 
     def __init__(self, reader: FileReader, offset: int, length: int, compression: str | None = None):
         self._reader = reader
@@ -394,6 +477,28 @@ class LazyBuffer:
         self._data: bytes | None = None
         self._compression = compression
         self._pos = 0
+        self._cache: BlockCache | None = None
+
+    def enable_cache(self, readahead: int = 256 * 1024) -> "LazyBuffer":
+        """Activate block cache with readahead for seeking workloads."""
+        self._cache = BlockCache()
+        self.READAHEAD = readahead
+        return self
+
+    def prepopulate(self, ranges: list[tuple[int, int]]) -> None:
+        """Pre-fetch byte ranges (relative to buffer start) into the cache.
+
+        Each range is ``(offset, length)``.  Ranges are fetched via the
+        underlying reader (which may coalesce nearby reads).
+        """
+        if self._cache is None:
+            self.enable_cache()
+        for rel_offset, length in ranges:
+            length = min(length, self._length - rel_offset)
+            if length <= 0:
+                continue
+            data = self._reader.read(self._offset + rel_offset, length)
+            self._cache.put(rel_offset, data)
 
     @property
     def offset(self) -> int:
@@ -417,7 +522,6 @@ class LazyBuffer:
         Advances the position by the number of bytes returned.
         """
         remaining = self._length - self._pos
-        print("read:", self._pos, size, remaining)
         if size < 0:
             size = remaining
         else:
@@ -452,14 +556,26 @@ class LazyBuffer:
         """Read a byte range from the (decompressed) buffer.
 
         If the buffer is already cached, slices it. If uncompressed,
-        reads directly from the range without reading the whole buffer.
-        If compressed, falls back to a full read and slices.
+        reads directly from the range (via block cache if enabled, or
+        the reader directly). If compressed, falls back to a full read.
         """
         if self._data is not None:
             return self._data[start:end]
-        if self._compression is None:
-            return self._reader.read(self._offset + start, end - start)
-        return self._read_all()[start:end]
+        if self._compression is not None:
+            return self._read_all()[start:end]
+        # Uncompressed path — use block cache if enabled
+        length = end - start
+        if self._cache is not None:
+            cached = self._cache.get(start, length)
+            if cached is not None:
+                return cached
+            # Cache miss — fetch with readahead
+            fetch_len = max(length, self.READAHEAD)
+            fetch_len = min(fetch_len, self._length - start)
+            data = self._reader.read(self._offset + start, fetch_len)
+            self._cache.put(start, data)
+            return data[:length]
+        return self._reader.read(self._offset + start, length)
 
     def slice(self, start: int, end: int) -> "LazyBuffer":
         """Create a sub-buffer over the byte range [start, end).
@@ -481,12 +597,51 @@ class LazyBuffer:
         data = self._read_all()
         return np.frombuffer(data, dtype=dtype)
 
+    # -- Async API (IO plan aware) ------------------------------------------
+
+    async def async_read_all(self) -> bytes:
+        """Async read via reader (uses cache/plan mode if active)."""
+        if self._data is not None:
+            return self._data
+        raw = await self._reader.async_read(self._offset, self._length)
+        self._data = _decompress_buffer(raw, self._compression)
+        return self._data
+
+    async def async_as_numpy(self, dtype: np.dtype) -> np.ndarray:
+        """Async version of as_numpy."""
+        data = await self.async_read_all()
+        return np.frombuffer(data, dtype=dtype)
+
+    async def async_prepopulate(self, ranges: list[tuple[int, int]]) -> None:
+        """Async pre-fetch of byte ranges into the cache."""
+        if self._cache is None:
+            self.enable_cache()
+        coros = []
+        for rel_offset, length in ranges:
+            length = min(length, self._length - rel_offset)
+            if length <= 0:
+                continue
+            coros.append(self._async_fetch_range(rel_offset, length))
+        if coros:
+            await asyncio.gather(*coros)
+
+    async def _async_fetch_range(self, rel_offset: int, length: int) -> None:
+        data = await self._reader.async_read(self._offset + rel_offset, length)
+        self._cache.put(rel_offset, data)
+
+    def seekable(self) -> bool:
+        return True
+
+    def readable(self) -> bool:
+        return True
+
     def __len__(self) -> int:
         return self._length
 
     def __repr__(self) -> str:
+        cached = f", cache={self._cache}" if self._cache else ""
         loaded = "loaded" if self._data is not None else "not loaded"
-        return f"LazyBuffer(offset={self._offset}, length={self._length}, {loaded})"
+        return f"LazyBuffer(offset={self._offset}, length={self._length}, {loaded}{cached})"
 
 
 class LazyArray:
@@ -539,6 +694,32 @@ class LazyArray:
 
         return self._validity
 
+    async def async_resolve(self) -> None:
+        """Prefetch all buffers for this array (coalesced if IO plan active)."""
+        futs = [buf.async_read_all() for buf in self._buffers if buf._length > 0]
+        if futs:
+            await asyncio.gather(*futs)
+
+    def to_numpy(self) -> np.ndarray:
+        raise NotImplementedError(f"{type(self).__name__} does not support to_numpy()")
+
+    def to_masked_array(self) -> np.ma.MaskedArray:
+        """Return values as a masked array with nulls masked."""
+        values = self.to_numpy()
+        mask = self.validity_mask()
+        if mask is None:
+            return np.ma.array(values, mask=False)
+        return np.ma.array(values, mask=~mask)
+
+    def __getitem__(self, idx: int | slice) -> Any:
+        return self.to_numpy()[idx]
+
+    async def async_to_numpy(self) -> np.ndarray:
+        await self.async_resolve()
+        return self.to_numpy()
+
+    async_to_py = async_to_numpy
+
 
 class LazyIntArray(LazyArray):
     """Lazy integer array with numpy access."""
@@ -571,17 +752,6 @@ class LazyIntArray(LazyArray):
             self._values = self._buffers[1].as_numpy(self._dtype)[: self.length]
         return self._values
 
-    def to_masked_array(self) -> np.ma.MaskedArray:
-        """Return values as a masked array with nulls masked."""
-        values = self.to_numpy()
-        mask = self.validity_mask()
-        if mask is None:
-            return np.ma.array(values, mask=False)
-        return np.ma.array(values, mask=~mask)
-
-    def __getitem__(self, idx: int | slice) -> Any:
-        return self.to_numpy()[idx]
-
     def __repr__(self) -> str:
         return f"LazyIntArray(dtype={self._dtype.__name__}, length={self.length}, nulls={self.null_count})"
 
@@ -607,17 +777,6 @@ class LazyFloatArray(LazyArray):
             self._values = self._buffers[1].as_numpy(self._dtype)[: self.length]
         return self._values
 
-    def to_masked_array(self) -> np.ma.MaskedArray:
-        """Return values as a masked array with nulls masked."""
-        values = self.to_numpy()
-        mask = self.validity_mask()
-        if mask is None:
-            return np.ma.array(values, mask=False)
-        return np.ma.array(values, mask=~mask)
-
-    def __getitem__(self, idx: int | slice) -> Any:
-        return self.to_numpy()[idx]
-
     def __repr__(self) -> str:
         return f"LazyFloatArray(dtype={self._dtype.__name__}, length={self.length}, nulls={self.null_count})"
 
@@ -641,120 +800,15 @@ class LazyBoolArray(LazyArray):
             self._values = np.unpackbits(packed, bitorder="little")[: self.length].astype(bool)
         return self._values
 
-    def to_masked_array(self) -> np.ma.MaskedArray:
-        """Return values as a masked array with nulls masked."""
-        values = self.to_numpy()
-        mask = self.validity_mask()
-        if mask is None:
-            return np.ma.array(values, mask=False)
-        return np.ma.array(values, mask=~mask)
-
-    def __getitem__(self, idx: int | slice) -> Any:
-        return self.to_numpy()[idx]
-
     def __repr__(self) -> str:
         return f"LazyBoolArray(length={self.length}, nulls={self.null_count})"
-
-
-class LazyStringArray(LazyArray):
-    """
-    Lazy string (Utf8/LargeUtf8) array.
-
-    Offsets are loaded eagerly for efficient slicing.
-    String data is loaded lazily.
-    """
-
-    def __init__(
-        self,
-        field: Field,
-        node: FieldNode,
-        buffers: list[LazyBuffer],
-        large: bool = False,
-    ):
-        super().__init__(field, node, buffers)
-        self._large = large
-        self._offsets: np.ndarray | None = None
-        self._data_buffer = buffers[2]
-        self._data: bytes | None = None
-        # Eagerly load offsets (metadata)
-        self._load_offsets()
-
-    def _load_offsets(self) -> None:
-        """Eagerly load offset array."""
-        offset_dtype = np.int64 if self._large else np.int32
-        self._offsets = self._buffers[1].as_numpy(offset_dtype)[: self.length + 1]
-
-    @property
-    def offsets(self) -> np.ndarray:
-        """Return the offset array (eagerly loaded)."""
-        return self._offsets  # type: ignore
-
-    def _ensure_data(self) -> bytes:
-        """Lazily load string data buffer."""
-        if self._data is None:
-            self._data = self._data_buffer._read_all()
-        return self._data
-
-    def __getitem__(self, idx: int | slice) -> str | None | list[str | None]:
-        """Get string(s) by index or slice."""
-        if isinstance(idx, slice):
-            indices = range(*idx.indices(self.length))
-            return [self._get_single(i) for i in indices]
-
-        if idx < 0:
-            idx += self.length
-        if idx < 0 or idx >= self.length:
-            raise IndexError(f"Index {idx} out of range for array of length {self.length}")
-
-        return self._get_single(idx)
-
-    def _get_single(self, idx: int) -> str | None:
-        """Get a single string by index."""
-        # Check validity
-        mask = self.validity_mask()
-        if mask is not None and not mask[idx]:
-            return None
-
-        start = int(self._offsets[idx])
-        end = int(self._offsets[idx + 1])
-        return self._data_buffer.read_range(start, end).decode("utf-8")
-
-    def to_list(self) -> list[str | None]:
-        """Convert to a Python list of strings."""
-        data = self._ensure_data()
-        mask = self.validity_mask()
-        result: list[str | None] = []
-
-        for i in range(self.length):
-            if mask is not None and not mask[i]:
-                result.append(None)
-            else:
-                start = int(self._offsets[i])
-                end = int(self._offsets[i + 1])
-                result.append(data[start:end].decode("utf-8"))
-
-        return result
-
-    def to_numpy(self) -> np.ndarray:
-        """Return as numpy object array of strings."""
-        return np.array(self.to_list(), dtype=object)
-
-    def byte_sizes(self) -> np.ndarray:
-        """Return array of byte sizes for each string (without loading data)."""
-        return np.diff(self._offsets)
-
-    def __repr__(self) -> str:
-        type_name = "LargeUtf8" if self._large else "Utf8"
-        data_loaded = "loaded" if self._data is not None else "not loaded"
-        return f"LazyStringArray({type_name}, length={self.length}, nulls={self.null_count}, data={data_loaded})"
 
 
 class LazyBinaryArray(LazyArray):
     """
     Lazy binary (Binary/LargeBinary) array.
 
-    Offsets are loaded eagerly for efficient slicing.
-    Binary data is loaded lazily.
+    Offsets and binary data are both loaded lazily on first access.
     """
 
     def __init__(
@@ -769,18 +823,18 @@ class LazyBinaryArray(LazyArray):
         self._offsets: np.ndarray | None = None
         self._data_buffer = buffers[2]
         self._data: bytes | None = None
-        # Eagerly load offsets (metadata)
-        self._load_offsets()
 
-    def _load_offsets(self) -> None:
-        """Eagerly load offset array."""
-        offset_dtype = np.int64 if self._large else np.int32
-        self._offsets = self._buffers[1].as_numpy(offset_dtype)[: self.length + 1]
+    def _ensure_offsets(self) -> np.ndarray:
+        """Load offset array on first access."""
+        if self._offsets is None:
+            offset_dtype = np.int64 if self._large else np.int32
+            self._offsets = self._buffers[1].as_numpy(offset_dtype)[: self.length + 1]
+        return self._offsets
 
     @property
     def offsets(self) -> np.ndarray:
-        """Return the offset array (eagerly loaded)."""
-        return self._offsets  # type: ignore
+        """Return the offset array (loaded on first access)."""
+        return self._ensure_offsets()
 
     def _ensure_data(self) -> bytes:
         """Lazily load binary data buffer."""
@@ -788,8 +842,8 @@ class LazyBinaryArray(LazyArray):
             self._data = self._data_buffer._read_all()
         return self._data
 
-    def __getitem__(self, idx: int | slice) -> LazyBuffer | None | list[LazyBuffer | None]:
-        """Get binary data as a file-like LazyBuffer by index or slice."""
+    def __getitem__(self, idx: int | slice):
+        """Get element(s) by index or slice."""
         if isinstance(idx, slice):
             indices = range(*idx.indices(self.length))
             return [self._get_single(i) for i in indices]
@@ -807,8 +861,9 @@ class LazyBinaryArray(LazyArray):
         if mask is not None and not mask[idx]:
             return None
 
-        start = int(self._offsets[idx])
-        end = int(self._offsets[idx + 1])
+        offsets = self._ensure_offsets()
+        start = int(offsets[idx])
+        end = int(offsets[idx + 1])
         return self._data_buffer.slice(start, end)
 
     def read_range(self, idx: int, start: int, end: int) -> bytes:
@@ -822,8 +877,9 @@ class LazyBinaryArray(LazyArray):
         if idx < 0 or idx >= self.length:
             raise IndexError(f"Index {idx} out of range")
 
-        elem_start = int(self._offsets[idx])
-        elem_end = int(self._offsets[idx + 1])
+        offsets = self._ensure_offsets()
+        elem_start = int(offsets[idx])
+        elem_end = int(offsets[idx + 1])
 
         # Clamp range to element bounds
         read_start = elem_start + max(0, start)
@@ -836,6 +892,7 @@ class LazyBinaryArray(LazyArray):
 
     def to_list(self) -> list[LazyBuffer | None]:
         """Convert to a Python list of file-like LazyBuffers."""
+        offsets = self._ensure_offsets()
         mask = self.validity_mask()
         result: list[LazyBuffer | None] = []
 
@@ -843,20 +900,79 @@ class LazyBinaryArray(LazyArray):
             if mask is not None and not mask[i]:
                 result.append(None)
             else:
-                start = int(self._offsets[i])
-                end = int(self._offsets[i + 1])
+                start = int(offsets[i])
+                end = int(offsets[i + 1])
                 result.append(self._data_buffer.slice(start, end))
 
         return result
 
     def byte_sizes(self) -> np.ndarray:
         """Return array of byte sizes for each element (without loading data)."""
-        return np.diff(self._offsets)
+        return np.diff(self._ensure_offsets())
+
+    async def async_to_bytes_list(self) -> list[bytes | None]:
+        await self.async_resolve()
+        data = self._ensure_data()
+        offsets = self.offsets
+        mask = self.validity_mask()
+        return [
+            None if (mask is not None and not mask[i]) else data[int(offsets[i]) : int(offsets[i + 1])]
+            for i in range(self.length)
+        ]
+
+    async_to_py = async_to_bytes_list
 
     def __repr__(self) -> str:
         type_name = "LargeBinary" if self._large else "Binary"
         data_loaded = "loaded" if self._data is not None else "not loaded"
         return f"LazyBinaryArray({type_name}, length={self.length}, nulls={self.null_count}, data={data_loaded})"
+
+
+class LazyStringArray(LazyBinaryArray):
+    """
+    Lazy string (Utf8/LargeUtf8) array.
+
+    Subclass of LazyBinaryArray that decodes values as UTF-8 strings.
+    """
+
+    def _get_single(self, idx: int) -> str | None:
+        """Get a single string by index, decoding the LazyBuffer from super()."""
+        buf = super()._get_single(idx)
+        if buf is None:
+            return None
+        return buf._read_all().decode("utf-8")
+
+    def to_list(self) -> list[str | None]:
+        """Convert to a Python list of strings."""
+        offsets = self._ensure_offsets()
+        data = self._ensure_data()
+        mask = self.validity_mask()
+        result: list[str | None] = []
+
+        for i in range(self.length):
+            if mask is not None and not mask[i]:
+                result.append(None)
+            else:
+                start = int(offsets[i])
+                end = int(offsets[i + 1])
+                result.append(data[start:end].decode("utf-8"))
+
+        return result
+
+    def to_numpy(self) -> np.ndarray:
+        """Return as numpy object array of strings."""
+        return np.array(self.to_list(), dtype=object)
+
+    async def async_to_list(self) -> list[str | None]:
+        await self.async_resolve()
+        return self.to_list()
+
+    async_to_py = async_to_list
+
+    def __repr__(self) -> str:
+        type_name = "LargeUtf8" if self._large else "Utf8"
+        data_loaded = "loaded" if self._data is not None else "not loaded"
+        return f"LazyStringArray({type_name}, length={self.length}, nulls={self.null_count}, data={data_loaded})"
 
 
 class LazyFixedSizeBinaryArray(LazyArray):
@@ -877,9 +993,6 @@ class LazyFixedSizeBinaryArray(LazyArray):
             data = self._buffers[1]._read_all()
             self._values = np.frombuffer(data, dtype=np.uint8).reshape(-1, self._byte_width)[: self.length]
         return self._values
-
-    def __getitem__(self, idx: int | slice) -> np.ndarray:
-        return self.to_numpy()[idx]
 
     def __repr__(self) -> str:
         return f"LazyFixedSizeBinaryArray(byte_width={self._byte_width}, length={self.length}, nulls={self.null_count})"
@@ -936,6 +1049,8 @@ class RecordBatch:
     @staticmethod
     def _get_num_buffers_for_type(type_id: ArrowType) -> int:
         """Return the number of buffers used by a type."""
+        if type_id == ArrowType.Null:
+            return 0
         if type_id in (ArrowType.Utf8, ArrowType.Binary):
             return 3
         if type_id in (ArrowType.LargeUtf8, ArrowType.LargeBinary):
@@ -1026,6 +1141,48 @@ class RecordBatch:
         return f"RecordBatch(rows={self.num_rows}, columns={self.num_columns})"
 
 
+def _parse_record_batch_message(message_bytes: bytes) -> RecordBatchInfo:
+    """Parse a record batch message into RecordBatchInfo (no IO)."""
+    continuation = struct.unpack("<i", message_bytes[:4])[0]
+    metadata_offset = 8 if continuation == -1 else 0
+
+    message = FBMessage.Message.GetRootAsMessage(message_bytes, metadata_offset)
+
+    if message.HeaderType() != MessageType.RecordBatch:
+        raise ValueError(f"Expected RecordBatch, got {MessageType(message.HeaderType()).name}")
+
+    rb = FBRecordBatch.RecordBatch()
+    rb.Init(message.Header().Bytes, message.Header().Pos)
+
+    nodes = []
+    for i in range(rb.NodesLength()):
+        node = rb.Nodes(i)
+        nodes.append(FieldNode(length=node.Length(), null_count=node.NullCount()))
+
+    buffers = []
+    for i in range(rb.BuffersLength()):
+        buf = rb.Buffers(i)
+        buffers.append(Buffer(offset=buf.Offset(), length=buf.Length()))
+
+    compression = None
+    if rb.Compression() is not None:
+        comp = rb.Compression()
+        codec_map = {0: "lz4_frame", 1: "zstd"}
+        compression = codec_map.get(comp.Codec(), "unknown")
+
+    variadic_counts = []
+    for i in range(rb.VariadicBufferCountsLength()):
+        variadic_counts.append(rb.VariadicBufferCounts(i))
+
+    return RecordBatchInfo(
+        length=rb.Length(),
+        nodes=nodes,
+        buffers=buffers,
+        compression=compression,
+        variadic_buffer_counts=variadic_counts,
+    )
+
+
 class FeatherFile:
     """
     A pure-Python reader for Arrow IPC (Feather v2) files.
@@ -1044,19 +1201,21 @@ class FeatherFile:
                 values = col.to_numpy()
     """
 
-    def __init__(self, path_or_file: str | Path | BinaryIO | FileReader):
+    def __init__(self, path_or_file: str | Path | FileReader):
         """
         Open a Feather file.
 
         Args:
-            path_or_file: Path to the file, an open binary file object, or a FileReader.
+            path_or_file: Path to the file or a FileReader.
         """
         if hasattr(path_or_file, "read_end"):
             self._reader = path_or_file
-        elif isinstance(path_or_file, [str, Path, BinaryIO]):
+        elif isinstance(path_or_file, (str, Path)):
             self._reader = LocalFileReader(path_or_file)
         else:
-            raise TypeError(f"Unsupported type for path_or_file: {type(path_or_file)} (expected str, Path, BinaryIO, or FileReader)")
+            raise TypeError(
+                f"Unsupported type for path_or_file: {type(path_or_file)} (expected str, Path, or FileReader)"
+            )
 
         self._footer = self._read_footer()
         self._schema = Schema.from_flatbuf(self._footer.Schema())
@@ -1098,47 +1257,8 @@ class FeatherFile:
             return self._record_batch_infos[index]  # type: ignore
 
         block = self._record_batch_blocks[index]
-
         message_bytes = self._reader.read(block.offset, block.metadata_length)
-
-        continuation = struct.unpack("<i", message_bytes[:4])[0]
-        metadata_offset = 8 if continuation == -1 else 0
-
-        message = FBMessage.Message.GetRootAsMessage(message_bytes, metadata_offset)
-
-        if message.HeaderType() != MessageType.RecordBatch:
-            raise ValueError(f"Expected RecordBatch, got {MessageType(message.HeaderType()).name}")
-
-        rb = FBRecordBatch.RecordBatch()
-        rb.Init(message.Header().Bytes, message.Header().Pos)
-
-        nodes = []
-        for i in range(rb.NodesLength()):
-            node = rb.Nodes(i)
-            nodes.append(FieldNode(length=node.Length(), null_count=node.NullCount()))
-
-        buffers = []
-        for i in range(rb.BuffersLength()):
-            buf = rb.Buffers(i)
-            buffers.append(Buffer(offset=buf.Offset(), length=buf.Length()))
-
-        compression = None
-        if rb.Compression() is not None:
-            comp = rb.Compression()
-            codec_map = {0: "lz4_frame", 1: "zstd"}
-            compression = codec_map.get(comp.Codec(), "unknown")
-
-        variadic_counts = []
-        for i in range(rb.VariadicBufferCountsLength()):
-            variadic_counts.append(rb.VariadicBufferCounts(i))
-
-        info = RecordBatchInfo(
-            length=rb.Length(),
-            nodes=nodes,
-            buffers=buffers,
-            compression=compression,
-            variadic_buffer_counts=variadic_counts,
-        )
+        info = _parse_record_batch_message(message_bytes)
 
         self._record_batch_infos[index] = info
         return info
@@ -1193,6 +1313,88 @@ class FeatherFile:
         """Iterate over all record batches in the file."""
         for i in range(self.num_record_batches):
             yield self.record_batch(i)
+
+    async def async_record_batch(self, index: int) -> RecordBatch:
+        """Async version of record_batch — reads metadata via async_read if not cached."""
+        if self._record_batch_infos[index] is None:
+            block = self._record_batch_blocks[index]
+            raw = await self._reader.async_read(block.offset, block.metadata_length)
+            self._record_batch_infos[index] = _parse_record_batch_message(raw)
+        return self.record_batch(index)
+
+    def __getitem__(self, key: str | tuple[str, ...] | list[str]) -> np.ndarray | list | dict[str, np.ndarray | list]:
+        """
+        Read column data across all batches with concurrent IO.
+
+        Single column returns the resolved array/list directly.
+        Multiple columns return a dict mapping column name to resolved data.
+
+        Numeric/bool/fixed-size-binary columns return np.ndarray.
+        String columns return list[str | None].
+        Binary columns return list[bytes | None].
+
+        Uses the reader's plan mode to coalesce reads across all batches.
+        Per-batch async tasks submit reads; the execution loop flushes
+        them in coalesced rounds.
+
+        Examples:
+            values = f["score"]                  # np.ndarray
+            texts = f["text"]                    # list[str]
+            cols = f["score", "text"]             # dict
+            cols = f[["score", "text"]]           # dict (also works)
+        """
+        if isinstance(key, str):
+            names = [key]
+        elif isinstance(key, (tuple, list)):
+            names = list(key)
+        else:
+            raise TypeError(f"Key must be str, tuple[str, ...], or list[str], got {type(key).__name__}")
+
+        for name in names:
+            if self._schema.field(name) is None:
+                raise KeyError(f"Column {name!r} not in schema")
+
+        from wsds.pupyarrow.file_reader import _get_io_loop
+
+        batch_results = _get_io_loop().run(self._async_getitem(names))
+
+        # Concatenate across batches
+        output: dict[str, np.ndarray | list] = {}
+        for name in names:
+            field = self._schema.field(name)
+            is_numpy = field.type_id in (
+                ArrowType.Int,
+                ArrowType.FloatingPoint,
+                ArrowType.Bool,
+                ArrowType.FixedSizeBinary,
+            )
+            chunks = [br[name] for br in batch_results]
+            if is_numpy:
+                output[name] = np.concatenate(chunks) if len(chunks) > 1 else chunks[0] if chunks else np.array([])
+            else:
+                output[name] = [item for chunk in chunks for item in chunk]
+
+        return output[names[0]] if isinstance(key, str) else output
+
+    async def _async_getitem(self, names: list[str]) -> list[dict[str, np.ndarray | list]]:
+        """Async entry point: resolve all batches with coalesced IO."""
+
+        async def resolve_batch(batch_idx: int) -> dict[str, np.ndarray | list]:
+            batch = await self.async_record_batch(batch_idx)
+            return {name: await batch.column(name).async_to_py() for name in names}
+
+        self._reader._planned.set(True)
+        try:
+            tasks = [asyncio.ensure_future(resolve_batch(i)) for i in range(self.num_record_batches)]
+            while not all(t.done() for t in tasks):
+                await asyncio.sleep(0)
+                await self._reader.flush()
+            return [t.result() for t in tasks]
+        finally:
+            self._reader._planned.set(False)
+            self._reader.clear_cache()
+
+    # -- Context manager & lifecycle -------------------------------------------
 
     def __enter__(self) -> FeatherFile:
         return self

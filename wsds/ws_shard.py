@@ -6,8 +6,9 @@ from typing import TYPE_CHECKING
 
 import pyarrow as pa
 
+from .pupyarrow.file_reader import FileReader, LocalFileReader
 from .utils import WSShardMissingError
-from .ws_audio import AudioReader, WSAudio
+from .ws_audio import WSAudioEpisode, WSAudioSegment
 from .ws_decode import decode_sample
 from .ws_sample import WSSample
 
@@ -29,6 +30,10 @@ class WSShardInterface:
         return None
 
     def get_sample(self, column: str, offset: int) -> typing.Any:
+        raise NotImplementedError
+
+    def get_reader(self) -> FileReader:
+        """Return a pupyarrow FileReader for the underlying shard file."""
         raise NotImplementedError
 
 
@@ -104,6 +109,9 @@ class WSShard(WSShardInterface):
                 pass
             self._source_file = None
 
+    def get_reader(self):
+        return LocalFileReader(self.fname)
+
     def __repr__(self):
         r = f"WSShard({repr(self.fname)})"
         if self._data:
@@ -125,7 +133,7 @@ class WSSourceAudioShard(WSShardInterface):
     # cache
     _source_file_name: str = None
     _source_sample: WSSample = None
-    _source_reader: AudioReader = None
+    _source_reader: WSAudioEpisode = None
 
     @classmethod
     def from_link(cls, link, dataset, shard_ref):
@@ -149,7 +157,7 @@ class WSSourceAudioShard(WSShardInterface):
             self._source_file_name = file_name
 
         tstart, tend = self.get_timestamps(segment_offset)
-        return WSAudio(self._source_reader, tstart, tend)
+        return WSAudioSegment(self._source_reader, tstart, tend)
 
 
 class WSYoutubeVideoShard(WSSourceAudioShard):
