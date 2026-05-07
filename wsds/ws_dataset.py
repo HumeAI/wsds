@@ -55,7 +55,6 @@ class WSDataset:
         dataset_root: str | Path,
         include_in_progress: bool = True,
         key_folder: str | None = None,
-        disable_memory_map: bool = False,
         ignore_index: bool = False,
         rng: random.Random | int | None = None,
     ):
@@ -75,7 +74,6 @@ class WSDataset:
 
         self.index = None
         self.segmented = False
-        self.disable_memory_map = disable_memory_map
         index_file = self.dataset_root / "index.sqlite3"
         if not ignore_index and index_file.exists():
             self.index = WSIndex(index_file)
