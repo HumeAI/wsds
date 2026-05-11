@@ -298,6 +298,27 @@ class WSDataset:
         # Prefetch shard tails concurrently to warm up the filesystem cache
         verified_shard_list = validate_shards(self, shard_list, list(column_dirs.keys()))
 
+        # Fast path: when no shard_pipe, no __shard_offset__, and every shard is
+        # valid in every col_dir, we can collapse the per-shard scan loop into
+        # one multi-file `pl.scan_ipc(paths_list)` per col_dir. The plan goes
+        # from ~N_shards × N_col_dirs scan nodes to N_col_dirs — the polars
+        # optimizer scales super-linearly with plan size, so this is ~2× faster
+        # on wide workloads. Falls back to the per-shard path below when any
+        # condition fails.
+        if (
+            shard_pipe is None
+            and "__shard_offset__" not in needed_special_columns
+            and verified_shard_list
+            and all(ok for _, ok in verified_shard_list)
+        ):
+            return exprs, self._build_multifile_plan(
+                [s for s, _ in verified_shard_list],
+                column_dirs,
+                exprs,
+                key_column_dir,
+                "__shard_path__" in needed_special_columns,
+            )
+
         row_merge = []
         column_dir_samples = {}
         missing = defaultdict(list)
@@ -349,6 +370,34 @@ class WSDataset:
                 )
 
         return exprs, pl.concat(row_merge)
+
+    def _build_multifile_plan(self, shards, column_dirs, exprs, key_column_dir, needs_shard_path):
+        """Fast path for `_parse_sql_queries_polars`: one `pl.scan_ipc(paths_list)`
+        per col_dir, horizontally concatenated. See the comment in the caller
+        for why this is faster than the per-shard scan loop.
+
+        Pre-conditions enforced by the caller:
+        - all shards are valid in every col_dir (no `pl.defer` NULL-fill path)
+        - no per-shard `shard_pipe` (semantics would be lost across the union)
+        - `__shard_offset__` is not requested (multi-file scan's row index is
+          global rather than per-file)
+        """
+        per_dir_frames = []
+        for column_dir, fields in column_dirs.items():
+            paths = [self.get_shard_path(column_dir, s) for s in shards]
+            is_key_dir = column_dir == key_column_dir
+            # `__shard_path__` is synthesized by polars via `include_file_paths`;
+            # strip it (and any stray `__shard_offset__`) from the file-column
+            # select list and re-add `__shard_path__` after the scan if needed.
+            select_fields = [f for f in fields if f not in ("__shard_path__", "__shard_offset__")]
+            df = pl.scan_ipc(
+                paths,
+                include_file_paths="__shard_path__" if (is_key_dir and needs_shard_path) else None,
+            )
+            if is_key_dir and needs_shard_path:
+                select_fields = select_fields + ["__shard_path__"]
+            per_dir_frames.append(df.select(select_fields))
+        return pl.concat(per_dir_frames, how="horizontal").select(exprs)
 
     def _check_for_subsampling(self, shard_subsample):
         if shard_subsample is None:
