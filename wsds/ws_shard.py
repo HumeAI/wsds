@@ -2,7 +2,7 @@ import io
 import re
 import typing
 from dataclasses import dataclass
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Optional, Tuple
 
 import pyarrow as pa
 
@@ -21,8 +21,13 @@ class WSShardInterface:
     """Used by WSDataset to invalidate cached shards."""
 
     @classmethod
-    def get_columns(cls, link: dict, dataset: "WSDataset") -> dict[str, str] | None:
+    def get_columns(
+        cls, link: dict, dataset: "WSDataset", shard_ref: Optional[Tuple[str, str]] = None
+    ) -> dict[str, str] | None:
         """Return columns this link provides: {column_name: column_name}.
+
+        `shard_ref` is a representative (partition, shard) from the dataset's index,
+        for loaders that need to open a real shard to discover its schema.
 
         Override this to provide multiple columns from a single link.
         Return None to use the default behavior (link file stem as single column).
@@ -200,7 +205,7 @@ class WSSourceLink(WSShardInterface):
     _source_sample: WSSample = None
 
     @classmethod
-    def get_columns(cls, link, dataset):
+    def get_columns(cls, link, dataset, shard_ref=None):
         """Return all source dataset fields with the configured prefix."""
         source_dataset = dataset.get_linked_dataset(link["dataset_dir"])
         key_prefix = link.get("key_prefix", "source.")

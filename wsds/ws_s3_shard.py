@@ -78,12 +78,17 @@ class WSS3Shard(WSShardInterface):
         return cls(dataset, bucket, key, shard_ref=shard_ref, s3_client=s3_client)
 
     @classmethod
-    def get_columns(cls, link, dataset):
+    def get_columns(cls, link, dataset, shard_ref=None):
         """Return columns provided by this S3 link."""
         if "columns" in link:
             return {col: col for col in link["columns"]}
-        columns = cls._discover_columns_from_s3(link)
-        return {col: col for col in columns if col != "__key__"}
+        if shard_ref is None:
+            raise ValueError(
+                f"cannot discover columns for s3 link {link!r}: dataset has no shards in its index; "
+                "set `columns` in the link spec to skip discovery"
+            )
+        shard = cls.from_link(link, dataset, shard_ref)
+        return {col: col for col in shard._feather.schema.names if col != "__key__"}
 
     @classmethod
     def from_link(cls, link, dataset, shard_ref):
@@ -96,26 +101,6 @@ class WSS3Shard(WSShardInterface):
         key = os.path.normpath("/" + "/".join(parts))
         s3_client, _ = create_s3_client(link)
         return cls(dataset, link["bucket"], key, shard_ref=shard_ref, s3_client=s3_client)
-
-    @classmethod
-    def _discover_columns_from_s3(cls, link):
-        """Read one shard's footer from S3 to discover column names."""
-        from .pupyarrow.file_reader import _get_io_loop
-
-        bucket = link["bucket"]
-        prefix = link["prefix"]
-        s3_client, _ = create_s3_client(link)
-
-        async def _discover():
-            response = await s3_client.list_objects_v2(Bucket=bucket, Prefix=prefix, MaxKeys=10)
-            for obj in response.get("Contents", []):
-                if obj["Key"].endswith(".wsds"):
-                    reader = S3FileReader(s3_client, bucket, obj["Key"])
-                    feather = FeatherFile(reader)
-                    return feather.schema.names
-            raise ValueError(f"No .wsds files found in s3://{bucket}/{prefix}")
-
-        return _get_io_loop().run(_discover())
 
     def _s3_path(self) -> str:
         return f"s3://{self.bucket}/{self.key}"
