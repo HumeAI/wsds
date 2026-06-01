@@ -92,8 +92,9 @@ class WSS3Shard(WSShardInterface):
         prefix = link.get("prefix", "")
         column_dir = link.get("subdir", "")
         parts = [p for p in (prefix, partition, column_dir, f"{shard}.wsds") if p]
-        # we make it an absolute path so any initial ../ are stripped out
-        key = os.path.normpath("/" + "/".join(parts))
+        # Prepend "/" so normpath collapses any initial ../ against the root,
+        # then strip it back off — S3 keys are relative to the bucket root.
+        key = os.path.normpath("/" + "/".join(parts)).lstrip("/")
         s3_client, _ = create_s3_client(link)
         return cls(dataset, link["bucket"], key, shard_ref=shard_ref, s3_client=s3_client)
 
