@@ -1,6 +1,7 @@
 import doctest
 import unittest
 
+import test_audio_seek
 import wsds
 from wsds import ws_dataset, ws_shard, ws_sink, ws_audio, audio_codec
 
@@ -13,6 +14,7 @@ def load_tests(loader, tests, ignore):
     tests.addTests(doctest.DocTestSuite(ws_audio))
     tests.addTests(doctest.DocTestSuite(audio_codec))
     tests.addTests(doctest.DocFileSuite("README.md"))
+    tests.addTests(loader.loadTestsFromModule(test_audio_seek))
     return tests
 
 

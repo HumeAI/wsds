@@ -1,0 +1,35 @@
+name: tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  audio-seek:
+    name: audio seek accuracy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      # humecodec provides both the streaming encoder used to build the test
+      # fixtures and the decoder under test (bundled ffmpeg, no system deps).
+      - name: Install
+        run: pip install -e . humecodec
+
+      # Self-contained: the seek tests synthesize and encode their own audio,
+      # so no dataset is required. The rest of tests.py needs the librilight
+      # dataset and is intentionally not run here.
+      - name: Run audio seek tests
+        run: python -m unittest test_audio_seek -v
+
+      # Render a per-codec seek-error table on the run summary page. Runs even
+      # if the tests above fail, so the numbers are visible either way.
+      - name: Seek accuracy report
+        if: always()
+        run: python seek_report.py >> "$GITHUB_STEP_SUMMARY"
