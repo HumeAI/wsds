@@ -26,10 +26,10 @@ jobs:
       # so no dataset is required. The rest of tests.py needs the librilight
       # dataset and is intentionally not run here.
       - name: Run audio seek tests
-        run: python -m unittest test_audio_seek -v
+        run: python -m unittest tests.test_audio_seek -v
 
       # Render a per-codec seek-error table on the run summary page. Runs even
       # if the tests above fail, so the numbers are visible either way.
       - name: Seek accuracy report
         if: always()
-        run: python seek_report.py >> "$GITHUB_STEP_SUMMARY"
+        run: python tests/seek_report.py >> "$GITHUB_STEP_SUMMARY"
