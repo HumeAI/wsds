@@ -52,28 +52,17 @@ class WSModalShard(WSShardInterface):
         return cls(dataset, link["volume_name"], path, shard_ref=shard_ref)
 
     @classmethod
-    def get_columns(cls, link, dataset):
+    def get_columns(cls, link, dataset, shard_ref=None):
         """Return columns provided by this Modal link."""
         if "columns" in link:
             return {col: col for col in link["columns"]}
-        columns = cls._discover_columns(link)
-        return {col: col for col in columns if col != "__key__"}
-
-    @classmethod
-    def _discover_columns(cls, link):
-        """Read one shard's footer from the Modal Volume to discover column names."""
-        import modal
-
-        vol = modal.Volume.from_name(link["volume_name"])
-        prefix = link["prefix"]
-        for entry in vol.listdir(prefix):
-            if entry.path.endswith(".wsds"):
-                reader = ModalFileReader.from_name(link["volume_name"], entry.path)
-                feather = FeatherFile(reader)
-                names = feather.schema.names
-                reader.close()
-                return names
-        raise ValueError(f"No .wsds files found in modal volume '{link['volume_name']}' at prefix '{prefix}'")
+        if shard_ref is None:
+            raise ValueError(
+                f"cannot discover columns for modal link {link!r}: dataset has no shards in its index; "
+                "set `columns` in the link spec to skip discovery"
+            )
+        shard = cls.from_link(link, dataset, shard_ref)
+        return {col: col for col in shard._feather.schema.names if col != "__key__"}
 
     def _modal_path(self) -> str:
         return f"modal://{self.volume_name}/{self.path}"

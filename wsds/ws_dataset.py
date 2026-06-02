@@ -22,6 +22,17 @@ from .ws_sample import WSSample
 from .ws_shard import WSShard
 
 
+def _find_local_shard_ref(dataset_root: Path):
+    """Return ("", <shard-stem>) for any local .wsds file under `dataset_root`, or None."""
+    for column_dir in dataset_root.iterdir():
+        if not column_dir.is_dir():
+            continue
+        for f in column_dir.iterdir():
+            if f.suffix == ".wsds":
+                return ("", f.stem)
+    return None
+
+
 class WSDataset:
     """A multimodal dataset.
 
@@ -559,10 +570,18 @@ class WSDataset:
                 self.computed_columns[column_dir] = spec
                 links_to_register.append((column_dir, spec))
 
+        if not links_to_register:
+            return
+
+        # Pick a representative shard_ref so loaders can open one real shard to read its schema.
+        # When there's no index, fall back to any local .wsds file — partitions don't exist
+        # in the unindexed layout, so shard_ref is ("", <shard-stem>).
+        shard_ref = next(self.index.shards(), None) if self.index else _find_local_shard_ref(self.dataset_root)
+
         # Ask each loader class what columns it provides
         for link_file, spec in links_to_register:
             loader_class = self._get_loader_class(spec)
-            columns = loader_class.get_columns(spec, self)
+            columns = loader_class.get_columns(spec, self, shard_ref)
 
             if columns:
                 # Loader provides multiple columns - register them all
