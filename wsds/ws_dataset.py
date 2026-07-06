@@ -50,6 +50,20 @@ class WSDataset:
     computed_columns: dict
     """List of computed columns (e.g. the source audio or video link). @private"""
 
+    def __new__(cls, dataset_root="", *args, **kwargs):
+        # Transparently return a WSMetaDataset when pointed at a `.wsds-meta`
+        # manifest, so callers use a single entry point for flat and
+        # hierarchical datasets. Skipped for subclasses and non-path inputs.
+        if cls is WSDataset and isinstance(dataset_root, (str, Path)):
+            from .ws_meta import find_meta_manifest
+
+            manifest = find_meta_manifest(dataset_root)
+            if manifest is not None:
+                from .ws_meta import WSMetaDataset
+
+                return WSMetaDataset.from_manifest(manifest, rng=kwargs.get("rng"))
+        return object.__new__(cls)
+
     def __init__(
         self,
         dataset_root: str | Path,

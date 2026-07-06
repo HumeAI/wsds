@@ -9,7 +9,6 @@ from pathlib import Path
 import numpy as np
 import polars as pl
 import pyarrow as pa
-import webdataset as wds
 
 from . import WSSample, WSSink
 
@@ -82,9 +81,101 @@ def inspect_shard(input_path):
     print_head(input_path)
 
 
+@command("make_meta")
+def make_meta(
+    *children: str,
+    out: str = None,
+    kind: str = None,
+    names: str = None,
+    relative: bool = True,
+    force: bool = False,
+):
+    """Create a `.wsds-meta` manifest aggregating several child datasets of one kind.
+
+    Each child must be a dataset root containing `index.sqlite3` (e.g.
+    `.../data-en/indices/source`). Children must agree on `segmented` (you can't
+    mix a `source` and a `filtered_vad` dataset). Child paths are stored relative
+    to the manifest by default so the bundle stays portable.
+
+    Examples:
+        wsds make_meta /data/data-en/indices/source /data/data-de/indices/source \\
+            --out /data/multilang_source.wsds-meta --kind source
+        # shell globs expand to many children:
+        wsds make_meta /data/data-*/indices/source --out /data/multilang_source.wsds-meta
+        # name the children explicitly:
+        wsds make_meta a/indices/source b/indices/source --out m.wsds-meta --names en,de
+
+    Load it with `WSDataset("<path>.wsds-meta")`, which returns a WSMetaDataset.
+    """
+    from . import WSDataset
+    from .ws_meta import default_child_name
+
+    if not children:
+        raise ValueError("Provide at least one child dataset path")
+    if out is None:
+        raise ValueError("Specify the output manifest path with --out (should end in .wsds-meta)")
+    out = Path(out)
+    if out.suffix != ".wsds-meta":
+        print(f"NOTE: manifest path does not end with .wsds-meta: {out}")
+    if out.exists() and not force:
+        raise FileExistsError(f"{out} already exists (use --force to overwrite)")
+
+    name_list = [n.strip() for n in names.split(",")] if names else None
+    if name_list is not None and len(name_list) != len(children):
+        raise ValueError(f"--names has {len(name_list)} entries but there are {len(children)} children")
+
+    base = out.parent.resolve()
+    entries = []
+    segmenteds = set()
+    kinds = set()
+    total = 0
+    for i, child in enumerate(children):
+        cpath = Path(child).resolve()
+        if not (cpath / "index.sqlite3").exists():
+            raise ValueError(
+                f"Child has no index.sqlite3: {cpath}\n"
+                f"  Point at the dataset root that holds the index (e.g. .../data-xx/indices/source)."
+            )
+        ds = WSDataset(cpath)
+        segmenteds.add(ds.segmented)
+        kinds.add(cpath.name)
+        n = len(ds)
+        total += n
+        if name_list is not None:
+            name = name_list[i]
+        else:
+            name = default_child_name(cpath)
+        stored = os.path.relpath(cpath, base) if relative else str(cpath)
+        entries.append({"name": name, "path": stored})
+        print(f"  + {name}: {n:,} samples  (segmented={ds.segmented})  -> {stored}")
+        ds.close()
+
+    if len(segmenteds) > 1:
+        raise ValueError(
+            f"Children mix segmented and non-segmented data ({segmenteds}); a meta dataset must aggregate one kind."
+        )
+    if kind is None and len(kinds) == 1:
+        kind = next(iter(kinds))
+
+    manifest = {"wsds_meta_version": 1, "kind": kind, "children": entries}
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.write_text(json.dumps(manifest, indent=2))
+    print(f"\nWrote {out}")
+    print(
+        f"  children: {len(entries)}  kind: {kind}  segmented: {next(iter(segmenteds))}  total samples: {total:,}"
+    )
+
+
 @command
 def inspect(input_path: str):
-    """Displays metadata and schema of a wsds dataset or shard."""
+    """Displays metadata and schema of a wsds dataset, shard, or `.wsds-meta` manifest."""
+    from .ws_meta import find_meta_manifest
+
+    if input_path.endswith(".wsds-meta") or (Path(input_path).is_dir() and find_meta_manifest(input_path)):
+        from . import WSDataset
+
+        print(WSDataset(input_path))
+        return
     if Path(input_path).is_dir():
         if (Path(input_path) / "index.sqlite3").exists():
             inspect_dataset(input_path)
