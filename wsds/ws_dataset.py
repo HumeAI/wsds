@@ -10,6 +10,7 @@ import polars as pl
 
 from .utils import (
     WSShardMissingError,
+    abort_if_dataloader_worker,
     format_duration,
     list_all_columns,
     list_all_shards,
@@ -263,10 +264,14 @@ class WSDataset:
     #
     # SQL support, using Polars
     #
-    def _parse_sql_queries_polars(self, *queries, shard_subsample=1, rng=None, shard_pipe=None):
+    def _parse_sql_queries_polars(self, *queries, shard_subsample=1, rng=None, shard_pipe=None, shards=None):
         """Parses SQL queries via Polars to:
         - extract the Polars expressions for each query
-        - use the expressions to build a list of column dirs to load shards from"""
+        - use the expressions to build a list of column dirs to load shards from
+
+        If `shards` is given (a list of (partition, shard_name) refs), only those
+        shards are scanned instead of the whole dataset. Used by row-level views
+        to prune to the shards that actually contain selected rows."""
 
         column_dirs = defaultdict(list)
         exprs = []
@@ -308,7 +313,7 @@ class WSDataset:
 
         if rng is None:
             rng = self.rng
-        shard_list = self.get_shard_list()
+        shard_list = list(shards) if shards is not None else self.get_shard_list()
         if shard_subsample != 1:
             shard_list = rng.sample(shard_list, int(len(shard_list) * shard_subsample))
 
@@ -418,22 +423,7 @@ class WSDataset:
 
     def _check_for_subsampling(self, shard_subsample):
         if shard_subsample is None:
-            # Check if we're running inside a PyTorch DataLoader worker
-            try:
-                import torch.utils.data as torch_data
-
-                worker_info = torch_data.get_worker_info()
-                if worker_info is not None:
-                    print("\n" + "=" * 80)
-                    print("WARNING: wsds is running in subsampling modee inside a PyTorch DataLoader!")
-                    print("Each worker will only load the same small subset of shards by default!")
-                    print("This is probably not what you want, so we abort.")
-                    print("")
-                    print("To fix this, explicitly pass shard_subsample=1 to the WSDataset constructor.")
-                    print("=" * 80 + "\n")
-                    raise ValueError("WSDataset was used in a dataloader without an explicit subsampling config")
-            except ImportError:
-                pass  # torch not installed
+            abort_if_dataloader_worker()
 
             if not self.index or self.index.n_shards < 150:
                 shard_subsample = 1
@@ -453,8 +443,12 @@ class WSDataset:
         shard_subsample=None,
         rng=42,
         shard_pipe=None,
+        shards=None,
     ) -> pl.DataFrame | pl.LazyFrame:
-        """Given a list of SQL expressions, returns a Polars DataFrame/ LazyFrame with the results."""
+        """Given a list of SQL expressions, returns a Polars DataFrame/ LazyFrame with the results.
+
+        `shards` optionally restricts the scan to a list of (partition, shard_name)
+        refs (used by row-level views for shard pruning)."""
         if isinstance(rng, int):
             rng = random.Random(rng)
         exprs, df = self._parse_sql_queries_polars(
@@ -462,6 +456,7 @@ class WSDataset:
             shard_subsample=self._check_for_subsampling(shard_subsample),
             rng=rng,
             shard_pipe=shard_pipe,
+            shards=shards,
         )
 
         if return_as_lazyframe:
@@ -538,6 +533,22 @@ class WSDataset:
                 return base_path / path
 
         raise ValueError(f"Dataset {repr(str(path))} not found.")
+
+    #
+    # Subsetting: a subset of a single dataset is an offset-backed WSMetaDataset
+    # over just this parent (WSMetaDataset is the one place selections live).
+    #
+    def filter(self, where):
+        from .ws_meta import WSMetaDataset
+        return WSMetaDataset([self], rng=self.rng).filter(where)
+
+    def sample(self, fraction=None, n=None, by="row", seed=0):
+        from .ws_meta import WSMetaDataset
+        return WSMetaDataset([self], rng=self.rng).sample(fraction=fraction, n=n, by=by, seed=seed)
+
+    def select_keys(self, keys):
+        from .ws_meta import WSMetaDataset
+        return WSMetaDataset([self], rng=self.rng).select_keys(keys)
 
     def get_shard_list(self, ignore_index=False):
         if not ignore_index and self.index:

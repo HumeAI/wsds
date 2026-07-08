@@ -161,6 +161,30 @@ class WSIndex:
         local_offset = index - shard_global_offset
         return partition, shard_name, local_offset
 
+    def shard_sizes(self):
+        """All shards' (partition, shard_name, n_samples), in index (rowid) order."""
+        return self.conn.execute(
+            f"SELECT {self._partition_col}, shard, n_samples FROM shards AS s ORDER BY rowid;"
+        ).fetchall()
+
+    def lookup_by_keys(self, file_names):
+        """Batched `lookup_by_key` over many file names (one IN query per chunk
+        instead of one round-trip per name).
+        Returns {file_name: (partition, shard_name, file_offset_in_shard)}."""
+        out = {}
+        names = list(file_names)
+        for i in range(0, len(names), 500):
+            chunk = names[i : i + 500]
+            placeholders = ",".join("?" * len(chunk))
+            rows = self.conn.execute(
+                f"SELECT f.name, {self._partition_col}, s.shard, f.offset"
+                f" FROM files AS f, shards AS s WHERE s.shard_id == f.shard_id AND f.name IN ({placeholders})",
+                chunk,
+            ).fetchall()
+            for name, partition, shard_name, file_offset_in_shard in rows:
+                out[name] = (partition, shard_name, file_offset_in_shard)
+        return out
+
     def lookup_by_key(self, file_name: str, offset_of_key_wrt_file: int):
         """Look up a sample by file name and offset within file.
         Returns (partition, shard_name, local_offset, global_offset) or None."""

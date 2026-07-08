@@ -28,6 +28,25 @@ class WSShardCorruptedError(Exception):
     fname: str
 
 
+def abort_if_dataloader_worker():
+    """Abort when a default (None) shard_subsample is resolved inside a torch
+    DataLoader worker: every worker would silently load the same small shard
+    subset. Callers must pass shard_subsample explicitly to opt in/out."""
+    try:
+        import torch.utils.data as torch_data
+    except ImportError:
+        return  # torch not installed
+    if torch_data.get_worker_info() is not None:
+        print("\n" + "=" * 80)
+        print("WARNING: wsds is running in subsampling mode inside a PyTorch DataLoader!")
+        print("Each worker will only load the same small subset of shards by default!")
+        print("This is probably not what you want, so we abort.")
+        print("")
+        print("To fix this, explicitly pass shard_subsample=1 to the WSDataset constructor.")
+        print("=" * 80 + "\n")
+        raise ValueError("WSDataset was used in a dataloader without an explicit subsampling config")
+
+
 def get_columns(fname):
     if isinstance(fname, Path):
         fname = str(fname)
