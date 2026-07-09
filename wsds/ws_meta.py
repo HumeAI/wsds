@@ -13,18 +13,28 @@ logical dataset. It has two modes:
     `sql_select` scans the touched shards once per parent and restricts by a
     global row index.
 
-Subsets are produced by composable operators that resolve to the offset table:
-  `meta.filter(where)`  — rows matching a boolean SQL predicate
-  `meta.sample(f, by=)` — a random `f`; by="row" (hash of __key__) or by="shard"
-                          (whole shards, every offset enumerated)
+Subsets are produced by composable operators that resolve to the offset table.
+All subsetting is ROW-level (a subset is a list of row pointers, never "whole
+shards"):
+  `meta.filter(where)`  — rows matching a predicate (SQL string or pl.Expr)
+  `meta.sample(f|n)`    — a random row sample (hash of __key__); supports
+                          weight= (proportional) and stratify_by="__dataset__"
   `meta.select_keys(k)` — an explicit __key__ set (located via each parent index)
+
+Both modes also expose the meta to polars directly: `meta.lazyframe()` is the
+lazy full-width union of the children (subset-restricted when applicable), and
+`meta.sql("SELECT ... FROM ds ...")` runs full SQL against it.
 
 Offset resolution is fully vectorized: each parent is scanned once (multi-file
 fast path) with a global row index attached, and the matching row indices are
 mapped back to (partition, shard, offset) via a join_asof against the
 cumulative shard sizes from the parent's index. Per-parent scans are collected
 in parallel (`pl.collect_all`). Nothing is materialized on the data side —
-only the small offset table (saved as one `selection.feather`).
+only the small offset table.
+
+Persistence is ONE self-contained `.wsds-meta` feather file: the selection
+table is the body (empty for a base meta) and the manifest (parents, names,
+kind, per-parent fingerprints) is embedded in the Arrow schema metadata.
 """
 
 import bisect
@@ -110,6 +120,15 @@ def _locate_root(root):
     )
 
 
+def _collect_all(lazy_frames):
+    """Collect plans in parallel with the streaming engine (bounded memory on
+    billion-row scans); falls back to the in-memory engine on older polars."""
+    try:
+        return pl.collect_all(lazy_frames, engine="streaming")
+    except TypeError:  # polars without the engine= parameter
+        return pl.collect_all(lazy_frames)
+
+
 class WSMetaDataset:
     """Aggregates several `WSDataset`s; optionally backed by a direct offset index
     (a subset). Duck-types the `WSDataset` access surface for dataloaders."""
@@ -161,24 +180,6 @@ class WSMetaDataset:
                 self._field_children.setdefault(k, []).append(ci)
         self.computed_columns = {}
 
-    @classmethod
-    def from_manifest(cls, manifest_path, rng=None):
-        manifest_path = Path(manifest_path)
-        spec = json.loads(manifest_path.read_text())
-        base = manifest_path.parent
-        children, names = [], []
-        for entry in spec["children"]:
-            if isinstance(entry, str):
-                entry = {"path": entry}
-            path = Path(entry["path"])
-            if not path.is_absolute():
-                path = (base / path).resolve()
-            children.append(path)
-            names.append(entry.get("name") or default_child_name(path))
-        meta = cls(children, names=names, rng=rng, kind=spec.get("kind"))
-        meta.manifest_path = manifest_path
-        return meta
-
     @property
     def is_subset(self):
         return self._sel is not None
@@ -192,21 +193,37 @@ class WSMetaDataset:
         return WSMetaDataset(self.children, names=list(self.child_names),
                              kind=self.kind, rng=self.rng, selection=sel)
 
-    def filter(self, where):
-        """Rows matching a boolean SQL predicate, as a direct offset index.
+    def filter(self, where, shard_subsample=1, rng=42):
+        """Rows matching a boolean predicate — a SQL string or a native polars
+        expression (`meta.filter(pl.col("score") > 0.9)`) — as a direct offset
+        index.
 
         Children that don't expose every column referenced by the predicate are
-        skipped (they cannot match), mirroring `sql_select`."""
-        expr = pl.sql_expr(where)
+        skipped (they cannot match), mirroring `sql_select`.
+
+        `shard_subsample` < 1 resolves the predicate over a random fraction of
+        each parent's shards — a scan-budget knob for huge datasets, not a view
+        semantic: the result is still a plain row subset, it just only
+        references rows from the scanned shards. Only valid on a base meta."""
+        expr = where if isinstance(where, pl.Expr) else pl.sql_expr(where)
         needed = set(expr.meta.root_names()) - set(_SPECIAL_COLS)
         plans, skipped = [], []
         if self._sel is None:
+            if isinstance(rng, int):
+                rng = random.Random(rng)
             for pi, p in enumerate(self.children):
                 if any(c not in p.fields for c in needed):
                     skipped.append(self.child_names[pi])
                     continue
-                plans.append((pi, *self._predicate_plan(pi, [expr])))
+                shards = None
+                if shard_subsample != 1:
+                    all_shards = p.get_shard_list()
+                    shards = rng.sample(all_shards, max(1, int(len(all_shards) * shard_subsample)))
+                plans.append((pi, *self._predicate_plan(pi, [expr], shards=shards)))
         else:
+            if shard_subsample != 1:
+                raise ValueError("shard_subsample only applies when filtering a base meta; "
+                                 "a subset's shard universe is already pinned by its selection")
             for pi, sub in self._sel_by_parent():
                 if any(c not in self.children[pi].fields for c in needed):
                     skipped.append(self.child_names[pi])
@@ -218,53 +235,144 @@ class WSMetaDataset:
         frames = self._collect_selections(plans)
         return self._with_selection(pl.concat(frames) if frames else None)
 
-    def sample(self, fraction=None, n=None, by="row", seed=0):
-        """A random subset. by="row" (default): uniform per-row via hash(__key__);
-        by="shard": whole shards, every offset enumerated.
+    def sample(self, fraction=None, n=None, seed=0, weight=None, stratify_by=None):
+        """A random row subset (per-row; deterministic per seed via hash of
+        __key__).
 
-        With `n=`, row-mode subsets contain exactly `n` rows (or all rows if the
-        dataset is smaller); shard-mode treats `n` as a target and stays
-        approximate, since whole shards are picked."""
+        With `n=`, the subset contains exactly `n` rows (or every row if the
+        dataset is smaller). `weight=` (a column name or polars expression;
+        requires `n=`) samples without replacement with probability
+        proportional to the weight (rows with null/non-positive weight are
+        excluded). `stratify_by="__dataset__"` (requires `n=`) splits `n` as
+        evenly as possible across the children instead of proportionally to
+        their sizes.
+
+        On a base meta this costs one (parallel) scan of the parents to
+        resolve the offsets; on an existing subset it just subsamples the
+        selection table (`weight=` is not supported there — the weights would
+        need a re-scan; build weighted samples from the base meta)."""
         if fraction is None and n is None:
             raise ValueError("give fraction= or n=")
+        if stratify_by not in (None, "__dataset__"):
+            raise ValueError("stratify_by only supports '__dataset__' for now")
+        if (weight is not None or stratify_by is not None) and n is None:
+            raise ValueError("weight= and stratify_by= require n=")
         total = len(self)
-        frac = fraction if fraction is not None else min(1.0, n / max(1, total))
         if self._sel is not None:  # subsample the existing table
-            if by == "shard":
-                shards = self._sel.select("parent", "partition", "shard").unique(maintain_order=True)
-                keep = shards.sample(fraction=frac, seed=seed)
-                return self._with_selection(self._sel.join(keep, on=["parent", "partition", "shard"], how="semi"))
+            if weight is not None:
+                raise ValueError("weight= is not supported on an existing subset; "
+                                 "build the weighted sample from the base meta")
+            if stratify_by is not None:
+                return self._with_selection(self._stratified_subset_sample(n, seed))
             if n is not None:
                 return self._with_selection(self._sel.sample(n=min(n, total), seed=seed))
-            return self._with_selection(self._sel.sample(fraction=frac, seed=seed))
-        if by == "shard":
-            frames = []
-            for pi, p in enumerate(self.children):
-                shards = p.get_shard_list()
-                k = max(1, min(len(shards), round(frac * len(shards))))
-                picked = random.Random(seed + pi).sample(list(shards), k)
-                frames.append(self._enumerate_shards(pi, picked))
-            return self._with_selection(pl.concat(frames))
-        if by == "row":
-            # oversample slightly when n= is given, then trim to exactly n below
-            f = frac if n is None else min(1.0, (n * 1.05 + 256) / max(1, total))
-            plans = [(pi, *self._predicate_plan(pi, [_hash_sample_expr(f, seed + pi)]))
-                     for pi in range(len(self.children))]
-            frames = self._collect_selections(plans)
-            sel = pl.concat(frames) if frames else None
-            if n is not None and sel is not None and sel.height > n:
-                # exact-n trim; re-sort to keep the shard-clustered row order
-                sel = sel.sample(n=n, seed=seed).sort("parent", "partition", "shard", "offset")
-            return self._with_selection(sel)
-        raise ValueError("by must be 'row' or 'shard'")
+            return self._with_selection(self._sel.sample(fraction=fraction, seed=seed))
+        if weight is not None:
+            return self._with_selection(self._weighted_sample(weight, n, seed, stratify_by))
+        if stratify_by is not None:
+            return self._with_selection(self._stratified_sample(n, seed))
+        frac = fraction if fraction is not None else min(1.0, n / max(1, total))
+        # oversample slightly when n= is given, then trim to exactly n below
+        f = frac if n is None else min(1.0, (n * 1.05 + 256) / max(1, total))
+        plans = [(pi, *self._predicate_plan(pi, [_hash_sample_expr(f, seed + pi)]))
+                 for pi in range(len(self.children))]
+        frames = self._collect_selections(plans)
+        sel = pl.concat(frames) if frames else None
+        if n is not None and sel is not None and sel.height > n:
+            # exact-n trim; re-sort to keep the shard-clustered row order
+            sel = sel.sample(n=n, seed=seed).sort("parent", "partition", "shard", "offset")
+        return self._with_selection(sel)
+
+    @staticmethod
+    def _split_evenly(n, groups):
+        """{group: target} splitting n as evenly as possible, in group order."""
+        g = len(groups)
+        return {p: n // g + (1 if i < n % g else 0) for i, p in enumerate(groups)}
+
+    def _stratified_sample(self, n, seed):
+        """Base-mode stratified uniform sample: n split evenly across children,
+        each child trimmed to its exact target."""
+        targets = self._split_evenly(n, list(range(len(self.children))))
+        frames = []
+        for pi, p in enumerate(self.children):
+            n_c = targets[pi]
+            if n_c == 0:
+                continue
+            f = min(1.0, (n_c * 1.05 + 256) / max(1, len(p)))
+            plans = [(pi, *self._predicate_plan(pi, [_hash_sample_expr(f, seed + pi)]))]
+            got = self._collect_selections(plans)
+            if not got:
+                continue
+            frame = got[0]
+            if frame.height > n_c:
+                frame = frame.sample(n=n_c, seed=seed).sort("parent", "partition", "shard", "offset")
+            frames.append(frame)
+        return pl.concat(frames) if frames else None
+
+    def _stratified_subset_sample(self, n, seed):
+        """Stratify an existing selection: n split evenly across the parents
+        present in it (capped by each parent's row count), via a per-parent
+        window shuffle — pure polars, no re-scan."""
+        parents = self._sel["parent"].unique(maintain_order=True).to_list()
+        targets = self._split_evenly(n, parents)
+        limits = pl.DataFrame({
+            "parent": pl.Series(parents, dtype=pl.UInt32),
+            "__lim__": pl.Series([targets[p] for p in parents], dtype=pl.Int64),
+        })
+        return (self._sel
+                .with_columns(__ord__=pl.int_range(pl.len()).shuffle(seed=seed).over("parent"))
+                .join(limits, on="parent")
+                .filter(pl.col("__ord__") < pl.col("__lim__"))
+                .drop("__ord__", "__lim__"))
+
+    def _weighted_sample(self, weight, n, seed, stratify_by):
+        """Weight-proportional sampling without replacement via an exponential
+        race: key = -ln(u)/w with u from hash(__key__); the n smallest keys are
+        the sample. Each parent's race runs as a streaming bottom_k (memory
+        bounded); the per-parent winners then race globally (or per-parent
+        targets when stratified)."""
+        w = pl.col(weight) if isinstance(weight, str) else weight
+        needed = set(w.meta.root_names()) - {"__key__"}
+        avail = [pi for pi, p in enumerate(self.children) if all(c in p.fields for c in needed)]
+        skipped = [self.child_names[pi] for pi in range(len(self.children)) if pi not in avail]
+        if skipped:
+            print(f"NOTE: skipped {len(skipped)} child(ren) lacking weight columns: {skipped[:5]}")
+        if not avail:
+            return None
+        targets = self._split_evenly(n, avail) if stratify_by is not None else {pi: n for pi in avail}
+        plans = []
+        for pi in avail:
+            parent = self.children[pi]
+            shards = parent.get_shard_list()
+            sdf = self._scan_frame(pi, shards)
+            u = ((pl.col("__key__").hash(seed=seed) % _HASH_MOD) + 1) / _HASH_MOD  # (0, 1]
+            lf = parent.sql_select("`__key__`", *[f"`{c}`" for c in sorted(needed)],
+                                   shards=shards, shard_subsample=1, return_as_lazyframe=True)
+            lf = (lf.with_row_index("__g__")
+                  .filter(w > 0)
+                  .select("__g__", "__key__", (-u.log() / w).alias("__race__"))
+                  .bottom_k(targets[pi], by="__race__"))
+            plans.append((pi, lf, sdf))
+        locs = _collect_all([lf for _, lf, _ in plans])
+        if stratify_by is None and len(avail) > 1:
+            # global race across the per-parent winners
+            merged = pl.concat([loc.with_columns(pl.lit(pi, dtype=pl.UInt32).alias("__pi__"))
+                                for (pi, _, _), loc in zip(plans, locs)]).bottom_k(n, by="__race__")
+            locs = [merged.filter(pl.col("__pi__") == pi).drop("__pi__") for pi, _, _ in plans]
+        frames = []
+        for (pi, _, sdf), loc in zip(plans, locs):
+            loc = loc.sort("__g__").select("__g__", "__key__")
+            if loc.height:
+                frames.append(self._g_to_selection(pi, loc, sdf))
+        return pl.concat(frames) if frames else None
 
     def select_keys(self, keys):
         """An explicit __key__ set, located via each parent's index (batched
         lookups, one IN query per chunk instead of one query per key).
 
-        Keys may be `name::key`-prefixed (as returned by `sql_filter`) to target
-        a specific child. Unprefixed keys are resolved against the children in
-        order — the first child containing the key wins (no duplicates)."""
+        Keys may be `name::key`-prefixed to target a specific child. Unprefixed
+        keys are resolved against the children in order — the first child
+        containing the key wins (no duplicates)."""
         keys = list(keys)
         resolved: dict[str, tuple] = {}
         for pi, (name, p) in enumerate(zip(self.child_names, self.children)):
@@ -362,24 +470,26 @@ class WSMetaDataset:
     def _collect_selections(self, plans):
         """Collect all per-parent scan plans in parallel and map the results to
         selection frames. `plans`: [(pi, lazyframe, scan_frame), ...]."""
-        locs = pl.collect_all([lf for _, lf, _ in plans])
+        locs = _collect_all([lf for _, lf, _ in plans])
         frames = [self._g_to_selection(pi, loc, sdf) for (pi, _, sdf), loc in zip(plans, locs)]
         return [f for f in frames if f.height]
 
-    def _enumerate_shards(self, pi, picked):
-        """Every offset of each picked shard (from the index; no scan)."""
-        sdf = self._scan_frame(pi, list(picked))
-        if sdf.height == 0:
-            return pl.DataFrame(schema=_SEL_BUILD_SCHEMA)
-        return sdf.select(
-            pl.lit(pi, dtype=pl.UInt32).alias("parent"),
-            "partition", "shard",
-            pl.int_ranges(0, pl.col("n"), dtype=pl.UInt32).alias("offset"),
-            pl.lit(None, dtype=pl.Utf8).alias("__key__"),
-        ).explode("offset")
-
     def _sel_by_parent(self):
         yield from _group_by_parent(self._sel)
+
+    def _subset_scans(self, sel, scan, with_dataset_col):
+        """Shared subset-query pattern: for each touched parent, build a lazy
+        scan over its touched shards (via `scan(parent, shards)`), restricted
+        to the selected rows by global row index — the restriction is skipped
+        when every row of the touched shards is selected. Yields lazyframes."""
+        for pi, sub in _group_by_parent(sel):
+            shards, sdf, keep_g = self._sub_scan(pi, sub)
+            lf = scan(self.children[pi], shards)
+            if sub.height < int(sdf["n"].sum()):
+                lf = lf.with_row_index("__g__").filter(pl.col("__g__").is_in(keep_g)).drop("__g__")
+            if with_dataset_col:
+                lf = lf.with_columns(pl.lit(self.child_names[pi]).alias("__dataset__"))
+            yield lf
 
     def _sub_scan(self, pi, sub):
         """For a parent's selection rows: the touched shards (first-appearance
@@ -483,6 +593,9 @@ class WSMetaDataset:
     def _queried_columns(self, queries):
         cols = set()
         for q in queries:
+            if isinstance(q, pl.Expr):
+                cols.update(q.meta.root_names())
+                continue
             try:
                 cols.update(pl.sql_expr(q).meta.root_names())
             except Exception:
@@ -504,6 +617,56 @@ class WSMetaDataset:
                   f"shards across all children, pass shard_subsample=1 to force it to load the whole dataset")
             self._shown_subsampling_info = True
         return frac
+
+    def lazyframe(self, shard_subsample=None, rng=42, with_dataset_col=True) -> pl.LazyFrame:
+        """The meta as one lazy full-width frame: the diagonal union of all
+        children (columns a child lacks read as NULL for its rows), with a
+        `__dataset__` provenance column. Base mode spans the full parents;
+        subset mode is restricted to the selected rows. Projection/predicate
+        pushdown reaches the shard scans, so only what a downstream query
+        touches is read — this is the entry point for arbitrary polars
+        operations over the meta (and what `sql()` queries)."""
+        if self._sel is not None:
+            if shard_subsample not in (None, 1):
+                raise ValueError("shard_subsample doesn't apply to a subset lazyframe; "
+                                 "the shard universe is already pinned by the selection")
+            frames = list(self._subset_scans(
+                self._sel, lambda p, sh: p.lazyframe(shards=sh, shard_subsample=1, rng=rng),
+                with_dataset_col))
+            if not frames:
+                return pl.DataFrame().lazy()
+            return pl.concat(frames, how="diagonal_relaxed")
+        shard_subsample = self._resolve_shard_subsample(shard_subsample)
+        frames = []
+        for name, ds in zip(self.child_names, self.children):
+            child_frac = shard_subsample
+            if isinstance(child_frac, float) and 0 < child_frac < 1:
+                child_frac = max(child_frac, min(1.0, 1.5 / max(1, ds.index.n_shards)))
+            lf = ds.lazyframe(shard_subsample=child_frac, rng=rng)
+            if with_dataset_col:
+                lf = lf.with_columns(pl.lit(name).alias("__dataset__"))
+            frames.append(lf)
+        return pl.concat(frames, how="diagonal_relaxed")
+
+    def sql(self, query, table_name="ds", shard_subsample=None, rng=42,
+            return_as_lazyframe=False, engine=None):
+        """Run a full SQL query — SELECT / WHERE / GROUP BY / ORDER BY / LIMIT /
+        CTEs, the polars SQL dialect — against the meta as one table (named
+        `ds` by default). Columns some children lack read as NULL for their
+        rows, and `__dataset__` carries provenance, so cross-language
+        aggregations are one query:
+
+        >>> meta.sql("SELECT __dataset__, avg(quality_score) AS q FROM ds "
+        ...          "WHERE duration > 30 GROUP BY __dataset__ ORDER BY q DESC")
+
+        Works on subsets too (queries only the selected rows). `engine=
+        "streaming"` bounds memory on huge scans."""
+        ctx = pl.SQLContext(frames={table_name: self.lazyframe(shard_subsample=shard_subsample, rng=rng)},
+                            eager=False)
+        out = ctx.execute(query)
+        if return_as_lazyframe:
+            return out
+        return out.collect() if engine is None else out.collect(engine=engine)
 
     def sql_select(self, *queries, return_as_lazyframe=False, shard_subsample=None,
                    rng=42, shard_pipe=None, with_dataset_col=False):
@@ -551,57 +714,31 @@ class WSMetaDataset:
             shards = sel.select("parent", "partition", "shard").unique(maintain_order=True)
             keep = shards.sample(fraction=shard_subsample, seed=rng.randrange(1 << 30))
             sel = sel.join(keep, on=["parent", "partition", "shard"], how="semi")
-        frames = []
-        for pi, sub in _group_by_parent(sel):
-            parent = self.children[pi]
-            shards, sdf, keep_g = self._sub_scan(pi, sub)
-            lf = parent.sql_select(*queries, shards=shards, shard_subsample=1, return_as_lazyframe=True)
-            if sub.height < int(sdf["n"].sum()):
-                lf = lf.with_row_index("__g__").filter(pl.col("__g__").is_in(keep_g)).drop("__g__")
-            if with_dataset_col:
-                lf = lf.with_columns(pl.lit(self.child_names[pi]).alias("__dataset__"))
-            frames.append(lf)
+        frames = list(self._subset_scans(
+            sel, lambda p, sh: p.sql_select(*queries, shards=sh, shard_subsample=1, return_as_lazyframe=True),
+            with_dataset_col))
         if not frames:
             return pl.DataFrame().lazy() if return_as_lazyframe else pl.DataFrame()
         out = pl.concat(frames, how="diagonal_relaxed")
         return out if return_as_lazyframe else out.collect()
 
-    def sql_filter(self, query, shard_subsample=None, rng=42):
-        keys = []
-        for name, ds in zip(self.child_names, self.children):
-            if any(c not in ds.fields for c in self._queried_columns([query]) - {"__key__"}):
-                continue
-            try:
-                keys.extend(f"{name}::{k}" for k in ds.sql_filter(query, shard_subsample=shard_subsample, rng=rng))
-            except WSShardMissingError:
-                continue
-        return keys
-
-    def filtered(self, query, infinite=False, shuffle=True, N=None, seed=None, shard_subsample=None, rng=42):
-        keys = self.sql_filter(query, shard_subsample=shard_subsample, rng=rng)
-        self.last_query_n_samples = len(keys)
-        shuffler = random.Random(seed)
-        i = 0
-        while True:
-            order = list(keys)
-            if shuffle:
-                shuffler.shuffle(order)
-            for key in order:
-                yield self[key]
-                i += 1
-                if N is not None and i >= N:
-                    return
-            if not infinite:
-                break
-
     # ------------------------------------------------------------------------
-    # Persistence: one manifest + (subset) one selection.feather. No data copied.
+    # Persistence: ONE self-contained feather file. The selection table (empty
+    # for a base meta) is the body; the manifest (parents, names, kind,
+    # fingerprints) rides in the Arrow schema metadata. No data copied.
     # ------------------------------------------------------------------------
     def save(self, path):
+        """Persist the meta (base aggregation or subset) as one `.wsds-meta`
+        feather file. The suffix is appended if missing. Reopen with
+        `WSMetaDataset.load(path)` — or just `WSDataset(path)`."""
+        import pyarrow.feather
+
         path = Path(path)
-        path.mkdir(parents=True, exist_ok=True)
-        (path / "meta-view.json").write_text(json.dumps({
-            "wsds_metaview_version": 4,
+        if path.suffix != ".wsds-meta":
+            path = path.with_name(path.name + ".wsds-meta")
+        path.parent.mkdir(parents=True, exist_ok=True)
+        spec = {
+            "wsds_metaview_version": 5,
             "kind": self.kind,
             "segmented": self.segmented,
             "is_subset": self._sel is not None,
@@ -611,26 +748,47 @@ class WSMetaDataset:
             "parents": [{"name": n, "root": str(ds.dataset_root),
                          "n_shards": ds.index.n_shards, "n_samples": ds.index.n_samples}
                         for n, ds in zip(self.child_names, self.children)],
-        }, indent=2))
-        if self._sel is not None:
-            self._sel.write_ipc(path / "selection.feather", compression="zstd")
+        }
+        sel = self._sel if self._sel is not None else pl.DataFrame(schema=_SEL_SCHEMA)
+        tbl = sel.to_arrow().replace_schema_metadata({"wsds_meta": json.dumps(spec)})
+        tmp = path.with_name(path.name + ".tmp")
+        pyarrow.feather.write_feather(tbl, tmp, compression="zstd")
+        os.replace(tmp, path)  # atomic: never a half-written .wsds-meta
         return path
 
     @classmethod
     def load(cls, path, rng=None, check_parents=True):
-        """Reopen a saved meta/subset. Parents are located via their saved root,
-        falling back to a WSDS_DATASET_SEARCH_PATH suffix search when the root
-        doesn't exist on this machine.
+        """Reopen a saved `.wsds-meta` file (or a directory containing one).
+
+        Parents are located via their saved root, falling back to a
+        WSDS_DATASET_SEARCH_PATH suffix search when the root doesn't exist on
+        this machine.
 
         With `check_parents` (default), each parent's shard/sample counts must
         match the fingerprint recorded at save time — a mismatch means the
         saved offsets would point at different samples, so loading refuses.
         Pass check_parents=False to override."""
+        import pyarrow.feather
+
         from .ws_dataset import WSDataset
+
         path = Path(path)
-        directory = path if path.is_dir() else path.parent
-        manifest = path / "meta-view.json" if path.is_dir() else path
-        spec = json.loads(manifest.read_text())
+        if path.is_dir():
+            manifest = find_meta_manifest(path)
+            if manifest is None:
+                raise FileNotFoundError(f"No .wsds-meta file found in {path}")
+            path = manifest
+        with open(path, "rb") as f:
+            magic = f.read(6)
+        if magic != b"ARROW1":
+            raise ValueError(
+                f"{path} is not a saved meta (feather) file. JSON manifests are no longer "
+                f"supported — construct the WSMetaDataset in code and `save()` it instead.")
+        tbl = pyarrow.feather.read_table(path)
+        raw = (tbl.schema.metadata or {}).get(b"wsds_meta")
+        if raw is None:
+            raise ValueError(f"{path} is a feather file without embedded wsds_meta metadata")
+        spec = json.loads(raw)
         parents, names = [], []
         for p in spec["parents"]:
             ds = WSDataset(str(_locate_root(p["root"])))
@@ -643,10 +801,7 @@ class WSMetaDataset:
                         f"different samples. Pass check_parents=False to load anyway.")
             parents.append(ds)
             names.append(p["name"])
-        sel = None
-        if spec.get("is_subset") and (directory / "selection.feather").exists():
-            # memory_map=False: the file is zstd-compressed, mmap can't apply
-            sel = pl.read_ipc(directory / "selection.feather", memory_map=False)
+        sel = pl.from_arrow(tbl) if spec.get("is_subset") else None
         return cls(parents, names=names, kind=spec.get("kind"), rng=rng, selection=sel)
 
     # ------------------------------------------------------------------------

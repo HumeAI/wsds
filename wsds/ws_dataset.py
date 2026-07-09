@@ -62,7 +62,7 @@ class WSDataset:
             if manifest is not None:
                 from .ws_meta import WSMetaDataset
 
-                return WSMetaDataset.from_manifest(manifest, rng=kwargs.get("rng"))
+                return WSMetaDataset.load(manifest, rng=kwargs.get("rng"))
         return object.__new__(cls)
 
     def __init__(
@@ -277,17 +277,20 @@ class WSDataset:
         exprs = []
         needed_special_columns = []
         for query in queries:
-            if "." in query and query in self.fields:
-                print(f"TIP: You seem to have passes a column name ({query}) which has dots in it.")
-                query = f"`{query}`"
-                print(
-                    f"We expect to get SQL expressions which requires quoting such names, in this cases it should likely be: {query}"
-                )
-                print(
-                    "I fixed it for you in this simple case but am not smart enough to do it in real SQL expressions."
-                )
+            if isinstance(query, pl.Expr):
+                expr = query
+            else:
+                if "." in query and query in self.fields:
+                    print(f"TIP: You seem to have passes a column name ({query}) which has dots in it.")
+                    query = f"`{query}`"
+                    print(
+                        f"We expect to get SQL expressions which requires quoting such names, in this cases it should likely be: {query}"
+                    )
+                    print(
+                        "I fixed it for you in this simple case but am not smart enough to do it in real SQL expressions."
+                    )
 
-            expr = pl.sql_expr(query)
+                expr = pl.sql_expr(query)
             for col in expr.meta.root_names():
                 if col == "__key__" or col == "__shard_path__" or col == "__shard_offset__":
                     # __key__ exists in all shards
@@ -464,6 +467,16 @@ class WSDataset:
 
         return df.collect()
 
+    def lazyframe(self, shards=None, shard_subsample=None, rng=42) -> pl.LazyFrame:
+        """The whole dataset as one lazy full-width frame: every plain
+        (non-computed) column, scanned lazily. Projection pushdown means only
+        the columns a downstream query touches are actually read — this is the
+        entry point for arbitrary polars operations over a dataset."""
+        cols = [c for c, locs in self.fields.items()
+                if locs[0][0] not in self.computed_columns and locs[0][1] == c]
+        return self.sql_select(*[f"`{c}`" for c in cols], return_as_lazyframe=True,
+                               shards=shards, shard_subsample=shard_subsample, rng=rng)
+
     def sql_filter(self, query, shard_subsample=None, rng=42):
         """Given a boolean SQL expression, returns a list of keys for samples that match the query."""
         if isinstance(rng, int):
@@ -538,13 +551,18 @@ class WSDataset:
     # Subsetting: a subset of a single dataset is an offset-backed WSMetaDataset
     # over just this parent (WSMetaDataset is the one place selections live).
     #
-    def filter(self, where):
+    def filter(self, where, shard_subsample=1, rng=42):
         from .ws_meta import WSMetaDataset
-        return WSMetaDataset([self], rng=self.rng).filter(where)
+        return WSMetaDataset([self], rng=self.rng).filter(where, shard_subsample=shard_subsample, rng=rng)
 
-    def sample(self, fraction=None, n=None, by="row", seed=0):
+    def sample(self, fraction=None, n=None, seed=0, weight=None):
         from .ws_meta import WSMetaDataset
-        return WSMetaDataset([self], rng=self.rng).sample(fraction=fraction, n=n, by=by, seed=seed)
+        return WSMetaDataset([self], rng=self.rng).sample(fraction=fraction, n=n, seed=seed, weight=weight)
+
+    def sql(self, query, **kwargs):
+        """Full SQL (SELECT/WHERE/GROUP BY/...) over this dataset as table `ds`."""
+        from .ws_meta import WSMetaDataset
+        return WSMetaDataset([self], rng=self.rng).sql(query, **kwargs)
 
     def select_keys(self, keys):
         from .ws_meta import WSMetaDataset

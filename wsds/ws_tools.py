@@ -87,15 +87,13 @@ def make_meta(
     out: str = None,
     kind: str = None,
     names: str = None,
-    relative: bool = True,
     force: bool = False,
 ):
-    """Create a `.wsds-meta` manifest aggregating several child datasets of one kind.
+    """Aggregate several child datasets of one kind into a saved `.wsds-meta` file.
 
     Each child must be a dataset root containing `index.sqlite3` (e.g.
     `.../data-en/indices/source`). Children must agree on `segmented` (you can't
-    mix a `source` and a `filtered_vad` dataset). Child paths are stored relative
-    to the manifest by default so the bundle stays portable.
+    mix a `source` and a `filtered_vad` dataset).
 
     Examples:
         wsds make_meta /data/data-en/indices/source /data/data-de/indices/source \\
@@ -107,16 +105,13 @@ def make_meta(
 
     Load it with `WSDataset("<path>.wsds-meta")`, which returns a WSMetaDataset.
     """
-    from . import WSDataset
-    from .ws_meta import default_child_name
+    from .ws_meta import WSMetaDataset
 
     if not children:
         raise ValueError("Provide at least one child dataset path")
     if out is None:
-        raise ValueError("Specify the output manifest path with --out (should end in .wsds-meta)")
+        raise ValueError("Specify the output path with --out (should end in .wsds-meta)")
     out = Path(out)
-    if out.suffix != ".wsds-meta":
-        print(f"NOTE: manifest path does not end with .wsds-meta: {out}")
     if out.exists() and not force:
         raise FileExistsError(f"{out} already exists (use --force to overwrite)")
 
@@ -124,46 +119,19 @@ def make_meta(
     if name_list is not None and len(name_list) != len(children):
         raise ValueError(f"--names has {len(name_list)} entries but there are {len(children)} children")
 
-    base = out.parent.resolve()
-    entries = []
-    segmenteds = set()
-    kinds = set()
-    total = 0
-    for i, child in enumerate(children):
-        cpath = Path(child).resolve()
-        if not (cpath / "index.sqlite3").exists():
-            raise ValueError(
-                f"Child has no index.sqlite3: {cpath}\n"
-                f"  Point at the dataset root that holds the index (e.g. .../data-xx/indices/source)."
-            )
-        ds = WSDataset(cpath)
-        segmenteds.add(ds.segmented)
-        kinds.add(cpath.name)
-        n = len(ds)
-        total += n
-        if name_list is not None:
-            name = name_list[i]
-        else:
-            name = default_child_name(cpath)
-        stored = os.path.relpath(cpath, base) if relative else str(cpath)
-        entries.append({"name": name, "path": stored})
-        print(f"  + {name}: {n:,} samples  (segmented={ds.segmented})  -> {stored}")
-        ds.close()
+    if kind is None:
+        kinds = {Path(c).resolve().name for c in children}
+        if len(kinds) == 1:
+            kind = next(iter(kinds))
 
-    if len(segmenteds) > 1:
-        raise ValueError(
-            f"Children mix segmented and non-segmented data ({segmenteds}); a meta dataset must aggregate one kind."
-        )
-    if kind is None and len(kinds) == 1:
-        kind = next(iter(kinds))
-
-    manifest = {"wsds_meta_version": 1, "kind": kind, "children": entries}
-    out.parent.mkdir(parents=True, exist_ok=True)
-    out.write_text(json.dumps(manifest, indent=2))
-    print(f"\nWrote {out}")
-    print(
-        f"  children: {len(entries)}  kind: {kind}  segmented: {next(iter(segmenteds))}  total samples: {total:,}"
-    )
+    meta = WSMetaDataset(children, names=name_list, kind=kind)
+    for name, ds in zip(meta.child_names, meta.children):
+        print(f"  + {name}: {len(ds):,} samples  (segmented={ds.segmented})  {ds.dataset_root}")
+    path = meta.save(out)
+    print(f"\nWrote {path}")
+    print(f"  children: {len(meta.children)}  kind: {kind}  segmented: {meta.segmented}  "
+          f"total samples: {len(meta):,}")
+    meta.close()
 
 
 @command
