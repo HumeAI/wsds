@@ -1,5 +1,7 @@
 fastprogress
 fire
+# humecodec >=0.7.1 corrects Vorbis post-seek pts (audio_codec _seek_unreliable)
+humecodec>=0.7.1
 numpy
 polars>=1.36.1
 pyarrow>=20

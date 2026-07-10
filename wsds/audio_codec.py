@@ -28,8 +28,10 @@ class AudioDecoder:
         self.init_skip_samples = getattr(metadata, 'start_skip_samples', 0) or 0
         # Codecs where flush produces unreliable output (wrong skip_samples,
         # wrong frame sizes). For these, always read from the start and trim.
+        # (vorbis was here too, but its post-seek transition-frame pts is now
+        # corrected in humecodec's StreamProcessor, so it seeks accurately.)
         codec_name = getattr(metadata, 'codec', '') or ''
-        self._seek_unreliable = codec_name in ('wmav2', 'wmapro', 'vorbis')
+        self._seek_unreliable = codec_name in ('wmav2', 'wmapro')
         # Raw MPEG audio formats: timestamp seek does sequential scan,
         # byte-offset seek with our own index is much faster.
         self._use_byte_index = codec_name in ('mp3', 'mp2', 'mp1')
