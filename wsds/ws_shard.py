@@ -8,7 +8,7 @@ import pyarrow as pa
 
 from .utils import WSShardMissingError
 from .ws_audio import WSAudioEpisode, WSAudioSegment
-from .ws_decode import decode_sample
+from .ws_decode import decode_sample, decode_arr
 from .ws_sample import WSSample
 
 if TYPE_CHECKING:
@@ -89,6 +89,8 @@ class WSShard(WSShardInterface):
         try:
             if pa.types.is_binary(col_type) or pa.types.is_large_binary(col_type):
                 return decode_sample(column, data)
+            if (column.rsplit(".", 1)[-1] if "." in column else "") == "arr":
+                return decode_arr(data, col_type)   # native variable-length array
             return data.as_py(maps_as_pydicts="strict")
         except Exception as e:
             raise ValueError(f"Failed to decode column {column} in shard {self.fname} (offset {offset}): {e}")
