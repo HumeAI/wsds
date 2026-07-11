@@ -87,12 +87,41 @@ class WSBatchedSink:
         if len(self._buffer) >= self.batch_size:
             self.write_batch(self._buffer)
 
+    def _build_record(self, b):
+        """Build a RecordBatch from the buffered rows. ".arr" columns are written
+        as native pyarrow list<fixed_size_list<T,K>>/list<T> (variable-length
+        arrays); everything else keeps the existing from_pylist inference."""
+        import pyarrow
+        import numpy as np
+        from .ws_decode import arr_column_type
+
+        names = list(b[0].keys()) if b else []
+        arr_cols = [k for k in names if isinstance(k, str)
+                    and k.rsplit(".", 1)[-1] == "arr"]
+        if not arr_cols:
+            return pyarrow.RecordBatch.from_pylist(b, self._sink_schema)
+
+        arrays = []
+        for name in names:
+            vals = [row.get(name) for row in b]
+            if name in arr_cols:
+                first = next((v for v in vals if v is not None), None)
+                if first is None:
+                    arrays.append(pyarrow.array(vals))
+                    continue
+                t = arr_column_type(first)
+                arrays.append(pyarrow.array(
+                    [None if v is None else np.asarray(v).tolist() for v in vals], type=t))
+            else:
+                arrays.append(pyarrow.array(vals))
+        return pyarrow.RecordBatch.from_arrays(arrays, names=names)
+
     # TODO: test writing batches of data straight from a PyTorch batched processing loop
     def write_batch(self, b, flush=False):
         import pyarrow
 
         try:
-            record = pyarrow.RecordBatch.from_pylist(b, self._sink_schema)
+            record = self._build_record(b)
         except Exception:
             def _truncate(v, limit=200):
                 r = repr(v)
