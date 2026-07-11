@@ -138,7 +138,11 @@ class AudioDecoder:
             if self.debug:
                 print(f"    [trim] negative prefix {prefix}, clamping to 0", flush=True)
             prefix = 0
-        samples = torch.cat(chunks)
+        # Unwrap humecodec Chunk (a torch.Tensor subclass) to its plain `_elem`
+        # tensor before cat: otherwise every torch op on a Chunk goes through
+        # __torch_dispatch__ -> tree_map(unwrap, ...), which allocates ~14 cyclic
+        # pytree objects per decode and feeds the GC-collection latency spikes.
+        samples = torch.cat([getattr(c, "_elem", c) for c in chunks])
         if tend is not None:
             return samples[prefix : prefix + round(tend * self.sample_rate) - round(tstart * self.sample_rate)].mT
         else:
