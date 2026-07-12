@@ -47,6 +47,23 @@ FOOTER_PROBE_BYTES = 65536
 DECODE_BUFFER_BYTES = 4096
 
 
+def _ogg_footer(buf, search_cap=65536, fallback=FOOTER_CACHE_BYTES):
+    """The real footer the Ogg duration probe needs: bytes from the last page
+    carrying a VALID granule (>=0) to EOF (typically ~2-4kB). Non-Ogg / not
+    found -> last `fallback` bytes. Searches only the last `search_cap` bytes."""
+    if buf[:4] != b"OggS":
+        return bytes(buf[-min(fallback, len(buf)):])
+    end = len(buf)
+    lo = max(0, end - search_cap)
+    pos = buf.rfind(b"OggS", lo)
+    while pos != -1:
+        # granule position = int64 LE at [pos+6, pos+14); -1 (0xFFFF..) == no packet
+        if pos + 14 <= end and int.from_bytes(buf[pos + 6:pos + 14], "little", signed=True) >= 0:
+            return bytes(buf[pos:])
+        pos = buf.rfind(b"OggS", lo, pos)
+    return bytes(buf[-min(fallback, len(buf)):])
+
+
 def generate_audio_seek_index(
     audio_shard_path: str | Path,
     output_path: str | Path,
@@ -131,7 +148,7 @@ def generate_audio_seek_index(
                     "seek_index_duration": duration,
                     # served locally at decode time so open touches 0 shard blocks
                     "seek_index_header": audio_bytes[:HEADER_CACHE_BYTES],
-                    "seek_index_footer": audio_bytes[-FOOTER_CACHE_BYTES:],
+                    "seek_index_footer": _ogg_footer(audio_bytes),  # real last page (~2-4kB)
                 }
             )
 
