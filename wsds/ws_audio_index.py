@@ -34,12 +34,17 @@ from .pupyarrow.pupyarrow import FeatherFile, LazyBinaryArray, LazyBuffer
 SEEK_RESOLUTION_BYTES = 512 * 1024  # 512kB between seek points
 
 # Header/footer bytes cached in the index and served locally so a decoder's
-# open (find_stream_info + codec-open read-ahead + Ogg duration probe) fetches
-# nothing from the remote store — a cold seek then touches only the target
-# blocks. Sized to the measured open read-ahead (~132kB head) + last-page/
-# duration probe (~64kB tail) for Ogg/Vorbis.
-HEADER_CACHE_BYTES = 135168
-FOOTER_CACHE_BYTES = 65536
+# open fetches nothing from the store — a cold seek then touches only the target
+# blocks. The decoder is opened with a SMALL avio buffer (DECODE_BUFFER_BYTES):
+# find_stream_info then reads only ~8kB of header (a big buffer inflates it to
+# ~132kB), and no read-ahead is needed because the block-cache layer already
+# provides it (whole 128kB blocks, served locally). The Ogg duration probe still
+# scans back a ~64kB window (FOOTER_PROBE_BYTES) but only needs the real last
+# page, so we cache the last FOOTER_CACHE_BYTES and zero-fill the rest.
+HEADER_CACHE_BYTES = 8192
+FOOTER_CACHE_BYTES = 8192
+FOOTER_PROBE_BYTES = 65536
+DECODE_BUFFER_BYTES = 4096
 
 
 def generate_audio_seek_index(
@@ -157,21 +162,25 @@ class _HFOverlayReader:
     def read(self, offset: int, length: int) -> bytes:
         s = offset - self._ao          # blob-relative start
         e = s + length
-        fstart = self._al - self._F
-        if s < 0 or length <= 0 or (s >= self._H and e <= fstart):
+        L = self._al
+        fc_start = L - self._F                                  # real footer bytes
+        # zeros cover the duration-probe window before the real last page
+        fz_start = max(self._H, L - FOOTER_PROBE_BYTES) if self._F else L
+        if s < 0 or length <= 0 or (s >= self._H and e <= fz_start):
             return self._reader.read(offset, length)           # pure middle / OOB
         if e <= self._H:
             return self._header[s:e]                            # pure header
-        if s >= fstart:
-            return self._footer[s - fstart:e - fstart]          # pure footer
+        if s >= fc_start:
+            return self._footer[s - fc_start:e - fc_start]      # pure footer
         out = bytearray(length)                                 # spans regions
         he = min(e, self._H)
         if s < he:
             out[0:he - s] = self._header[s:he]
-        fs = max(s, fstart)
+        fs = max(s, fc_start)
         if self._F and fs < e:
-            out[fs - s:length] = self._footer[fs - fstart:e - fstart]
-        ms, me = max(s, self._H), min(e, fstart)
+            out[fs - s:length] = self._footer[fs - fc_start:e - fc_start]
+        # [fz_start, fc_start) left as zeros (duration probe, never fetched)
+        ms, me = max(s, self._H), min(e, fz_start)
         if ms < me:
             out[ms - s:me - s] = self._reader.read(self._ao + ms, me - ms)
         return bytes(out)
@@ -234,6 +243,9 @@ def load_audio_segment(
         file_reader = _HFOverlayReader(file_reader, audio_offset, audio_length, header, footer)
 
     audio_view = LazyBuffer(file_reader, audio_offset, audio_length)
+    # Small avio buffer: keeps find_stream_info's header read to ~8kB (a large
+    # buffer inflates it) — read-ahead is redundant with the block-cache layer.
+    audio_view._optimal_read_size = DECODE_BUFFER_BYTES
 
     # Per-codec decoder (mp4->moov/timestamp, vorbis->corrected granule seek,
     # wma->read-from-start, mp3->byte index). Seed the demuxer index so the
