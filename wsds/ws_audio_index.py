@@ -47,6 +47,38 @@ FOOTER_PROBE_BYTES = 65536
 DECODE_BUFFER_BYTES = 4096
 
 
+def _measure_header_len(audio_bytes, buffer_size=DECODE_BUFFER_BYTES, cap=131072):
+    """Bytes the decoder actually reads at the head during open (find_stream_info
+    + first-packet confirm) with `buffer_size` — cache exactly this so a cold
+    open touches 0 shard blocks. Self-adjusts to setup-header size (codebook
+    complexity) vs a fixed guess. The consumer opens with the same buffer_size.
+    Falls back to HEADER_CACHE_BYTES on failure."""
+    reads = []
+
+    class _T:
+        def __init__(s): s.pos = 0; s.n = len(audio_bytes)
+        def read(s, k=-1):
+            if k is None or k < 0: k = s.n - s.pos
+            k = min(k, s.n - s.pos)
+            d = audio_bytes[s.pos:s.pos + k]; reads.append((s.pos, len(d))); s.pos += len(d); return d
+        read1 = read
+        def seek(s, o, w=0): s.pos = o if w == 0 else (s.pos + o if w == 1 else s.n + o); return s.pos
+        def tell(s): return s.pos
+        def size(s): return s.n
+        def readable(s): return True
+        def seekable(s): return True
+
+    try:
+        r = humecodec.MediaDecoder(src=_T(), buffer_size=buffer_size)
+        info = r.get_src_stream_info(r.default_audio_stream)
+        r.add_basic_audio_stream(frames_per_chunk=int(info.sample_rate),
+                                 sample_rate=int(info.sample_rate))
+    except Exception:
+        return min(cap, len(audio_bytes), HEADER_CACHE_BYTES)
+    half = max(1, len(audio_bytes) // 2)
+    return min(cap, max((a + n for a, n in reads if a < half), default=HEADER_CACHE_BYTES))
+
+
 def _ogg_footer(buf, search_cap=65536, fallback=FOOTER_CACHE_BYTES):
     """The real footer the Ogg duration probe needs: bytes from the last page
     carrying a VALID granule (>=0) to EOF (typically ~2-4kB). Non-Ogg / not
@@ -147,7 +179,7 @@ def generate_audio_seek_index(
                     "seek_index_pts_seconds": seek_pts_seconds,
                     "seek_index_duration": duration,
                     # served locally at decode time so open touches 0 shard blocks
-                    "seek_index_header": audio_bytes[:HEADER_CACHE_BYTES],
+                    "seek_index_header": audio_bytes[:_measure_header_len(audio_bytes)],
                     "seek_index_footer": _ogg_footer(audio_bytes),  # real last page (~2-4kB)
                 }
             )
