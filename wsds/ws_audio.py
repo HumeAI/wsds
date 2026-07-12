@@ -26,6 +26,7 @@ class WSAudioEpisode:
     src: typing.Any
     _decoder: typing.Any = None
     _sample_rate: int | None = None
+    _seek_index: typing.Any = None      # (positions_blob_relative, pts_seconds) or None
     def __repr__(self):
         return f"WSAudioEpisode(src={type(self.src)}, sample_rate={self._sample_rate})"
 
@@ -42,6 +43,30 @@ class WSAudioEpisode:
 
     to_bytes = unwrap
 
+    def set_seek_index(self, positions, pts_seconds):
+        """Attach a precomputed seek index so seeks skip the expensive on-open
+        scan: `build_packet_index` for mp3/mp2/mp1 (which reads the WHOLE episode
+        — ~200-400ms for a long spotify mp3, the dominant deep-seek cost) and the
+        Ogg/Vorbis demuxer bisection. `positions` are byte offsets in the audio
+        blob (blob-relative); `pts_seconds` the matching timestamps. Applied on
+        the next decoder (re)creation."""
+        self._seek_index = ([int(p) for p in positions], [float(t) for t in pts_seconds])
+        if self._decoder is not None:
+            self._apply_seek_index()
+
+    def _apply_seek_index(self):
+        if not self._seek_index or self._decoder is None:
+            return
+        pos, pts = self._seek_index
+        d = self._decoder
+        if getattr(d, "_use_byte_index", False):     # mp3/mp2/mp1 byte-index path
+            from types import SimpleNamespace
+            d._packet_index = [SimpleNamespace(pts_seconds=t, pos=p) for p, t in zip(pos, pts)]
+        else:                                         # vorbis/etc: seed the demuxer index (humecodec>=0.8)
+            fn = getattr(d, "add_seek_points", None)
+            if fn is not None:
+                fn(pos, pts)
+
     def get_decoder(self, sample_rate=None):
         """Lazily creates/caches decoder via audio_codec.create_decoder()."""
         requested_sr = sample_rate or (self._decoder and self._decoder.metadata.sample_rate)
@@ -49,6 +74,7 @@ class WSAudioEpisode:
             self.src.seek(0)
             self._decoder = create_decoder(self.src, sample_rate=sample_rate)
             self._sample_rate = sample_rate or self._decoder.metadata.sample_rate
+            self._apply_seek_index()
         return self._decoder, self._sample_rate
 
     @property
