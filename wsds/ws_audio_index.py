@@ -33,6 +33,14 @@ from .pupyarrow.pupyarrow import FeatherFile, LazyBinaryArray, LazyBuffer
 
 SEEK_RESOLUTION_BYTES = 512 * 1024  # 512kB between seek points
 
+# Header/footer bytes cached in the index and served locally so a decoder's
+# open (find_stream_info + codec-open read-ahead + Ogg duration probe) fetches
+# nothing from the remote store — a cold seek then touches only the target
+# blocks. Sized to the measured open read-ahead (~132kB head) + last-page/
+# duration probe (~64kB tail) for Ogg/Vorbis.
+HEADER_CACHE_BYTES = 135168
+FOOTER_CACHE_BYTES = 65536
+
 
 def generate_audio_seek_index(
     audio_shard_path: str | Path,
@@ -116,6 +124,9 @@ def generate_audio_seek_index(
                     "seek_index_positions": seek_positions,
                     "seek_index_pts_seconds": seek_pts_seconds,
                     "seek_index_duration": duration,
+                    # served locally at decode time so open touches 0 shard blocks
+                    "seek_index_header": audio_bytes[:HEADER_CACHE_BYTES],
+                    "seek_index_footer": audio_bytes[-FOOTER_CACHE_BYTES:],
                 }
             )
 
@@ -124,6 +135,49 @@ def generate_audio_seek_index(
     with WSSink(str(output_path), compression=compression) as sink:
         for row in rows:
             sink.write(row)
+
+
+class _HFOverlayReader:
+    """Wraps a FileReader and serves the audio blob's first ``len(header)`` and
+    last ``len(footer)`` bytes from in-memory buffers cached in the seek index,
+    so a decoder's open-time reads (header/setup + Ogg duration probe) never hit
+    the underlying store. Offsets are absolute; the blob spans
+    ``[audio_offset, audio_offset + audio_length)``. Non-read attributes are
+    delegated to the wrapped reader."""
+
+    def __init__(self, reader, audio_offset, audio_length, header, footer):
+        self._reader = reader
+        self._ao = int(audio_offset)
+        self._al = int(audio_length)
+        self._header = header
+        self._footer = footer
+        self._H = len(header)
+        self._F = len(footer)
+
+    def read(self, offset: int, length: int) -> bytes:
+        s = offset - self._ao          # blob-relative start
+        e = s + length
+        fstart = self._al - self._F
+        if s < 0 or length <= 0 or (s >= self._H and e <= fstart):
+            return self._reader.read(offset, length)           # pure middle / OOB
+        if e <= self._H:
+            return self._header[s:e]                            # pure header
+        if s >= fstart:
+            return self._footer[s - fstart:e - fstart]          # pure footer
+        out = bytearray(length)                                 # spans regions
+        he = min(e, self._H)
+        if s < he:
+            out[0:he - s] = self._header[s:he]
+        fs = max(s, fstart)
+        if self._F and fs < e:
+            out[fs - s:length] = self._footer[fs - fstart:e - fstart]
+        ms, me = max(s, self._H), min(e, fstart)
+        if ms < me:
+            out[ms - s:me - s] = self._reader.read(self._ao + ms, me - ms)
+        return bytes(out)
+
+    def __getattr__(self, name):
+        return getattr(self._reader, name)
 
 
 def load_audio_segment(
@@ -166,6 +220,19 @@ def load_audio_segment(
     column_dir, _ = sample.dataset.fields[audio_column][0]
     shard = sample.dataset.get_shard(column_dir, sample.shard_ref)
     file_reader = shard.get_reader()
+
+    # Serve cached header/footer locally (if present) so the decoder's open-time
+    # reads fetch 0 blocks from the store — cold seek touches only target blocks.
+    def _hf(name):
+        try:
+            v = sample[name]
+        except (KeyError, TypeError):
+            return b""
+        return bytes(v) if v else b""
+    header, footer = _hf("seek_index_header"), _hf("seek_index_footer")
+    if header or footer:
+        file_reader = _HFOverlayReader(file_reader, audio_offset, audio_length, header, footer)
+
     audio_view = LazyBuffer(file_reader, audio_offset, audio_length)
 
     # Per-codec decoder (mp4->moov/timestamp, vorbis->corrected granule seek,
