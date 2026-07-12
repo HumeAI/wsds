@@ -148,6 +148,25 @@ class AudioDecoder:
         else:
             return samples[prefix:].mT
 
+    def add_seek_points(self, positions, pts_seconds):
+        """Seed the demuxer's seek index with precomputed (byte position, pts)
+        pairs so a subsequent timestamp seek() brackets the target and converges
+        in ~1 read instead of a full binary/secant search across the file
+        (dramatic for Ogg/Vorbis, which has no container index). `positions` are
+        byte offsets in the input (blob-relative when decoding via a LazyBuffer
+        over the audio blob); `pts_seconds` are in seconds. Accuracy is
+        unchanged — the seek still reads the landing page to position exactly.
+
+        Requires humecodec >= 0.8 (the `add_seek_points` backend method); returns
+        False and no-ops on older builds or the torchcodec backend.
+        """
+        fn = getattr(self.reader, "add_seek_points", None)
+        if fn is None:
+            return False
+        fn([int(p) for p in positions], [float(t) for t in pts_seconds])
+        return True
+
+
 def _create_reader_humecodec(src, buffer_size):
     from humecodec import MediaDecoder
 
