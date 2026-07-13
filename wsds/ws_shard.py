@@ -8,8 +8,29 @@ import pyarrow as pa
 
 from .utils import WSShardMissingError
 from .ws_audio import WSAudioEpisode, WSAudioSegment
-from .ws_decode import decode_sample, decode_arr
+from .ws_decode import decode_sample, decode_arr, AUDIO_FILE_KEYS
 from .ws_sample import WSSample
+
+import struct
+
+
+def _zero_copy_blob_reader(arr, j):
+    """Zero-copy seekable file-like over element ``j`` of a (large_)binary array.
+
+    Reads only ``offsets[j:j+2]`` and slices the values buffer, WITHOUT
+    materializing the element into a pyarrow scalar. ``col[j]`` copies/faults the
+    ENTIRE blob (measured 100-300 ms on cold 1.8 GB mmap'd shards) even when the
+    decoder only seeks to a small region; this hands the decoder an mmap-backed
+    view so it faults just the pages it actually reads. Returns None if null."""
+    vbuf, offbuf, valbuf = arr.buffers()   # [validity, offsets, values]
+    idx = arr.offset + j
+    if vbuf is not None and not (memoryview(vbuf)[idx >> 3] & (1 << (idx & 7))):
+        return None
+    w, fmt = (8, "<q") if pa.types.is_large_binary(arr.type) else (4, "<i")
+    ob = memoryview(offbuf)
+    o1 = struct.unpack_from(fmt, ob, idx * w)[0]
+    o2 = struct.unpack_from(fmt, ob, (idx + 1) * w)[0]
+    return pa.BufferReader(valbuf.slice(o1, o2 - o1))
 
 if TYPE_CHECKING:
     from .ws_dataset import WSDataset
@@ -82,14 +103,21 @@ class WSShard(WSShardInterface):
             raise IndexError(f"{offset} is out of range for shard {self.fname}")
         if self._data.schema.get_field_index(column) == -1:
             raise KeyError(f"column {column} not found in shard {self.fname}")
+        col_type = self._data.schema.field(column).type
+        ext = column.rsplit(".", 1)[-1] if "." in column else column
+        # Audio columns: hand the decoder a ZERO-COPY reader over just this
+        # element's bytes (mmap-backed) instead of materializing the whole blob
+        # via col[j]. Only audio benefits (it seeks; npy/pyd read fully anyway).
+        if ext in AUDIO_FILE_KEYS and (pa.types.is_binary(col_type) or pa.types.is_large_binary(col_type)):
+            fd = _zero_copy_blob_reader(self._data.column(column), j)
+            return None if fd is None else WSAudioEpisode(fd)
         data = self._data[column][j]
         if not data.is_valid:
             return None # Return None for any null pyarrow scalars
-        col_type = self._data.schema.field(column).type
         try:
             if pa.types.is_binary(col_type) or pa.types.is_large_binary(col_type):
                 return decode_sample(column, data)
-            if (column.rsplit(".", 1)[-1] if "." in column else "") == "arr":
+            if ext == "arr":
                 return decode_arr(data, col_type)   # native variable-length array
             return data.as_py(maps_as_pydicts="strict")
         except Exception as e:
