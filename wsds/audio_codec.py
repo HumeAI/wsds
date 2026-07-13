@@ -36,6 +36,15 @@ class AudioDecoder:
         # byte-offset seek with our own index is much faster.
         self._use_byte_index = codec_name in ('mp3', 'mp2', 'mp1')
         self._packet_index = None
+        # On-demand demuxer-index seeding (ogg/vorbis, which has no native seek
+        # table). Rather than add every episode point up front (each
+        # av_add_index_entry is an O(n) sorted insert -> O(n*m)), we keep the
+        # full index and add only a small window of points around each requested
+        # seek target as segments are read. See set_seed_index / _seed_around.
+        self._seed_pts = None
+        self._seed_positions = None
+        self._seed_added = None
+        self._seed_window = 4
 
     def _build_index(self):
         """Build a sparse packet index for byte-offset seeking."""
@@ -97,6 +106,10 @@ class AudioDecoder:
         if index_pts is None:
             # Fall back to timestamp seek (or read from start)
             seek_target = 0.0 if read_from_start else max(0, tstart - margin)
+            if not read_from_start:
+                # Seed just the AVIndexEntry points around this target (ogg/vorbis)
+                # so the seek brackets in ~1 read; accumulates across seq reads.
+                self._seed_around(seek_target)
             self.reader.seek(seek_target, "key")
 
         chunks = []
@@ -165,6 +178,38 @@ class AudioDecoder:
             return False
         fn([int(p) for p in positions], [float(t) for t in pts_seconds])
         return True
+
+    def set_seed_index(self, positions, pts_seconds):
+        """Store a precomputed (byte-position, pts) index for ON-DEMAND demuxer
+        seeding. Points are added lazily in a small window around each seek
+        target (see _seed_around) rather than all at once, so the per-seek cost
+        stays O(window) even for multi-hour episodes with tens of thousands of
+        points. Use only for formats WITHOUT a native seek table (ogg/vorbis);
+        never for mp4/mov (the moov already indexes them and av_add_index_entry
+        is O(n) per insert against its millions of native entries)."""
+        order = sorted(range(len(pts_seconds)), key=lambda k: pts_seconds[k])
+        self._seed_pts = [float(pts_seconds[k]) for k in order]
+        self._seed_positions = [int(positions[k]) for k in order]
+        self._seed_added = set()
+
+    def _seed_around(self, target_time):
+        """Add the few seed-index points bracketing target_time to the demuxer's
+        seek index (idempotent per point, accumulates across seeks). No-op unless
+        a seed index was set via set_seed_index."""
+        if not self._seed_pts:
+            return
+        import bisect
+        i = bisect.bisect_right(self._seed_pts, target_time)
+        lo = max(0, i - self._seed_window)
+        hi = min(len(self._seed_pts), i + self._seed_window)
+        pos, pts = [], []
+        for k in range(lo, hi):
+            if k not in self._seed_added:
+                self._seed_added.add(k)
+                pos.append(self._seed_positions[k])
+                pts.append(self._seed_pts[k])
+        if pos:
+            self.add_seek_points(pos, pts)
 
 
 def _create_reader_humecodec(src, buffer_size):

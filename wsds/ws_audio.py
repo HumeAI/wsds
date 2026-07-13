@@ -62,10 +62,23 @@ class WSAudioEpisode:
         if getattr(d, "_use_byte_index", False):     # mp3/mp2/mp1 byte-index path
             from types import SimpleNamespace
             d._packet_index = [SimpleNamespace(pts_seconds=t, pos=p) for p, t in zip(pos, pts)]
-        else:                                         # vorbis/etc: seed the demuxer index (humecodec>=0.8)
-            fn = getattr(d, "add_seek_points", None)
-            if fn is not None:
-                fn(pos, pts)
+        else:
+            # ogg/vorbis has no native seek table -> seed the demuxer's
+            # AVIndexEntry list (humecodec>=0.8) to skip its interpolating
+            # bisection. Seeding is INCREMENTAL: set_seed_index just stores the
+            # index, and a small window of points near each requested seek target
+            # is added on demand (AudioDecoder._seed_around), so per-seek cost is
+            # O(window) regardless of episode length.
+            #
+            # mp4/mov (aac/alac) are SKIPPED: the moov already carries a full
+            # sample table, so seeding is redundant AND each av_add_index_entry is
+            # an O(n) sorted insert against its millions of native entries -> a
+            # 36h aac took 41s for 16k points. Native mp4 seeking is already fast.
+            # (The seek index is still EXTRACTED for mp4 — its absolute offsets
+            # feed the block-cache/backblaze prefetch — we just don't feed ffmpeg.)
+            codec = getattr(getattr(d, "metadata", None), "codec", "") or ""
+            if codec in ("vorbis", "opus") and hasattr(d, "set_seed_index"):
+                d.set_seed_index(pos, pts)
 
     def get_decoder(self, sample_rate=None):
         """Lazily creates/caches decoder via audio_codec.create_decoder()."""
