@@ -13,6 +13,7 @@ import io
 import traceback
 import typing
 
+import numpy as np
 import pyarrow as pa
 
 
@@ -188,30 +189,29 @@ class AudioDecoder:
         stays O(window) even for multi-hour episodes with tens of thousands of
         points. Use only for formats WITHOUT a native seek table (ogg/vorbis);
         never for mp4/mov (the moov already indexes them and av_add_index_entry
-        is O(n) per insert against its millions of native entries)."""
-        order = sorted(range(len(pts_seconds)), key=lambda k: pts_seconds[k])
-        self._seed_pts = [float(pts_seconds[k]) for k in order]
-        self._seed_positions = [int(positions[k]) for k in order]
+        is O(n) per insert against its millions of native entries).
+
+        `pts_seconds` MUST be ascending — the seek-index generator emits points
+        in blob-scan order (ascending pts) — so we store them as-is (no sort) and
+        binary-search with np.searchsorted in _seed_around."""
+        self._seed_pts = np.asarray(pts_seconds, dtype=np.float64)
+        self._seed_positions = np.asarray(positions, dtype=np.int64)
         self._seed_added = set()
 
     def _seed_around(self, target_time):
         """Add the few seed-index points bracketing target_time to the demuxer's
         seek index (idempotent per point, accumulates across seeks). No-op unless
         a seed index was set via set_seed_index."""
-        if not self._seed_pts:
+        if self._seed_pts is None or self._seed_pts.size == 0:
             return
-        import bisect
-        i = bisect.bisect_right(self._seed_pts, target_time)
+        i = int(np.searchsorted(self._seed_pts, target_time, side="right"))
         lo = max(0, i - self._seed_window)
-        hi = min(len(self._seed_pts), i + self._seed_window)
-        pos, pts = [], []
-        for k in range(lo, hi):
-            if k not in self._seed_added:
-                self._seed_added.add(k)
-                pos.append(self._seed_positions[k])
-                pts.append(self._seed_pts[k])
-        if pos:
-            self.add_seek_points(pos, pts)
+        hi = min(self._seed_pts.size, i + self._seed_window)
+        sel = [k for k in range(lo, hi) if k not in self._seed_added]
+        if sel:
+            self._seed_added.update(sel)
+            self.add_seek_points(self._seed_positions[sel].tolist(),
+                                 self._seed_pts[sel].tolist())
 
 
 def _create_reader_humecodec(src, buffer_size):
