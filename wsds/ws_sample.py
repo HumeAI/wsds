@@ -74,6 +74,17 @@ class WSSample:
         self._verify_key_for_field(field)
         return self.dataset.get_sample(self.shard_ref, field, self.offset)
 
+    def get_raw(self, field):
+        """Return the RAW pyarrow scalar for `field`, skipping the as_py()/decode
+        conversion that `__getitem__` applies. For trusted internal consumers that
+        want zero-copy numeric/struct access (e.g. `.values.to_numpy()`) instead
+        of Python objects — the default conversion exists mainly to keep external
+        callers unsurprised."""
+        if field in self.overrides:
+            return self.overrides[field]
+        self._verify_key_for_field(field)
+        return self.dataset.get_sample(self.shard_ref, field, self.offset, raw=True)
+
     def __setitem__(self, field, value):
         self.overrides[field] = value
 

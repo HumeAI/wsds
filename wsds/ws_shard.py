@@ -86,7 +86,7 @@ class WSShard(WSShardInterface):
         self._end = None
         self._data = None
 
-    def get_sample(self, column: str, offset: int) -> typing.Any:
+    def get_sample(self, column: str, offset: int, raw: bool = False) -> typing.Any:
         if self._data is None or offset < self._start or offset >= self._end:
             i = offset // self.batch_size
             if i >= self.reader.num_record_batches:
@@ -111,13 +111,19 @@ class WSShard(WSShardInterface):
         # Audio columns: hand the decoder a ZERO-COPY reader over just this
         # element's bytes (mmap-backed) instead of materializing the whole blob
         # via col[j]. Only audio benefits (it seeks; npy/pyd read fully anyway).
-        if ext in AUDIO_FILE_KEYS and (pa.types.is_binary(col_type) or pa.types.is_large_binary(col_type)):
+        if not raw and ext in AUDIO_FILE_KEYS and (pa.types.is_binary(col_type) or pa.types.is_large_binary(col_type)):
             with record("blob_decode"):
                 fd = _zero_copy_blob_reader(self._data.column(column), j)
                 return None if fd is None else WSAudioEpisode(fd)
         data = self._data[column][j]
         if not data.is_valid:
             return None # Return None for any null pyarrow scalars
+        if raw:
+            # Internal zero-copy path: return the raw pyarrow scalar, skipping the
+            # as_py()/decode_sample conversion (which is there mainly to keep
+            # external callers unsurprised). Trusted internal consumers do their
+            # own .values.to_numpy() for zero-copy numeric/struct access.
+            return data
         try:
             if pa.types.is_binary(col_type) or pa.types.is_large_binary(col_type):
                 with record("blob_decode"):
@@ -171,7 +177,7 @@ class WSSourceAudioShard(WSShardInterface):
         with record("vad_read"):
             return self._source_sample[self.vad_column][segment_offset]
 
-    def get_sample(self, _column, offset):
+    def get_sample(self, _column, offset, raw: bool = False):
         file_name, segment_offset = self.derived_dataset.parse_key(
             WSSample(self.derived_dataset, self.shard_ref, offset)["__key__"]
         )
