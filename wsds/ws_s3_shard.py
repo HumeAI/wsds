@@ -1,4 +1,6 @@
+import atexit
 import os
+import re
 import typing
 from typing import TYPE_CHECKING, Optional, Tuple
 from urllib.parse import urlparse
@@ -20,6 +22,9 @@ def create_s3_client(link=None):
     WSDS_S3_ENDPOINT_URL env var for the endpoint). Returns the entered client
     and its context manager (for cleanup). The client should be shared across
     all S3FileReader instances.
+
+    signature_version is pinned to SigV4: for non-AWS endpoints botocore may
+    otherwise presign SigV2-style URLs, which e.g. Backblaze B2 rejects.
     """
     from aiobotocore.session import AioSession
     from botocore.config import Config
@@ -27,15 +32,31 @@ def create_s3_client(link=None):
     from .pupyarrow.file_reader import _get_io_loop
 
     link = link or {}
-    kwargs = {"config": Config(max_pool_connections=50)}
+    kwargs = {"config": Config(max_pool_connections=50, signature_version="s3v4")}
     endpoint_url = link.get("endpoint_url") or os.environ.get("WSDS_S3_ENDPOINT_URL")
     if endpoint_url:
         kwargs["endpoint_url"] = endpoint_url
     for k in ("aws_access_key_id", "aws_secret_access_key", "aws_session_token", "region_name"):
         if link.get(k):
             kwargs[k] = link[k]
+    if "region_name" not in kwargs and endpoint_url:
+        # SigV4 embeds the region in the credential scope, so it must match
+        # the endpoint. Derive it from "s3.<region>.<provider>" hostnames
+        # (e.g. s3.us-east-005.backblazeb2.com); real regions contain "-",
+        # which also excludes bare hosts like s3.amazonaws.com.
+        m = re.match(r"https?://s3\.([a-z0-9-]+)\.", endpoint_url)
+        if m and "-" in m.group(1):
+            kwargs["region_name"] = m.group(1)
     ctx = AioSession().create_client("s3", **kwargs)
     client = _get_io_loop().run(ctx.__aenter__())
+
+    def _cleanup():
+        try:
+            _get_io_loop().run(ctx.__aexit__(None, None, None))
+        except Exception:
+            pass
+
+    atexit.register(_cleanup)
     return client, ctx
 
 
@@ -46,7 +67,7 @@ class WSS3Shard(WSShardInterface):
     IPC footer and the specific batch(es) needed are fetched, rather than
     downloading the entire shard file."""
 
-    def __init__(self, dataset: "WSDataset", bucket: str, key: str, shard_ref: Optional[Tuple[str, str]]=None, s3_client=None):
+    def __init__(self, dataset: "WSDataset", bucket: str, key: str, shard_ref: Optional[Tuple[str, str]]=None, s3_client=None, presigned: Optional[bool]=None):
         self.dataset = dataset
         self.shard_ref = shard_ref
         self.bucket = bucket
@@ -55,7 +76,7 @@ class WSS3Shard(WSShardInterface):
         if s3_client is None:
             s3_client, _ = create_s3_client()
 
-        self._reader = S3FileReader(s3_client, bucket, key)
+        self._reader = S3FileReader(s3_client, bucket, key, presigned=presigned)
         try:
             self._feather = FeatherFile(self._reader)
         except s3_client.exceptions.ClientError as err:
@@ -96,7 +117,7 @@ class WSS3Shard(WSShardInterface):
         # then strip it back off — S3 keys are relative to the bucket root.
         key = os.path.normpath("/" + "/".join(parts)).lstrip("/")
         s3_client, _ = create_s3_client(link)
-        return cls(dataset, link["bucket"], key, shard_ref=shard_ref, s3_client=s3_client)
+        return cls(dataset, link["bucket"], key, shard_ref=shard_ref, s3_client=s3_client, presigned=link.get("presigned"))
 
     @classmethod
     def _discover_columns_from_s3(cls, link):
