@@ -3,6 +3,7 @@ from typing import TYPE_CHECKING
 
 from .utils import WSShardMissingError, validate_shards
 from .ws_decode import get_audio as _get_audio
+from ._timing import record
 
 if TYPE_CHECKING:
     from .ws_dataset import WSDataset
@@ -47,7 +48,8 @@ class WSSample:
 
         # Get __key__ from this column_dir
         try:
-            key = self.dataset.get_shard(column_dir, self.shard_ref).get_sample("__key__", self.offset)
+            with record("key_verify"):   # cross-column-dir __key__ consistency check
+                key = self.dataset.get_shard(column_dir, self.shard_ref).get_sample("__key__", self.offset)
         except (WSShardMissingError, KeyError):
             # Can't verify if shard or key is missing
             self._verified_column_dirs.add(column_dir)

@@ -84,10 +84,12 @@ class WSAudioEpisode:
         """Lazily creates/caches decoder via audio_codec.create_decoder()."""
         requested_sr = sample_rate or (self._decoder and self._decoder.metadata.sample_rate)
         if self._decoder is None or requested_sr != self._sample_rate:
-            self.src.seek(0)
-            self._decoder = create_decoder(self.src, sample_rate=sample_rate)
-            self._sample_rate = sample_rate or self._decoder.metadata.sample_rate
-            self._apply_seek_index()
+            from ._timing import record
+            with record("decoder_open"):        # create_decoder = find_stream_info
+                self.src.seek(0)
+                self._decoder = create_decoder(self.src, sample_rate=sample_rate)
+                self._sample_rate = sample_rate or self._decoder.metadata.sample_rate
+                self._apply_seek_index()
         return self._decoder, self._sample_rate
 
     @property
@@ -101,8 +103,10 @@ class WSAudioEpisode:
         return sr
 
     def read_segment(self, start=0, end=None, sample_rate=None):
+        from ._timing import record
         decoder, sample_rate = self.get_decoder(sample_rate)
-        samples = decoder.get_samples_played_in_range(start, end)
+        with record("audio_decode"):            # seek + decode the segment
+            samples = decoder.get_samples_played_in_range(start, end)
         if hasattr(samples, "data"):
             samples = samples.data
         samples.sample_rate = sample_rate

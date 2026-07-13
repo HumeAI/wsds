@@ -50,9 +50,11 @@ class AudioDecoder:
         """Build a sparse packet index for byte-offset seeking."""
         if self._packet_index is not None:
             return
+        from ._timing import record
         try:
-            idx = self.reader.build_packet_index(
-                self.reader.default_audio_stream, 128 * 1024)
+            with record("build_packet_index"):
+                idx = self.reader.build_packet_index(
+                    self.reader.default_audio_stream, 128 * 1024)
             if idx and len(idx) > 1:
                 self._packet_index = idx
         except Exception:

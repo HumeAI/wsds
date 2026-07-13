@@ -10,6 +10,7 @@ from .utils import WSShardMissingError
 from .ws_audio import WSAudioEpisode, WSAudioSegment
 from .ws_decode import decode_sample, decode_arr, AUDIO_FILE_KEYS
 from .ws_sample import WSSample
+from ._timing import record
 
 import struct
 
@@ -69,11 +70,12 @@ class WSShard(WSShardInterface):
         self.fname = fname
 
         try:
-            if dataset.disable_memory_map:
-                self._source_file = pa.OSFile(str(fname))
-            else:
-                self._source_file = pa.memory_map(str(fname))
-            self.reader = pa.RecordBatchFileReader(self._source_file)
+            with record("shard_open"):
+                if dataset.disable_memory_map:
+                    self._source_file = pa.OSFile(str(fname))
+                else:
+                    self._source_file = pa.memory_map(str(fname))
+                self.reader = pa.RecordBatchFileReader(self._source_file)
         except FileNotFoundError:
             raise WSShardMissingError(fname) from None
 
@@ -89,7 +91,8 @@ class WSShard(WSShardInterface):
             i = offset // self.batch_size
             if i >= self.reader.num_record_batches:
                 raise IndexError(f"{offset} is out of range for shard {self.fname}")
-            self._data = self.reader.get_batch(i)
+            with record("batch_read"):
+                self._data = self.reader.get_batch(i)
             if i < self.reader.num_record_batches - 1:
                 if self._data.num_rows < self.batch_size:
                     raise ValueError(
@@ -109,14 +112,16 @@ class WSShard(WSShardInterface):
         # element's bytes (mmap-backed) instead of materializing the whole blob
         # via col[j]. Only audio benefits (it seeks; npy/pyd read fully anyway).
         if ext in AUDIO_FILE_KEYS and (pa.types.is_binary(col_type) or pa.types.is_large_binary(col_type)):
-            fd = _zero_copy_blob_reader(self._data.column(column), j)
-            return None if fd is None else WSAudioEpisode(fd)
+            with record("blob_decode"):
+                fd = _zero_copy_blob_reader(self._data.column(column), j)
+                return None if fd is None else WSAudioEpisode(fd)
         data = self._data[column][j]
         if not data.is_valid:
             return None # Return None for any null pyarrow scalars
         try:
             if pa.types.is_binary(col_type) or pa.types.is_large_binary(col_type):
-                return decode_sample(column, data)
+                with record("blob_decode"):
+                    return decode_sample(column, data)
             if ext == "arr":
                 return decode_arr(data, col_type)   # native variable-length array
             return data.as_py(maps_as_pydicts="strict")
@@ -163,7 +168,8 @@ class WSSourceAudioShard(WSShardInterface):
         return cls(shard_ref, source_dataset, dataset, link["vad_column"])
 
     def get_timestamps(self, segment_offset):
-        return self._source_sample[self.vad_column][segment_offset]
+        with record("vad_read"):
+            return self._source_sample[self.vad_column][segment_offset]
 
     def get_sample(self, _column, offset):
         file_name, segment_offset = self.derived_dataset.parse_key(
@@ -171,9 +177,11 @@ class WSSourceAudioShard(WSShardInterface):
         )
 
         if self._source_file_name != file_name:
-            self._source_sample = self.source_dataset[file_name]
+            with record("src_key_lookup"):
+                self._source_sample = self.source_dataset[file_name]
             try:
-                self._source_reader = self._source_sample.get_audio()
+                with record("get_audio"):
+                    self._source_reader = self._source_sample.get_audio()
             except KeyError:
                 raise WSShardMissingError("no audio shards found")
             self._source_file_name = file_name
