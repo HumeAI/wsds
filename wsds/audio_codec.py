@@ -116,11 +116,28 @@ class AudioDecoder:
             self.reader.seek(seek_target, "key")
 
         chunks = []
-        more_data = True
-        while more_data:
-            if self.reader.fill_buffer() == 1:
-                more_data = False
+        eof = False
+        empty_pops = 0
+        while True:
+            if not eof and self.reader.fill_buffer() == 1:
+                eof = True
             (chunk,) = self.reader.pop_chunks()
+            if chunk is None:
+                if eof:
+                    break                # buffer fully drained
+                # A fill produced no decoded audio yet: mid-stream seek/decode
+                # hiccup (e.g. flac "read_timestamp() failed in the middle").
+                # Skip it — dereferencing None.pts kills the DataLoader worker
+                # and with it the whole DDP run. The cap guards against a
+                # wedged no-progress decoder: a hung worker is worse than a
+                # crash.
+                empty_pops += 1
+                if empty_pops > 65536:
+                    raise ValueError(
+                        f"decoder made no progress after {empty_pops} empty "
+                        f"pops (codec={self.metadata.codec}); wedged stream?")
+                continue
+            empty_pops = 0
             chunks.append(chunk)
             if tend is not None:
                 chunk_end_pts = chunk.pts + chunk.shape[0] / self.sample_rate
@@ -130,6 +147,13 @@ class AudioDecoder:
                     chunk_end_pts = index_pts + elapsed
                 if chunk_end_pts > tend + margin:
                     break
+
+        if not chunks:
+            # Data-level failure (bad seek target / corrupt stream), not a bug:
+            # raise ValueError so sample-skipping callers can drop this read.
+            raise ValueError(
+                f"decoder produced no samples for range [{tstart:.3f}, {tend}] "
+                f"(codec={self.metadata.codec}, read_from_start={read_from_start})")
 
         # Determine the reference PTS for trimming
         if read_from_start:
