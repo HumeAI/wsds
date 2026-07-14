@@ -13,6 +13,7 @@ import io
 import traceback
 import typing
 
+import numpy as np
 import pyarrow as pa
 
 
@@ -36,14 +37,25 @@ class AudioDecoder:
         # byte-offset seek with our own index is much faster.
         self._use_byte_index = codec_name in ('mp3', 'mp2', 'mp1')
         self._packet_index = None
+        # On-demand demuxer-index seeding (ogg/vorbis, which has no native seek
+        # table). Rather than add every episode point up front (each
+        # av_add_index_entry is an O(n) sorted insert -> O(n*m)), we keep the
+        # full index and add only a small window of points around each requested
+        # seek target as segments are read. See set_seed_index / _seed_around.
+        self._seed_pts = None
+        self._seed_positions = None
+        self._seed_added = None
+        self._seed_window = 4
 
     def _build_index(self):
         """Build a sparse packet index for byte-offset seeking."""
         if self._packet_index is not None:
             return
+        from ._timing import record
         try:
-            idx = self.reader.build_packet_index(
-                self.reader.default_audio_stream, 128 * 1024)
+            with record("build_packet_index"):
+                idx = self.reader.build_packet_index(
+                    self.reader.default_audio_stream, 128 * 1024)
             if idx and len(idx) > 1:
                 self._packet_index = idx
         except Exception:
@@ -97,14 +109,35 @@ class AudioDecoder:
         if index_pts is None:
             # Fall back to timestamp seek (or read from start)
             seek_target = 0.0 if read_from_start else max(0, tstart - margin)
+            if not read_from_start:
+                # Seed just the AVIndexEntry points around this target (ogg/vorbis)
+                # so the seek brackets in ~1 read; accumulates across seq reads.
+                self._seed_around(seek_target)
             self.reader.seek(seek_target, "key")
 
         chunks = []
-        more_data = True
-        while more_data:
-            if self.reader.fill_buffer() == 1:
-                more_data = False
+        eof = False
+        empty_pops = 0
+        while True:
+            if not eof and self.reader.fill_buffer() == 1:
+                eof = True
             (chunk,) = self.reader.pop_chunks()
+            if chunk is None:
+                if eof:
+                    break                # buffer fully drained
+                # A fill produced no decoded audio yet: mid-stream seek/decode
+                # hiccup (e.g. flac "read_timestamp() failed in the middle").
+                # Skip it — dereferencing None.pts kills the DataLoader worker
+                # and with it the whole DDP run. The cap guards against a
+                # wedged no-progress decoder: a hung worker is worse than a
+                # crash.
+                empty_pops += 1
+                if empty_pops > 65536:
+                    raise ValueError(
+                        f"decoder made no progress after {empty_pops} empty "
+                        f"pops (codec={self.metadata.codec}); wedged stream?")
+                continue
+            empty_pops = 0
             chunks.append(chunk)
             if tend is not None:
                 chunk_end_pts = chunk.pts + chunk.shape[0] / self.sample_rate
@@ -114,6 +147,13 @@ class AudioDecoder:
                     chunk_end_pts = index_pts + elapsed
                 if chunk_end_pts > tend + margin:
                     break
+
+        if not chunks:
+            # Data-level failure (bad seek target / corrupt stream), not a bug:
+            # raise ValueError so sample-skipping callers can drop this read.
+            raise ValueError(
+                f"decoder produced no samples for range [{tstart:.3f}, {tend}] "
+                f"(codec={self.metadata.codec}, read_from_start={read_from_start})")
 
         # Determine the reference PTS for trimming
         if read_from_start:
@@ -165,6 +205,37 @@ class AudioDecoder:
             return False
         fn([int(p) for p in positions], [float(t) for t in pts_seconds])
         return True
+
+    def set_seed_index(self, positions, pts_seconds):
+        """Store a precomputed (byte-position, pts) index for ON-DEMAND demuxer
+        seeding. Points are added lazily in a small window around each seek
+        target (see _seed_around) rather than all at once, so the per-seek cost
+        stays O(window) even for multi-hour episodes with tens of thousands of
+        points. Use only for formats WITHOUT a native seek table (ogg/vorbis);
+        never for mp4/mov (the moov already indexes them and av_add_index_entry
+        is O(n) per insert against its millions of native entries).
+
+        `pts_seconds` MUST be ascending — the seek-index generator emits points
+        in blob-scan order (ascending pts) — so we store them as-is (no sort) and
+        binary-search with np.searchsorted in _seed_around."""
+        self._seed_pts = np.asarray(pts_seconds, dtype=np.float64)
+        self._seed_positions = np.asarray(positions, dtype=np.int64)
+        self._seed_added = set()
+
+    def _seed_around(self, target_time):
+        """Add the few seed-index points bracketing target_time to the demuxer's
+        seek index (idempotent per point, accumulates across seeks). No-op unless
+        a seed index was set via set_seed_index."""
+        if self._seed_pts is None or self._seed_pts.size == 0:
+            return
+        i = int(np.searchsorted(self._seed_pts, target_time, side="right"))
+        lo = max(0, i - self._seed_window)
+        hi = min(self._seed_pts.size, i + self._seed_window)
+        sel = [k for k in range(lo, hi) if k not in self._seed_added]
+        if sel:
+            self._seed_added.update(sel)
+            self.add_seek_points(self._seed_positions[sel].tolist(),
+                                 self._seed_pts[sel].tolist())
 
 
 def _create_reader_humecodec(src, buffer_size):

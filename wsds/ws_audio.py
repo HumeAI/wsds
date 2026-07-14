@@ -48,33 +48,52 @@ class WSAudioEpisode:
         scan: `build_packet_index` for mp3/mp2/mp1 (which reads the WHOLE episode
         — ~200-400ms for a long spotify mp3, the dominant deep-seek cost) and the
         Ogg/Vorbis demuxer bisection. `positions` are byte offsets in the audio
-        blob (blob-relative); `pts_seconds` the matching timestamps. Applied on
+        blob (blob-relative); `pts_seconds` the matching timestamps. May be numpy
+        arrays — kept as-is for zero-copy; the per-codec consumers coerce to
+        Python scalars only where they must (the mp3 packet index). Applied on
         the next decoder (re)creation."""
-        self._seek_index = ([int(p) for p in positions], [float(t) for t in pts_seconds])
+        self._seek_index = (positions, pts_seconds)
         if self._decoder is not None:
             self._apply_seek_index()
 
     def _apply_seek_index(self):
-        if not self._seek_index or self._decoder is None:
+        if self._seek_index is None or self._decoder is None:
             return
         pos, pts = self._seek_index
         d = self._decoder
         if getattr(d, "_use_byte_index", False):     # mp3/mp2/mp1 byte-index path
             from types import SimpleNamespace
-            d._packet_index = [SimpleNamespace(pts_seconds=t, pos=p) for p, t in zip(pos, pts)]
-        else:                                         # vorbis/etc: seed the demuxer index (humecodec>=0.8)
-            fn = getattr(d, "add_seek_points", None)
-            if fn is not None:
-                fn(pos, pts)
+            # SimpleNamespace + humecodec need Python scalars, so coerce per element
+            # here (unavoidable for the byte index); vorbis stays fully numpy below.
+            d._packet_index = [SimpleNamespace(pts_seconds=float(t), pos=int(p)) for p, t in zip(pos, pts)]
+        else:
+            # ogg/vorbis has no native seek table -> seed the demuxer's
+            # AVIndexEntry list (humecodec>=0.8) to skip its interpolating
+            # bisection. Seeding is INCREMENTAL: set_seed_index just stores the
+            # index, and a small window of points near each requested seek target
+            # is added on demand (AudioDecoder._seed_around), so per-seek cost is
+            # O(window) regardless of episode length.
+            #
+            # mp4/mov (aac/alac) are SKIPPED: the moov already carries a full
+            # sample table, so seeding is redundant AND each av_add_index_entry is
+            # an O(n) sorted insert against its millions of native entries -> a
+            # 36h aac took 41s for 16k points. Native mp4 seeking is already fast.
+            # (The seek index is still EXTRACTED for mp4 — its absolute offsets
+            # feed the block-cache/backblaze prefetch — we just don't feed ffmpeg.)
+            codec = getattr(getattr(d, "metadata", None), "codec", "") or ""
+            if codec in ("vorbis", "opus") and hasattr(d, "set_seed_index"):
+                d.set_seed_index(pos, pts)
 
     def get_decoder(self, sample_rate=None):
         """Lazily creates/caches decoder via audio_codec.create_decoder()."""
         requested_sr = sample_rate or (self._decoder and self._decoder.metadata.sample_rate)
         if self._decoder is None or requested_sr != self._sample_rate:
-            self.src.seek(0)
-            self._decoder = create_decoder(self.src, sample_rate=sample_rate)
-            self._sample_rate = sample_rate or self._decoder.metadata.sample_rate
-            self._apply_seek_index()
+            from ._timing import record
+            with record("decoder_open"):        # create_decoder = find_stream_info
+                self.src.seek(0)
+                self._decoder = create_decoder(self.src, sample_rate=sample_rate)
+                self._sample_rate = sample_rate or self._decoder.metadata.sample_rate
+                self._apply_seek_index()
         return self._decoder, self._sample_rate
 
     @property
@@ -88,8 +107,10 @@ class WSAudioEpisode:
         return sr
 
     def read_segment(self, start=0, end=None, sample_rate=None):
+        from ._timing import record
         decoder, sample_rate = self.get_decoder(sample_rate)
-        samples = decoder.get_samples_played_in_range(start, end)
+        with record("audio_decode"):            # seek + decode the segment
+            samples = decoder.get_samples_played_in_range(start, end)
         if hasattr(samples, "data"):
             samples = samples.data
         samples.sample_rate = sample_rate

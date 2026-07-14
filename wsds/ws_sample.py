@@ -3,6 +3,7 @@ from typing import TYPE_CHECKING
 
 from .utils import WSShardMissingError, validate_shards
 from .ws_decode import get_audio as _get_audio
+from ._timing import record
 
 if TYPE_CHECKING:
     from .ws_dataset import WSDataset
@@ -47,7 +48,8 @@ class WSSample:
 
         # Get __key__ from this column_dir
         try:
-            key = self.dataset.get_shard(column_dir, self.shard_ref).get_sample("__key__", self.offset)
+            with record("key_verify"):   # cross-column-dir __key__ consistency check
+                key = self.dataset.get_shard(column_dir, self.shard_ref).get_sample("__key__", self.offset)
         except (WSShardMissingError, KeyError):
             # Can't verify if shard or key is missing
             self._verified_column_dirs.add(column_dir)
@@ -71,6 +73,17 @@ class WSSample:
             return self.overrides[field]
         self._verify_key_for_field(field)
         return self.dataset.get_sample(self.shard_ref, field, self.offset)
+
+    def get_raw(self, field):
+        """Return the RAW pyarrow scalar for `field`, skipping the as_py()/decode
+        conversion that `__getitem__` applies. For trusted internal consumers that
+        want zero-copy numeric/struct access (e.g. `.values.to_numpy()`) instead
+        of Python objects — the default conversion exists mainly to keep external
+        callers unsurprised."""
+        if field in self.overrides:
+            return self.overrides[field]
+        self._verify_key_for_field(field)
+        return self.dataset.get_sample(self.shard_ref, field, self.offset, raw=True)
 
     def __setitem__(self, field, value):
         self.overrides[field] = value

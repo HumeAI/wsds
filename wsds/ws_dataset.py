@@ -600,12 +600,12 @@ class WSDataset:
         self._open_shards[shard_dir] = shard
         return shard
 
-    def get_sample(self, shard_ref, field, offset):
+    def get_sample(self, shard_ref, field, offset, raw=False):
         alternatives = self.fields[field]
         last_err = None
         for column_dir, column in alternatives:
             try:
-                return self.get_shard(column_dir, shard_ref).get_sample(column, offset)
+                return self.get_shard(column_dir, shard_ref).get_sample(column, offset, raw=raw)
             except WSShardMissingError as e:
                 last_err = e
                 continue

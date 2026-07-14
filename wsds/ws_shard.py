@@ -8,8 +8,30 @@ import pyarrow as pa
 
 from .utils import WSShardMissingError
 from .ws_audio import WSAudioEpisode, WSAudioSegment
-from .ws_decode import decode_sample, decode_arr
+from .ws_decode import decode_sample, decode_arr, AUDIO_FILE_KEYS
 from .ws_sample import WSSample
+from ._timing import record
+
+import struct
+
+
+def _zero_copy_blob_reader(arr, j):
+    """Zero-copy seekable file-like over element ``j`` of a (large_)binary array.
+
+    Reads only ``offsets[j:j+2]`` and slices the values buffer, WITHOUT
+    materializing the element into a pyarrow scalar. ``col[j]`` copies/faults the
+    ENTIRE blob (measured 100-300 ms on cold 1.8 GB mmap'd shards) even when the
+    decoder only seeks to a small region; this hands the decoder an mmap-backed
+    view so it faults just the pages it actually reads. Returns None if null."""
+    vbuf, offbuf, valbuf = arr.buffers()   # [validity, offsets, values]
+    idx = arr.offset + j
+    if vbuf is not None and not (memoryview(vbuf)[idx >> 3] & (1 << (idx & 7))):
+        return None
+    w, fmt = (8, "<q") if pa.types.is_large_binary(arr.type) else (4, "<i")
+    ob = memoryview(offbuf)
+    o1 = struct.unpack_from(fmt, ob, idx * w)[0]
+    o2 = struct.unpack_from(fmt, ob, (idx + 1) * w)[0]
+    return pa.BufferReader(valbuf.slice(o1, o2 - o1))
 
 if TYPE_CHECKING:
     from .ws_dataset import WSDataset
@@ -48,11 +70,12 @@ class WSShard(WSShardInterface):
         self.fname = fname
 
         try:
-            if dataset.disable_memory_map:
-                self._source_file = pa.OSFile(str(fname))
-            else:
-                self._source_file = pa.memory_map(str(fname))
-            self.reader = pa.RecordBatchFileReader(self._source_file)
+            with record("shard_open"):
+                if dataset.disable_memory_map:
+                    self._source_file = pa.OSFile(str(fname))
+                else:
+                    self._source_file = pa.memory_map(str(fname))
+                self.reader = pa.RecordBatchFileReader(self._source_file)
         except FileNotFoundError:
             raise WSShardMissingError(fname) from None
 
@@ -63,12 +86,13 @@ class WSShard(WSShardInterface):
         self._end = None
         self._data = None
 
-    def get_sample(self, column: str, offset: int) -> typing.Any:
+    def get_sample(self, column: str, offset: int, raw: bool = False) -> typing.Any:
         if self._data is None or offset < self._start or offset >= self._end:
             i = offset // self.batch_size
             if i >= self.reader.num_record_batches:
                 raise IndexError(f"{offset} is out of range for shard {self.fname}")
-            self._data = self.reader.get_batch(i)
+            with record("batch_read"):
+                self._data = self.reader.get_batch(i)
             if i < self.reader.num_record_batches - 1:
                 if self._data.num_rows < self.batch_size:
                     raise ValueError(
@@ -82,14 +106,29 @@ class WSShard(WSShardInterface):
             raise IndexError(f"{offset} is out of range for shard {self.fname}")
         if self._data.schema.get_field_index(column) == -1:
             raise KeyError(f"column {column} not found in shard {self.fname}")
+        col_type = self._data.schema.field(column).type
+        ext = column.rsplit(".", 1)[-1] if "." in column else column
+        # Audio columns: hand the decoder a ZERO-COPY reader over just this
+        # element's bytes (mmap-backed) instead of materializing the whole blob
+        # via col[j]. Only audio benefits (it seeks; npy/pyd read fully anyway).
+        if not raw and ext in AUDIO_FILE_KEYS and (pa.types.is_binary(col_type) or pa.types.is_large_binary(col_type)):
+            with record("blob_decode"):
+                fd = _zero_copy_blob_reader(self._data.column(column), j)
+                return None if fd is None else WSAudioEpisode(fd)
         data = self._data[column][j]
         if not data.is_valid:
             return None # Return None for any null pyarrow scalars
-        col_type = self._data.schema.field(column).type
+        if raw:
+            # Internal zero-copy path: return the raw pyarrow scalar, skipping the
+            # as_py()/decode_sample conversion (which is there mainly to keep
+            # external callers unsurprised). Trusted internal consumers do their
+            # own .values.to_numpy() for zero-copy numeric/struct access.
+            return data
         try:
             if pa.types.is_binary(col_type) or pa.types.is_large_binary(col_type):
-                return decode_sample(column, data)
-            if (column.rsplit(".", 1)[-1] if "." in column else "") == "arr":
+                with record("blob_decode"):
+                    return decode_sample(column, data)
+            if ext == "arr":
                 return decode_arr(data, col_type)   # native variable-length array
             return data.as_py(maps_as_pydicts="strict")
         except Exception as e:
@@ -135,17 +174,20 @@ class WSSourceAudioShard(WSShardInterface):
         return cls(shard_ref, source_dataset, dataset, link["vad_column"])
 
     def get_timestamps(self, segment_offset):
-        return self._source_sample[self.vad_column][segment_offset]
+        with record("vad_read"):
+            return self._source_sample[self.vad_column][segment_offset]
 
-    def get_sample(self, _column, offset):
+    def get_sample(self, _column, offset, raw: bool = False):
         file_name, segment_offset = self.derived_dataset.parse_key(
             WSSample(self.derived_dataset, self.shard_ref, offset)["__key__"]
         )
 
         if self._source_file_name != file_name:
-            self._source_sample = self.source_dataset[file_name]
+            with record("src_key_lookup"):
+                self._source_sample = self.source_dataset[file_name]
             try:
-                self._source_reader = self._source_sample.get_audio()
+                with record("get_audio"):
+                    self._source_reader = self._source_sample.get_audio()
             except KeyError:
                 raise WSShardMissingError("no audio shards found")
             self._source_file_name = file_name
