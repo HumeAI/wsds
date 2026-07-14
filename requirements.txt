@@ -1,5 +1,6 @@
 fastprogress
 fire
+flatbuffers
 numpy
 polars>=1.36.1
 pyarrow>=20
