@@ -79,14 +79,16 @@ class AudioDecoder:
         seek_adj = 0.0
         index_pts = None
         if not read_from_start:
-            # For raw MPEG formats, use indexed byte seek (fast, avoids sequential scan).
-            # No seek_adj needed: the index PTS and decoded audio are both in
-            # the raw timeline (skip_samples is not applied after byte seek).
+            # Raw MPEG formats: try the fast byte-offset seek via our packet
+            # index. Its PTS and the decoded audio share one timeline, so no
+            # skip compensation is needed there.
             if self._use_byte_index:
                 index_pts = self._indexed_seek(tstart - margin)
-            else:
-                # Timestamp seek: the demuxer applies start_skip_samples at
-                # pts=0 but not after seeking, so adjust tstart to compensate.
+            if index_pts is None:
+                # Timestamp seek (non-MPEG codecs, or MPEG files too small to
+                # build an index): the demuxer applies the gapless
+                # start_skip_samples only at pts=0, not after a seek, so shift
+                # tstart to compensate.
                 seek_adj = self.init_skip_samples / self.metadata.sample_rate
                 tstart += seek_adj
                 if tend is not None:
