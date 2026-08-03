@@ -87,6 +87,7 @@ class WSS3Shard(WSShardInterface):
         self._start = None
         self._end = None
         self._batch = None
+        self._row_offsets = None  # cumulative per-batch row offsets, built only when batch_size metadata is unreliable
 
     @classmethod
     def from_s3_url(cls, dataset: "WSDataset", url: str, shard_ref: Optional[Tuple[str, str]]=None, s3_client=None):
@@ -142,22 +143,43 @@ class WSS3Shard(WSShardInterface):
     def _s3_path(self) -> str:
         return f"s3://{self.bucket}/{self.key}"
 
+    def _init_row_offsets(self):
+        """Some shards have wrong batch_size metadata or irregular batch sizes;
+        derive true cumulative row offsets from the batch headers (metadata-only reads)."""
+        offsets = [0]
+        for i in range(self._feather.num_record_batches):
+            offsets.append(offsets[-1] + self._feather.record_batch(i).num_rows)
+        self._row_offsets = offsets
+
     def get_sample(self, column: str, offset: int) -> typing.Any:
         if self._batch is None or offset < self._start or offset >= self._end:
-            i = offset // self.batch_size
-            if i >= self._feather.num_record_batches:
-                raise IndexError(f"{offset} is out of range for shard {self._s3_path()}")
-            self._batch = self._feather.record_batch(i)
-            if i < self._feather.num_record_batches - 1:
-                if self._batch.num_rows < self.batch_size:
-                    raise ValueError(
-                        f"Batch {i} in shard {self._s3_path()} is incomplete "
-                        f"(has only {self._batch.num_rows} rows instead of {self.batch_size})"
-                    )
-            self._start = i * self.batch_size
-            self._end = self._start + self.batch_size
+            if self._row_offsets is None:
+                i = offset // self.batch_size
+                n = self._feather.num_record_batches
+                if i >= n:
+                    # batch_size metadata may understate the true batch size
+                    self._init_row_offsets()
+                else:
+                    batch = self._feather.record_batch(i)
+                    if i < n - 1 and batch.num_rows != self.batch_size:
+                        # batch layout contradicts the metadata: using arithmetic here
+                        # would silently return the wrong row
+                        self._init_row_offsets()
+                    else:
+                        self._batch = batch
+                        self._start = i * self.batch_size
+                        self._end = self._start + self.batch_size
+            if self._row_offsets is not None:
+                import bisect
 
-        j = offset % self.batch_size
+                if not 0 <= offset < self._row_offsets[-1]:
+                    raise IndexError(f"{offset} is out of range for shard {self._s3_path()}")
+                i = bisect.bisect_right(self._row_offsets, offset) - 1
+                self._batch = self._feather.record_batch(i)
+                self._start = self._row_offsets[i]
+                self._end = self._row_offsets[i + 1]
+
+        j = offset - self._start
         if j >= self._batch.num_rows:
             raise IndexError(f"{offset} is out of range for shard {self._s3_path()}")
         try:
