@@ -134,11 +134,15 @@ def main():
     else:
         print("could not discover columns; omitting `columns` (WSDataset will discover them from S3 at open time)")
 
-    # the filename stem becomes a dataset field, so it must be a column this link serves
+    # The filename stem becomes a dataset field, so it must be a column this link serves.
+    # Prefer the audio column (usually what the link exists for), then the subdir name.
     if args.name:
         name = args.name
     elif columns:
-        name = subdir if subdir in columns else columns[0]
+        from wsds.ws_decode import AUDIO_FILE_KEYS
+
+        audio_cols = [c for c in columns if c in AUDIO_FILE_KEYS]
+        name = audio_cols[0] if audio_cols else (subdir if subdir in columns else columns[0])
     else:
         name = subdir
     if columns and name not in columns:
