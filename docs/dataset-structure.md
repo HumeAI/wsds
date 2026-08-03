@@ -145,6 +145,8 @@ The index can live outside the partitions it references (as in `data-pl/indices/
 
 Without an index, the dataset can still be iterated sequentially but cannot be randomly accessed by key.
 
+`index.sqlite3` is the only index read at runtime. You may also find `episode-list.feather` files inside partitions — these are per-partition extraction caches used while *building* the index (they make re-runs and distributed extraction cheap) and are never read by the library itself.
+
 #### Computed Columns (Links)
 
 A computed column defines a **virtual column directory** — columns that are derived on-the-fly from another dataset rather than stored locally. In `data-pl`, the segmented `filtered_vad` dataset has a computed column that links back to the `source` dataset to extract audio segments:
