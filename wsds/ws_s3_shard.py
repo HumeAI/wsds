@@ -1,6 +1,7 @@
 import atexit
 import os
 import re
+import threading
 import typing
 from typing import TYPE_CHECKING, Optional, Tuple
 from urllib.parse import urlparse
@@ -13,6 +14,27 @@ from .ws_shard import WSShardInterface
 
 if TYPE_CHECKING:
     from .ws_dataset import WSDataset
+
+
+_s3_clients: dict[tuple[str | None, ...], tuple[typing.Any, typing.Any]] = {}
+_s3_clients_pid: int | None = None
+_s3_clients_atexit_pid: int | None = None
+_s3_clients_lock = threading.Lock()
+
+
+def _close_s3_clients():
+    """Close this process's shared aiobotocore clients at interpreter exit."""
+    if _s3_clients_pid != os.getpid():
+        return
+
+    from .pupyarrow.file_reader import _get_io_loop
+
+    for _, ctx in _s3_clients.values():
+        try:
+            _get_io_loop().run(ctx.__aexit__(None, None, None))
+        except Exception:
+            pass
+    _s3_clients.clear()
 
 
 def create_s3_client(link=None):
@@ -31,33 +53,54 @@ def create_s3_client(link=None):
 
     from .pupyarrow.file_reader import _get_io_loop
 
+    global _s3_clients_pid, _s3_clients_atexit_pid
+
     link = link or {}
-    kwargs = {"config": Config(max_pool_connections=50, signature_version="s3v4")}
     endpoint_url = link.get("endpoint_url") or os.environ.get("WSDS_S3_ENDPOINT_URL")
-    if endpoint_url:
-        kwargs["endpoint_url"] = endpoint_url
-    for k in ("aws_access_key_id", "aws_secret_access_key", "aws_session_token", "region_name"):
-        if link.get(k):
-            kwargs[k] = link[k]
-    if "region_name" not in kwargs and endpoint_url:
-        # SigV4 embeds the region in the credential scope, so it must match
-        # the endpoint. Derive it from "s3.<region>.<provider>" hostnames
-        # (e.g. s3.us-east-005.backblazeb2.com); real regions contain "-",
-        # which also excludes bare hosts like s3.amazonaws.com.
-        m = re.match(r"https?://s3\.([a-z0-9-]+)\.", endpoint_url)
-        if m and "-" in m.group(1):
-            kwargs["region_name"] = m.group(1)
-    ctx = AioSession().create_client("s3", **kwargs)
-    client = _get_io_loop().run(ctx.__aenter__())
+    client_key = (
+        endpoint_url,
+        link.get("aws_access_key_id"),
+        link.get("aws_secret_access_key"),
+        link.get("aws_session_token"),
+        link.get("region_name"),
+    )
 
-    def _cleanup():
-        try:
-            _get_io_loop().run(ctx.__aexit__(None, None, None))
-        except Exception:
-            pass
+    with _s3_clients_lock:
+        pid = os.getpid()
+        if _s3_clients_pid != pid:
+            # A DataLoader worker may be forked after its parent opened S3.
+            # Its inherited client is tied to the parent's event loop, so do
+            # not reuse or close it from the child process.
+            _s3_clients.clear()
+            _s3_clients_pid = pid
+            _s3_clients_atexit_pid = None
 
-    atexit.register(_cleanup)
-    return client, ctx
+        existing = _s3_clients.get(client_key)
+        if existing is not None:
+            return existing
+
+        if _s3_clients_atexit_pid != pid:
+            atexit.register(_close_s3_clients)
+            _s3_clients_atexit_pid = pid
+
+        kwargs = {"config": Config(max_pool_connections=50, signature_version="s3v4")}
+        if endpoint_url:
+            kwargs["endpoint_url"] = endpoint_url
+        for k in ("aws_access_key_id", "aws_secret_access_key", "aws_session_token", "region_name"):
+            if link.get(k):
+                kwargs[k] = link[k]
+        if "region_name" not in kwargs and endpoint_url:
+            # SigV4 embeds the region in the credential scope, so it must match
+            # the endpoint. Derive it from "s3.<region>.<provider>" hostnames
+            # (e.g. s3.us-east-005.backblazeb2.com); real regions contain "-",
+            # which also excludes bare hosts like s3.amazonaws.com.
+            m = re.match(r"https?://s3\.([a-z0-9-]+)\.", endpoint_url)
+            if m and "-" in m.group(1):
+                kwargs["region_name"] = m.group(1)
+        ctx = AioSession().create_client("s3", **kwargs)
+        client = _get_io_loop().run(ctx.__aenter__())
+        _s3_clients[client_key] = (client, ctx)
+        return client, ctx
 
 
 class WSS3Shard(WSShardInterface):

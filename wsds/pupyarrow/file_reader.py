@@ -12,6 +12,10 @@ from pathlib import Path
 
 BLOCK_SIZE = 8192  # 8kB minimum sync read size
 MIN_ASYNC_READ = 4096  # 4kB minimum async read size
+ASYNC_CACHE_MAX_BYTES = int(os.environ.get("WSDS_ASYNC_CACHE_MAX_BYTES", 8 * 1024 * 1024))
+# Additional attempts after the initial presigned range request. Set to zero
+# when tail latency matters more than recovering transient S3 failures.
+S3_PRESIGNED_RETRIES = max(0, int(os.environ.get("WSDS_S3_PRESIGNED_RETRIES", 3)))
 VERBOSE = False
 
 PRESIGN_EXPIRES = 3600  # presigned URL lifetime (seconds)
@@ -86,6 +90,16 @@ class FileReader:
         self._planned: contextvars.ContextVar[bool] = contextvars.ContextVar("_planned", default=False)
         self._pending: list[tuple[int, int, int, asyncio.Future]] = []  # (offset, actual, length, future)
         self._cache: list[tuple[int, bytes]] = []  # (offset, data) ranges
+        self._cache_bytes = 0
+
+    def _cache_put(self, offset: int, data: bytes) -> None:
+        if not data or len(data) > ASYNC_CACHE_MAX_BYTES:
+            return
+        self._cache.append((offset, data))
+        self._cache_bytes += len(data)
+        while self._cache_bytes > ASYNC_CACHE_MAX_BYTES:
+            _, evicted = self._cache.pop(0)
+            self._cache_bytes -= len(evicted)
 
     def read(self, offset: int, length: int) -> bytes:
         """Read length bytes at absolute offset, using forward cache."""
@@ -160,7 +174,7 @@ class FileReader:
         if not self._planned.get():
             # Eager mode: read directly
             data = await self._async_read_impl(offset, actual)
-            self._cache.append((offset, data))
+            self._cache_put(offset, data)
             return data[:length]
 
         # Plan mode: submit and await future
@@ -178,7 +192,7 @@ class FileReader:
 
         data_map: dict[int, bytes] = {}
         for region, data in zip(regions, fetched):
-            self._cache.append((region.offset, data))
+            self._cache_put(region.offset, data)
             for abs_offset, start, end in region.members:
                 data_map[abs_offset] = data[start:end]
 
@@ -189,6 +203,7 @@ class FileReader:
     def clear_cache(self):
         """Clear the async range cache."""
         self._cache.clear()
+        self._cache_bytes = 0
 
     @property
     def has_pending(self) -> bool:
@@ -309,7 +324,7 @@ class S3FileReader(FileReader):
         session = await _get_http_session()
         headers = {"Range": f"bytes={offset}-{offset + length - 1}"}
         auth_retried = False
-        for attempt in range(4):
+        for attempt in range(S3_PRESIGNED_RETRIES + 1):
             if self._url is None or time.monotonic() > self._url_deadline:
                 await self._presign()
             try:
@@ -323,10 +338,10 @@ class S3FileReader(FileReader):
                     r.raise_for_status()
                     return await r.read()
             except aiohttp.ClientResponseError as e:
-                if e.status < 500 or attempt == 3:
+                if e.status < 500 or attempt == S3_PRESIGNED_RETRIES:
                     raise
             except (aiohttp.ClientError, asyncio.TimeoutError):
-                if attempt == 3:
+                if attempt == S3_PRESIGNED_RETRIES:
                     raise
             await asyncio.sleep(0.1 * 2**attempt)
 
