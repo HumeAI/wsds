@@ -40,6 +40,7 @@ class WSShardInterface:
     _start = None
     _end = None
     _row_offsets = None  # cumulative per-batch row offsets, built when batch_size metadata is unreliable
+    _batches_verified = 0  # batches [0, _batches_verified) confirmed to hold exactly batch_size rows
 
     def _num_batches(self) -> int:
         raise NotImplementedError
@@ -57,20 +58,24 @@ class WSShardInterface:
         """Return the record batch containing row `offset`, setting self._start/_end
         to the batch's row range.
 
-        Trusts the batch_size metadata (fast path). When the computed batch is out
-        of range, or a loaded batch contradicts the metadata — some shards have
-        wrong batch_size metadata or irregular batch sizes, where the arithmetic
-        would silently return the wrong row — falls back to true cumulative row
-        offsets derived from the batches themselves.
+        The `offset // batch_size` arithmetic is only sound when every batch BEFORE
+        the target holds exactly `batch_size` rows — some shards have wrong
+        batch_size metadata or irregular batch sizes, where it would silently
+        return the wrong row. So the fast path is only trusted for batch prefixes
+        this shard object has already verified (sequential reads verify as they
+        go, at no extra cost); anything else falls back to true cumulative row
+        offsets derived from the batch headers themselves.
         """
         if self._row_offsets is None:
             i = offset // self.batch_size
             n = self._num_batches()
-            if 0 <= i < n:
+            if 0 <= i < n and i <= self._batches_verified:
                 batch = self._get_batch(i)
-                if i == n - 1 or batch.num_rows == self.batch_size:
+                if batch.num_rows == self.batch_size or i == n - 1:
+                    if batch.num_rows == self.batch_size:
+                        self._batches_verified = max(self._batches_verified, i + 1)
                     self._start = i * self.batch_size
-                    self._end = self._start + self.batch_size
+                    self._end = self._start + batch.num_rows
                     return batch
             offsets = [0]
             for num_rows in self._batch_row_counts():
@@ -129,8 +134,9 @@ class WSShard(WSShardInterface):
     def _batch_row_counts(self) -> list[int]:
         # use a fresh memory map for the scan: it only faults in batch-header pages,
         # while the OSFile reader (disable_memory_map) would read whole batches
-        reader = pa.RecordBatchFileReader(pa.memory_map(str(self.fname)))
-        return [reader.get_batch(i).num_rows for i in range(reader.num_record_batches)]
+        with pa.memory_map(str(self.fname)) as source:
+            reader = pa.RecordBatchFileReader(source)
+            return [reader.get_batch(i).num_rows for i in range(reader.num_record_batches)]
 
     def get_sample(self, column: str, offset: int) -> typing.Any:
         if self._data is None or offset < self._start or offset >= self._end:
