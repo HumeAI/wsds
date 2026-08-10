@@ -18,6 +18,7 @@ import json
 import os
 import time
 import traceback
+import typing
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -38,7 +39,7 @@ class SubdatasetSpec:
 
     kind: subdataset directory name, relative to each partition dir (e.g. "source", "v4-vad_ws")
     segmented: True when rows are segments of source episodes (keys end in _NNN)
-    key_column: optional cheap column used to anchor `__key__` extraction to a specific
+    key_column: optional column used to anchor `__key__` extraction to that column's
         (complete) column dir; without it sql_select picks one automatically, which may
         be an incomplete/in-progress dir whose missing shards would silently drop episodes
     duration_expr: SQL expression for per-episode audio duration (non-segmented datasets);
@@ -51,9 +52,9 @@ class SubdatasetSpec:
     vad_column: source-dataset column holding per-episode segment timestamps; stored in
         the index metadata so `sample["audio"]` can cut segments out of the source audio
     source_kind: kind of the source subdataset (segmented only); its episode extract
-        supplies per-episode audio durations, and it is the default computed-audio target
-    source_rel: relative path from the index to the source dataset recorded in the
-        computed audio column (defaults to "../<source_kind>")
+        supplies per-episode audio durations, and it is the computed-audio link target
+    shard_filter: optional predicate on (partition, shard_name) restricting which shards
+        are indexed (e.g. to skip shards with a foreign schema in a mixed column dir)
     """
 
     kind: str
@@ -64,7 +65,7 @@ class SubdatasetSpec:
     segment_regex: str = r"(.*)_[0-9]+$"
     vad_column: str | None = None
     source_kind: str | None = None
-    source_rel: str | None = None
+    shard_filter: typing.Callable[[tuple[str, str]], bool] | None = None
 
 
 # the original data-pl delivery/batch layout
@@ -72,6 +73,7 @@ SOURCE_SPEC = SubdatasetSpec(kind="source")
 FILTERED_VAD_SPEC = SubdatasetSpec(
     kind="filtered_vad", segmented=True, vad_column="vad.npy", source_kind="source"
 )
+DEFAULT_SPECS = (SOURCE_SPEC, FILTERED_VAD_SPEC)
 
 
 def clean_fields(fields: dict) -> dict:
@@ -224,12 +226,7 @@ def extract_subdataset_index(
 
     fields = clean_fields(ds.fields)
 
-    queries = []
-    if spec.key_column:
-        # anchoring expression: forces sql_select to source __key__/__shard_path__/__shard_offset__
-        # from this column's (complete) column dir
-        queries.append(f"`{spec.key_column}` AS __wsds_probe__")
-    queries.append("__key__")
+    queries = ["__key__"]
     if spec.segmented:
         queries.append(spec.speech_expr or "NULL AS speech_duration")
     else:
@@ -244,6 +241,8 @@ def extract_subdataset_index(
             *queries,
             shard_subsample=shard_subsample,
             shard_pipe=lambda df: extract_episodes(df, spec.segment_regex),
+            key_column=spec.key_column,
+            shard_filter=spec.shard_filter,
         )
         episode_idx = segment_idx.join(source_idx["__key__", "audio_duration"], on="__key__").with_columns(
             pl.col("speech_duration").cast(pl.Float32)
@@ -251,9 +250,9 @@ def extract_subdataset_index(
         if len(episode_idx) < len(segment_idx):
             print(f"WARNING: dropped {len(segment_idx) - len(episode_idx)} episodes not found in the source index")
     else:
-        episode_idx = ds.sql_select(*queries, shard_subsample=shard_subsample)
-        if spec.key_column:
-            episode_idx = episode_idx.drop("__wsds_probe__")
+        episode_idx = ds.sql_select(
+            *queries, shard_subsample=shard_subsample, key_column=spec.key_column, shard_filter=spec.shard_filter
+        )
         episode_idx = episode_idx.with_columns(
             pl.col("audio_duration").cast(pl.Float32),
             speech_duration=pl.lit(None).cast(pl.Float32()),
@@ -267,7 +266,7 @@ def extract_subdataset_index(
 
 def extract_partition_index(
     partition_dir: Path | str,
-    specs: tuple[SubdatasetSpec, ...] = (SOURCE_SPEC, FILTERED_VAD_SPEC),
+    specs: tuple[SubdatasetSpec, ...] = DEFAULT_SPECS,
     overwrite: bool = False,
 ) -> tuple[str, str | None, str | None, str | None]:
     """
@@ -384,15 +383,18 @@ def merge_partition_indices(
     merged_episode_idx = pl.concat(episode_idxs, how="vertical_relaxed").select(
         "name", "shard_id", "offset", "audio_duration", "speech_duration"
     )
-    duplicates = merged_episode_idx.filter(pl.col("name").is_duplicated())
-    if len(duplicates):
+    deduped = merged_episode_idx.unique(subset=["name"], keep="first", maintain_order=True)
+    if len(deduped) < len(merged_episode_idx):
+        duplicates = merged_episode_idx.filter(pl.col("name").is_duplicated())
         conflicts = (
             duplicates.group_by("name")
             .agg((pl.col("audio_duration").max() - pl.col("audio_duration").min()).alias("spread"))
             .filter(pl.col("spread") > duplicate_tolerance)
         )
-        n_dropped = len(duplicates) - duplicates["name"].n_unique()
-        print(f"Dropping {n_dropped} duplicate episodes (the first occurrence in partition order wins)")
+        print(
+            f"Dropping {len(merged_episode_idx) - len(deduped)} duplicate episodes "
+            "(the first occurrence in partition order wins)"
+        )
         if len(conflicts):
             errors.append(
                 (
@@ -403,7 +405,7 @@ def merge_partition_indices(
                     f"{duplicate_tolerance}s, e.g.: " + ", ".join(conflicts["name"].head(10).to_list()),
                 )
             )
-    merged_episode_idx = merged_episode_idx.unique(subset=["name"], keep="first", maintain_order=True).sort("name")
+    merged_episode_idx = deduped.sort("name")
 
     merged_shard_idx = pl.concat(shard_idxs, how="vertical_relaxed").with_columns(
         global_offset=pl.col("n_samples").cum_sum() - pl.col("n_samples"),
@@ -415,9 +417,7 @@ def merge_partition_indices(
 
     dst.mkdir(exist_ok=True, parents=True)
 
-    source_rel = spec.source_rel
-    if source_rel is None and spec.source_kind:
-        source_rel = f"../{spec.source_kind}"
+    source_rel = f"../{spec.source_kind}" if spec.source_kind else None
 
     try:
         start = time.perf_counter()
@@ -461,7 +461,7 @@ def extract_batch_index(
     Extract episode indices from a single batch directory containing
     'source' and 'filtered_vad' subdatasets.
     """
-    return extract_partition_index(batch_path, (SOURCE_SPEC, FILTERED_VAD_SPEC), overwrite=overwrite)
+    return extract_partition_index(batch_path, DEFAULT_SPECS, overwrite=overwrite)
 
 
 def merge_batch_indices(
@@ -473,5 +473,5 @@ def merge_batch_indices(
     Merge episode indices from multiple batches into a single wsds index
     written to `dest_path/dataset_kind`.
     """
-    spec = {"source": SOURCE_SPEC, "filtered_vad": FILTERED_VAD_SPEC}[dataset_kind]
+    spec = {s.kind: s for s in DEFAULT_SPECS}[dataset_kind]
     return merge_partition_indices(batches, spec, Path(dest_path) / dataset_kind)

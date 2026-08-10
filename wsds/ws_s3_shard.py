@@ -60,6 +60,18 @@ def create_s3_client(link=None):
     return client, ctx
 
 
+def build_link_key(prefix: str, partition: str, subdir: str, shard: str) -> str:
+    """Construct the storage key/path for a shard as link readers resolve it:
+    normpath(prefix / partition / subdir / <shard>.wsds) with leading "../"
+    stripped — partitions are relative to the index, but bucket/volume paths
+    are absolute from their root. Shared by WSS3Shard, WSModalShard and
+    support_scripts/make_s3_link.py (which validates the exact keys reads use).
+    """
+    parts = [p for p in (prefix, partition, subdir, f"{shard}.wsds") if p]
+    key = os.path.normpath("/" + "/".join(parts)).lstrip("/")
+    return key
+
+
 class WSS3Shard(WSShardInterface):
     """A shard reader that loads data from S3 via aiobotocore range requests.
 
@@ -84,10 +96,7 @@ class WSS3Shard(WSShardInterface):
         self.batch_size = int(self._feather.schema.custom_metadata["batch_size"])
 
         # cache
-        self._start = None
-        self._end = None
         self._batch = None
-        self._row_offsets = None  # cumulative per-batch row offsets, built only when batch_size metadata is unreliable
 
     @classmethod
     def from_s3_url(cls, dataset: "WSDataset", url: str, shard_ref: Optional[Tuple[str, str]]=None, s3_client=None):
@@ -111,12 +120,7 @@ class WSS3Shard(WSShardInterface):
     def from_link(cls, link, dataset, shard_ref):
         """Create an S3 shard from a link spec."""
         partition, shard = shard_ref
-        prefix = link.get("prefix", "")
-        column_dir = link.get("subdir", "")
-        parts = [p for p in (prefix, partition, column_dir, f"{shard}.wsds") if p]
-        # Prepend "/" so normpath collapses any initial ../ against the root,
-        # then strip it back off — S3 keys are relative to the bucket root.
-        key = os.path.normpath("/" + "/".join(parts)).lstrip("/")
+        key = build_link_key(link.get("prefix", ""), partition, link.get("subdir", ""), shard)
         s3_client, _ = create_s3_client(link)
         return cls(dataset, link["bucket"], key, shard_ref=shard_ref, s3_client=s3_client, presigned=link.get("presigned"))
 
@@ -143,41 +147,31 @@ class WSS3Shard(WSShardInterface):
     def _s3_path(self) -> str:
         return f"s3://{self.bucket}/{self.key}"
 
-    def _init_row_offsets(self):
-        """Some shards have wrong batch_size metadata or irregular batch sizes;
-        derive true cumulative row offsets from the batch headers (metadata-only reads)."""
-        offsets = [0]
-        for i in range(self._feather.num_record_batches):
-            offsets.append(offsets[-1] + self._feather.record_batch(i).num_rows)
-        self._row_offsets = offsets
+    def _num_batches(self) -> int:
+        return self._feather.num_record_batches
+
+    def _get_batch(self, index: int):
+        return self._feather.record_batch(index)
+
+    def _shard_name(self) -> str:
+        return self._s3_path()
+
+    def _batch_row_counts(self) -> list[int]:
+        # one concurrent round of header reads instead of a sequential GET per batch
+        import asyncio
+
+        from .pupyarrow.file_reader import _get_io_loop
+
+        async def _fetch():
+            return await asyncio.gather(
+                *(self._feather.async_record_batch(i) for i in range(self._feather.num_record_batches))
+            )
+
+        return [b.num_rows for b in _get_io_loop().run(_fetch())]
 
     def get_sample(self, column: str, offset: int) -> typing.Any:
         if self._batch is None or offset < self._start or offset >= self._end:
-            if self._row_offsets is None:
-                i = offset // self.batch_size
-                n = self._feather.num_record_batches
-                if i >= n:
-                    # batch_size metadata may understate the true batch size
-                    self._init_row_offsets()
-                else:
-                    batch = self._feather.record_batch(i)
-                    if i < n - 1 and batch.num_rows != self.batch_size:
-                        # batch layout contradicts the metadata: using arithmetic here
-                        # would silently return the wrong row
-                        self._init_row_offsets()
-                    else:
-                        self._batch = batch
-                        self._start = i * self.batch_size
-                        self._end = self._start + self.batch_size
-            if self._row_offsets is not None:
-                import bisect
-
-                if not 0 <= offset < self._row_offsets[-1]:
-                    raise IndexError(f"{offset} is out of range for shard {self._s3_path()}")
-                i = bisect.bisect_right(self._row_offsets, offset) - 1
-                self._batch = self._feather.record_batch(i)
-                self._start = self._row_offsets[i]
-                self._end = self._row_offsets[i + 1]
+            self._batch = self._locate_batch(offset)
 
         j = offset - self._start
         if j >= self._batch.num_rows:

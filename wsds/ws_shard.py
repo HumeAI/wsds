@@ -1,4 +1,4 @@
-import io
+import bisect
 import re
 import typing
 from dataclasses import dataclass
@@ -32,6 +32,57 @@ class WSShardInterface:
     def get_sample(self, column: str, offset: int) -> typing.Any:
         raise NotImplementedError
 
+    #
+    # Shared batch location for readers of .wsds files (local, S3, Modal).
+    # Subclasses provide _num_batches/_get_batch/_shard_name and call
+    # _locate_batch(offset) from get_sample.
+    #
+    _start = None
+    _end = None
+    _row_offsets = None  # cumulative per-batch row offsets, built when batch_size metadata is unreliable
+
+    def _num_batches(self) -> int:
+        raise NotImplementedError
+
+    def _get_batch(self, index: int):
+        raise NotImplementedError
+
+    def _shard_name(self) -> str:
+        raise NotImplementedError
+
+    def _batch_row_counts(self) -> list[int]:
+        return [self._get_batch(i).num_rows for i in range(self._num_batches())]
+
+    def _locate_batch(self, offset: int):
+        """Return the record batch containing row `offset`, setting self._start/_end
+        to the batch's row range.
+
+        Trusts the batch_size metadata (fast path). When the computed batch is out
+        of range, or a loaded batch contradicts the metadata — some shards have
+        wrong batch_size metadata or irregular batch sizes, where the arithmetic
+        would silently return the wrong row — falls back to true cumulative row
+        offsets derived from the batches themselves.
+        """
+        if self._row_offsets is None:
+            i = offset // self.batch_size
+            n = self._num_batches()
+            if 0 <= i < n:
+                batch = self._get_batch(i)
+                if i == n - 1 or batch.num_rows == self.batch_size:
+                    self._start = i * self.batch_size
+                    self._end = self._start + self.batch_size
+                    return batch
+            offsets = [0]
+            for num_rows in self._batch_row_counts():
+                offsets.append(offsets[-1] + num_rows)
+            self._row_offsets = offsets
+        if not 0 <= offset < self._row_offsets[-1]:
+            raise IndexError(f"{offset} is out of range for shard {self._shard_name()}")
+        i = bisect.bisect_right(self._row_offsets, offset) - 1
+        self._start = self._row_offsets[i]
+        self._end = self._row_offsets[i + 1]
+        return self._get_batch(i)
+
     def get_reader(self) -> FileReader:
         """Return a pupyarrow FileReader for the underlying shard file."""
         raise NotImplementedError
@@ -64,46 +115,26 @@ class WSShard(WSShardInterface):
         self.batch_size = int(self.reader.schema.metadata[b"batch_size"])
 
         # cache
-        self._start = None
-        self._end = None
         self._data = None
-        self._row_offsets = None  # cumulative per-batch row offsets, built only when batch_size metadata is unreliable
 
-    def _init_row_offsets(self):
-        """Some shards have wrong batch_size metadata or irregular batch sizes;
-        derive true cumulative row offsets from the batches themselves."""
-        offsets = [0]
-        for i in range(self.reader.num_record_batches):
-            offsets.append(offsets[-1] + self.reader.get_batch(i).num_rows)
-        self._row_offsets = offsets
+    def _num_batches(self) -> int:
+        return self.reader.num_record_batches
+
+    def _get_batch(self, index: int):
+        return self.reader.get_batch(index)
+
+    def _shard_name(self) -> str:
+        return str(self.fname)
+
+    def _batch_row_counts(self) -> list[int]:
+        # use a fresh memory map for the scan: it only faults in batch-header pages,
+        # while the OSFile reader (disable_memory_map) would read whole batches
+        reader = pa.RecordBatchFileReader(pa.memory_map(str(self.fname)))
+        return [reader.get_batch(i).num_rows for i in range(reader.num_record_batches)]
 
     def get_sample(self, column: str, offset: int) -> typing.Any:
         if self._data is None or offset < self._start or offset >= self._end:
-            if self._row_offsets is None:
-                i = offset // self.batch_size
-                n = self.reader.num_record_batches
-                if i >= n:
-                    # batch_size metadata may understate the true batch size
-                    self._init_row_offsets()
-                else:
-                    data = self.reader.get_batch(i)
-                    if i < n - 1 and data.num_rows != self.batch_size:
-                        # batch layout contradicts the metadata: using arithmetic here
-                        # would silently return the wrong row
-                        self._init_row_offsets()
-                    else:
-                        self._data = data
-                        self._start = i * self.batch_size
-                        self._end = self._start + self.batch_size
-            if self._row_offsets is not None:
-                import bisect
-
-                if not 0 <= offset < self._row_offsets[-1]:
-                    raise IndexError(f"{offset} is out of range for shard {self.fname}")
-                i = bisect.bisect_right(self._row_offsets, offset) - 1
-                self._data = self.reader.get_batch(i)
-                self._start = self._row_offsets[i]
-                self._end = self._row_offsets[i + 1]
+            self._data = self._locate_batch(offset)
 
         j = offset - self._start
         if j >= len(self._data):

@@ -28,7 +28,7 @@ Usage:
         --s3-url s3://data-wsds/bbc/source/audio \
         --dataset /mnt/weka/data-wsds/bbc/source \
         --endpoint https://s3.us-east-005.backblazeb2.com \
-        --out /mnt/weka/data-wsds/bbc/source/mp3.wsds-link   # omit --out for a dry run
+        --write        # writes <dataset>/<column>.wsds-link; omit for a dry run
 """
 
 import argparse
@@ -37,27 +37,16 @@ import os
 from pathlib import Path
 from urllib.parse import urlparse
 
-
-def build_key(prefix, partition, subdir, shard):
-    """Reconstruct the S3 key exactly as WSS3Shard.from_link does."""
-    parts = [p for p in (prefix, partition, subdir, f"{shard}.wsds") if p and p != "."]
-    key = os.path.normpath("/".join(parts))
-    while key.startswith("../"):
-        key = key[3:]
-    return key
+from wsds.ws_s3_shard import build_link_key
 
 
 def shard_refs_from_dataset(dataset: Path, subdir: str):
     """Prefer the index's shard refs (authoritative partitions); fall back to local listing."""
     idx = dataset / "index.sqlite3"
     if idx.exists():
-        import sqlite3
+        from wsds.ws_index import WSIndex
 
-        con = sqlite3.connect(f"file:{idx}?immutable=1", uri=True)
-        cols = {r[0] for r in con.execute("SELECT name FROM pragma_table_info('shards')")}
-        part_col = "partition" if "partition" in cols else ("dataset_path" if "dataset_path" in cols else "''")
-        rows = con.execute(f"SELECT {part_col}, shard FROM shards").fetchall()
-        return [(p or "", s) for p, s in rows], "index"
+        return [(partition or "", shard) for partition, shard in WSIndex(str(idx)).shards()], "index"
     local = dataset / subdir
     if local.is_dir():
         return [("", f.stem) for f in sorted(local.glob("*.wsds"))], "local-listing"
@@ -65,14 +54,14 @@ def shard_refs_from_dataset(dataset: Path, subdir: str):
 
 
 def discover_columns(dataset: Path, subdir: str, s3, bucket: str, key_path: str):
-    """Column names served by this link: from a local shard if present, else from an
-    S3 shard footer via a full download of the last 64KB (no pupyarrow dependency)."""
-    local_dir = dataset / subdir
-    local_shard = next(local_dir.glob("*.wsds"), None) if local_dir.is_dir() else None
-    if local_shard is not None:
-        import pyarrow as pa
+    """Column names served by this link: from a local shard if present, else by
+    reading the schema from the head of one S3 shard (sync boto3; no aiobotocore
+    dependency, so the tool runs on plain `pip install boto3`)."""
+    from wsds.utils import find_first_shard, get_columns
 
-        names = pa.RecordBatchFileReader(pa.memory_map(str(local_shard))).schema.names
+    local_shard = find_first_shard(dataset / subdir) if (dataset / subdir).is_dir() else None
+    if local_shard is not None:
+        names = get_columns(local_shard)
         return sorted(c for c in names if c != "__key__"), f"local shard {local_shard.name}"
 
     listed = s3.list_objects_v2(Bucket=bucket, Prefix=key_path + "/", MaxKeys=5).get("Contents", [])
@@ -97,7 +86,8 @@ def main():
     ap.add_argument("--name", default=None, help="link filename stem (default: a column the link serves)")
     ap.add_argument("--key-id", default=None, help="embed this access key id (read-only keys only!)")
     ap.add_argument("--app-key", default=None, help="embed this secret key (read-only keys only!)")
-    ap.add_argument("--out", default=None, help="write the link here; dry-run if omitted")
+    ap.add_argument("--write", action="store_true", help="write the link to <dataset>/<name>.wsds-link")
+    ap.add_argument("--out", default=None, help="write the link to this exact path instead (overrides --write)")
     ap.add_argument("--sample", type=int, default=8, help="how many shards to validate against S3")
     args = ap.parse_args()
 
@@ -154,7 +144,7 @@ def main():
     print(f"shard refs from: {refs_source} ({len(refs)} shards)")
     ok = missing = 0
     for partition, shard in refs[: args.sample]:
-        key = build_key(prefix, partition, subdir, shard)
+        key = build_link_key(prefix, partition, subdir, shard)
         try:
             s3.head_object(Bucket=bucket, Key=key)
             ok += 1
@@ -168,16 +158,17 @@ def main():
     print("\n.wsds-link content:")
     print(json.dumps(link, indent=2))
 
-    if args.out:
+    out_path = Path(args.out) if args.out else (dataset / f"{name}.wsds-link" if args.write else None)
+    if out_path is not None:
         if missing:
             print(f"\nREFUSING to write: {missing} sampled shards did not resolve (prefix/partition mismatch?)")
             raise SystemExit(1)
-        Path(args.out).write_text(json.dumps(link, indent=2))
-        print(f"\nwrote {args.out}")
-        if Path(args.out).name != f"{name}.wsds-link":
+        out_path.write_text(json.dumps(link, indent=2))
+        print(f"\nwrote {out_path}")
+        if out_path.name != f"{name}.wsds-link":
             print(f"NOTE: recommended filename is {name}.wsds-link")
     else:
-        print(f"\n(dry run) place this JSON at <dataset_root>/{name}.wsds-link to activate")
+        print(f"\n(dry run) pass --write to place this JSON at {dataset / (name + '.wsds-link')}")
 
 
 if __name__ == "__main__":
