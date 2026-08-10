@@ -377,6 +377,10 @@ def merge_partition_indices(
         if merge_field_errors:
             errors.append((str(idx_file), "error merging fields", None, ", ".join(merge_field_errors)))
 
+    if not episode_idxs:
+        details = "; ".join(f"{path}: {msg}" for path, msg, _, _ in errors)
+        raise ValueError(f"no readable {spec.kind} episode extracts in {len(partitions)} partition(s): {details}")
+
     # vertical_relaxed coerces to a common supertype so a merge can combine cached
     # extracts written by different code versions (e.g. Float32 vs Float64 speech_duration)
     # without crashing; for same-version extracts the schemas match and this is a no-op.

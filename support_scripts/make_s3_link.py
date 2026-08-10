@@ -92,7 +92,8 @@ def main():
     args = ap.parse_args()
 
     u = urlparse(args.s3_url)
-    assert u.scheme == "s3", f"expected s3:// URL, got {args.s3_url}"
+    if u.scheme != "s3":
+        ap.error(f"expected s3:// URL, got {args.s3_url}")
     bucket = u.netloc
     key_path = u.path.strip("/")
     prefix, subdir = os.path.split(key_path)
