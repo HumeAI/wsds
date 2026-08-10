@@ -1,10 +1,10 @@
-import os
 import typing
 from typing import TYPE_CHECKING, Optional, Tuple
 
 from .pupyarrow.file_reader import ModalFileReader
 from .pupyarrow.pupyarrow import FeatherFile, LazyBinaryArray
 from .ws_decode import decode_sample
+from .ws_s3_shard import build_link_key
 from .ws_shard import WSShardInterface
 
 if TYPE_CHECKING:
@@ -29,8 +29,6 @@ class WSModalShard(WSShardInterface):
         self.batch_size = int(self._feather.schema.custom_metadata["batch_size"])
 
         # cache
-        self._start = None
-        self._end = None
         self._batch = None
 
     @classmethod
@@ -41,14 +39,7 @@ class WSModalShard(WSShardInterface):
         ``column_dir`` comes from the link spec (required when the volume mirrors the
         local dataset directory layout with per-column subdirectories)."""
         partition, shard = shard_ref
-        prefix = link.get("prefix", "")
-        column_dir = link.get("subdir", "")
-        parts = [p for p in (prefix, partition, column_dir, f"{shard}.wsds") if p]
-        path = os.path.normpath("/".join(parts))
-        # Strip leading "../" — partition is relative to the index but
-        # volume paths are absolute from the volume root.
-        while path.startswith("../"):
-            path = path[3:]
+        path = build_link_key(link.get("prefix", ""), partition, link.get("subdir", ""), shard)
         return cls(dataset, link["volume_name"], path, shard_ref=shard_ref)
 
     @classmethod
@@ -78,22 +69,20 @@ class WSModalShard(WSShardInterface):
     def _modal_path(self) -> str:
         return f"modal://{self.volume_name}/{self.path}"
 
+    def _num_batches(self) -> int:
+        return self._feather.num_record_batches
+
+    def _get_batch(self, index: int):
+        return self._feather.record_batch(index)
+
+    def _shard_name(self) -> str:
+        return self._modal_path()
+
     def get_sample(self, column: str, offset: int) -> typing.Any:
         if self._batch is None or offset < self._start or offset >= self._end:
-            i = offset // self.batch_size
-            if i >= self._feather.num_record_batches:
-                raise IndexError(f"{offset} is out of range for shard {self._modal_path()}")
-            self._batch = self._feather.record_batch(i)
-            if i < self._feather.num_record_batches - 1:
-                if self._batch.num_rows < self.batch_size:
-                    raise ValueError(
-                        f"Batch {i} in shard {self._modal_path()} is incomplete "
-                        f"(has only {self._batch.num_rows} rows instead of {self.batch_size})"
-                    )
-            self._start = i * self.batch_size
-            self._end = self._start + self.batch_size
+            self._batch = self._locate_batch(offset)
 
-        j = offset % self.batch_size
+        j = offset - self._start
         if j >= self._batch.num_rows:
             raise IndexError(f"{offset} is out of range for shard {self._modal_path()}")
         try:
