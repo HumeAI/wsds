@@ -103,6 +103,11 @@ class AudioDecoder:
             if self.reader.fill_buffer() == 1:
                 more_data = False
             (chunk,) = self.reader.pop_chunks()
+            # `pop_chunks` yields None when the buffer holds no complete frame,
+            # notably the final pop at EOF on an exact chunk boundary. The drain
+            # loop above treats None the same way.
+            if chunk is None:
+                continue
             chunks.append(chunk)
             if tend is not None:
                 chunk_end_pts = chunk.pts + chunk.shape[0] / self.sample_rate
