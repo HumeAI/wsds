@@ -249,10 +249,17 @@ class WSDataset:
     #
     # SQL support, using Polars
     #
-    def _parse_sql_queries_polars(self, *queries, shard_subsample=1, rng=None, shard_pipe=None):
+    def _parse_sql_queries_polars(
+        self, *queries, shard_subsample=1, rng=None, shard_pipe=None, key_column=None, shard_filter=None
+    ):
         """Parses SQL queries via Polars to:
         - extract the Polars expressions for each query
-        - use the expressions to build a list of column dirs to load shards from"""
+        - use the expressions to build a list of column dirs to load shards from
+
+        `key_column` anchors `__key__`/`__shard_path__`/`__shard_offset__` extraction
+        (and shard validation) to the column dir containing that column, without
+        reading the column itself. `shard_filter` restricts the scan to shards for
+        which `shard_filter((partition, shard_name))` is true."""
 
         column_dirs = defaultdict(list)
         exprs = []
@@ -286,15 +293,20 @@ class WSDataset:
             exprs.append(expr)
 
         # If only __key__ is in the query, we need to load shards from at least one column_dir
-        (key_column_dir, _column) = self.fields["__key__"][0]
-        if needed_special_columns:
-            if column_dirs:
+        if key_column is not None:
+            (key_column_dir, _column) = self.fields[key_column][0]
+        else:
+            (key_column_dir, _column) = self.fields["__key__"][0]
+            if needed_special_columns and column_dirs:
                 key_column_dir = list(column_dirs.keys())[0]
+        if needed_special_columns:
             column_dirs[key_column_dir] += needed_special_columns
 
         if rng is None:
             rng = self.rng
         shard_list = self.get_shard_list()
+        if shard_filter is not None:
+            shard_list = [s for s in shard_list if shard_filter(s)]
         if shard_subsample != 1:
             shard_list = rng.sample(shard_list, int(len(shard_list) * shard_subsample))
 
@@ -439,8 +451,14 @@ class WSDataset:
         shard_subsample=None,
         rng=42,
         shard_pipe=None,
+        key_column=None,
+        shard_filter=None,
     ) -> pl.DataFrame | pl.LazyFrame:
-        """Given a list of SQL expressions, returns a Polars DataFrame/ LazyFrame with the results."""
+        """Given a list of SQL expressions, returns a Polars DataFrame/ LazyFrame with the results.
+
+        `key_column` anchors `__key__` (and shard validation) to the column dir holding
+        that column — pass a column from a known-complete dir when others are in-progress.
+        `shard_filter((partition, shard_name)) -> bool` restricts which shards are scanned."""
         if isinstance(rng, int):
             rng = random.Random(rng)
         exprs, df = self._parse_sql_queries_polars(
@@ -448,6 +466,8 @@ class WSDataset:
             shard_subsample=self._check_for_subsampling(shard_subsample),
             rng=rng,
             shard_pipe=shard_pipe,
+            key_column=key_column,
+            shard_filter=shard_filter,
         )
 
         if return_as_lazyframe:

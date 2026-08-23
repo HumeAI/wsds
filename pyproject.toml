@@ -4,6 +4,10 @@ version = "0.2.0"
 requires-python = ">=3.10"
 dynamic = ["dependencies"]
 
+[project.optional-dependencies]
+# reading S3-backed shards (WSS3Shard / *.wsds-link files)
+s3 = ["boto3", "aiobotocore"]
+
 [project.scripts]
 wsds = "wsds.__main__:main"
 

@@ -6,7 +6,7 @@ from typing import TYPE_CHECKING, Optional, Tuple
 from urllib.parse import urlparse
 
 from .pupyarrow.file_reader import S3FileReader
-from .pupyarrow.pupyarrow import FeatherFile, LazyBinaryArray
+from .pupyarrow.pupyarrow import FeatherFile, LazyBinaryArray, LazyStringArray
 from .utils import WSShardMissingError
 from .ws_decode import decode_sample
 from .ws_shard import WSShardInterface
@@ -60,6 +60,18 @@ def create_s3_client(link=None):
     return client, ctx
 
 
+def build_link_key(prefix: str, partition: str, subdir: str, shard: str) -> str:
+    """Construct the storage key/path for a shard as link readers resolve it:
+    normpath(prefix / partition / subdir / <shard>.wsds) with leading "../"
+    stripped — partitions are relative to the index, but bucket/volume paths
+    are absolute from their root. Shared by WSS3Shard, WSModalShard and
+    support_scripts/make_s3_link.py (which validates the exact keys reads use).
+    """
+    parts = [p for p in (prefix, partition, subdir, f"{shard}.wsds") if p]
+    key = os.path.normpath("/" + "/".join(parts)).lstrip("/")
+    return key
+
+
 class WSS3Shard(WSShardInterface):
     """A shard reader that loads data from S3 via aiobotocore range requests.
 
@@ -84,8 +96,6 @@ class WSS3Shard(WSShardInterface):
         self.batch_size = int(self._feather.schema.custom_metadata["batch_size"])
 
         # cache
-        self._start = None
-        self._end = None
         self._batch = None
 
     @classmethod
@@ -110,12 +120,7 @@ class WSS3Shard(WSShardInterface):
     def from_link(cls, link, dataset, shard_ref):
         """Create an S3 shard from a link spec."""
         partition, shard = shard_ref
-        prefix = link.get("prefix", "")
-        column_dir = link.get("subdir", "")
-        parts = [p for p in (prefix, partition, column_dir, f"{shard}.wsds") if p]
-        # Prepend "/" so normpath collapses any initial ../ against the root,
-        # then strip it back off — S3 keys are relative to the bucket root.
-        key = os.path.normpath("/" + "/".join(parts)).lstrip("/")
+        key = build_link_key(link.get("prefix", ""), partition, link.get("subdir", ""), shard)
         s3_client, _ = create_s3_client(link)
         return cls(dataset, link["bucket"], key, shard_ref=shard_ref, s3_client=s3_client, presigned=link.get("presigned"))
 
@@ -142,22 +147,33 @@ class WSS3Shard(WSShardInterface):
     def _s3_path(self) -> str:
         return f"s3://{self.bucket}/{self.key}"
 
+    def _num_batches(self) -> int:
+        return self._feather.num_record_batches
+
+    def _get_batch(self, index: int):
+        return self._feather.record_batch(index)
+
+    def _shard_name(self) -> str:
+        return self._s3_path()
+
+    def _batch_row_counts(self) -> list[int]:
+        # one concurrent round of header reads instead of a sequential GET per batch
+        import asyncio
+
+        from .pupyarrow.file_reader import _get_io_loop
+
+        async def _fetch():
+            return await asyncio.gather(
+                *(self._feather.async_record_batch(i) for i in range(self._feather.num_record_batches))
+            )
+
+        return [b.num_rows for b in _get_io_loop().run(_fetch())]
+
     def get_sample(self, column: str, offset: int) -> typing.Any:
         if self._batch is None or offset < self._start or offset >= self._end:
-            i = offset // self.batch_size
-            if i >= self._feather.num_record_batches:
-                raise IndexError(f"{offset} is out of range for shard {self._s3_path()}")
-            self._batch = self._feather.record_batch(i)
-            if i < self._feather.num_record_batches - 1:
-                if self._batch.num_rows < self.batch_size:
-                    raise ValueError(
-                        f"Batch {i} in shard {self._s3_path()} is incomplete "
-                        f"(has only {self._batch.num_rows} rows instead of {self.batch_size})"
-                    )
-            self._start = i * self.batch_size
-            self._end = self._start + self.batch_size
+            self._batch = self._locate_batch(offset)
 
-        j = offset % self.batch_size
+        j = offset - self._start
         if j >= self._batch.num_rows:
             raise IndexError(f"{offset} is out of range for shard {self._s3_path()}")
         try:
@@ -165,6 +181,9 @@ class WSS3Shard(WSShardInterface):
         except KeyError:
             raise KeyError(f"column {column} not found in shard {self._s3_path()}")
         data = col[j]
+        if data is None or isinstance(col, LazyStringArray):
+            # nulls and string columns already materialize to Python values
+            return data
         try:
             if isinstance(col, LazyBinaryArray):
                 data._optimal_read_size = 2 * 1024 * 1024
