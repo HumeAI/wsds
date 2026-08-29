@@ -249,7 +249,7 @@ class WSDataset:
     #
     # SQL support, using Polars
     #
-    def _parse_sql_queries_polars(self, *queries, shard_subsample=1, rng=None, shard_pipe=None):
+    def _parse_sql_queries_polars(self, *queries, shard_subsample=1, rng=None, shard_pipe=None, parallel_collect=False):
         """Parses SQL queries via Polars to:
         - extract the Polars expressions for each query
         - use the expressions to build a list of column dirs to load shards from"""
@@ -372,6 +372,8 @@ class WSDataset:
                     f"No usable shards found (columns: {', '.join(column_dirs)}) for dataset in: {str(self.dataset_root)}"
                 )
 
+        if parallel_collect:
+            return exprs, pl.concat(pl.collect_all(row_merge)).lazy()
         return exprs, pl.concat(row_merge)
 
     def _build_multifile_plan(self, shards, column_dirs, exprs, key_column_dir, needs_shard_path):
@@ -439,6 +441,7 @@ class WSDataset:
         shard_subsample=None,
         rng=42,
         shard_pipe=None,
+        parallel_collect: bool = False,
     ) -> pl.DataFrame | pl.LazyFrame:
         """Given a list of SQL expressions, returns a Polars DataFrame/ LazyFrame with the results."""
         if isinstance(rng, int):
@@ -448,6 +451,7 @@ class WSDataset:
             shard_subsample=self._check_for_subsampling(shard_subsample),
             rng=rng,
             shard_pipe=shard_pipe,
+            parallel_collect=parallel_collect,
         )
 
         if return_as_lazyframe:
