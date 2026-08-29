@@ -93,7 +93,7 @@ class WSDSIndexWriter:
     def __exit__(self, exc_type, exc_value, traceback):
         if exc_type is None:
             self.conn.commit()
-            self.conn.close()
+        self.conn.close()
 
 
 class WSIndex:
@@ -111,6 +111,15 @@ class WSIndex:
         }
         self.has_partition = "partition" in columns
         self.has_dataset_path = "dataset_path" in columns
+
+    def close(self):
+        self.conn.close()
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc_value, traceback):
+        self.close()
 
     @functools.cached_property
     def n_shards(self):
