@@ -16,6 +16,14 @@ ASYNC_CACHE_MAX_BYTES = int(os.environ.get("WSDS_ASYNC_CACHE_MAX_BYTES", 8 * 102
 # Additional attempts after the initial presigned range request. Set to zero
 # when tail latency matters more than recovering transient S3 failures.
 S3_PRESIGNED_RETRIES = max(0, int(os.environ.get("WSDS_S3_PRESIGNED_RETRIES", 3)))
+# aiohttp otherwise defaults to a 300-second total request timeout, which is
+# also the DataLoader timeout used by AED.  One stuck S3 range request can
+# then make a healthy worker appear dead.  Keep each attempt bounded so the
+# retry policy can recover within the caller's deadline.
+S3_PRESIGNED_TIMEOUT_SECONDS = float(os.environ.get("WSDS_S3_PRESIGNED_TIMEOUT_SECONDS", 30))
+S3_PRESIGNED_CONNECT_TIMEOUT_SECONDS = float(
+    os.environ.get("WSDS_S3_PRESIGNED_CONNECT_TIMEOUT_SECONDS", 10)
+)
 VERBOSE = False
 
 PRESIGN_EXPIRES = 3600  # presigned URL lifetime (seconds)
@@ -264,7 +272,13 @@ async def _get_http_session():
     if entry is None or entry[1].closed:
         if not _http_sessions:
             atexit.register(_close_http_sessions)
-        session = aiohttp.ClientSession(connector=aiohttp.TCPConnector(limit=512))
+        session = aiohttp.ClientSession(
+            connector=aiohttp.TCPConnector(limit=512),
+            timeout=aiohttp.ClientTimeout(
+                total=S3_PRESIGNED_TIMEOUT_SECONDS,
+                connect=S3_PRESIGNED_CONNECT_TIMEOUT_SECONDS,
+            ),
+        )
         _http_sessions[id(loop)] = (loop, session)
         return session
     return entry[1]
