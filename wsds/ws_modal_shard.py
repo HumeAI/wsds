@@ -3,7 +3,7 @@ import typing
 from typing import TYPE_CHECKING, Optional, Tuple
 
 from .pupyarrow.file_reader import ModalFileReader
-from .pupyarrow.pupyarrow import FeatherFile, LazyBinaryArray
+from .pupyarrow.pupyarrow import FeatherFile, LazyBuffer
 from .ws_decode import decode_sample
 from .ws_shard import WSShardInterface
 
@@ -102,7 +102,8 @@ class WSModalShard(WSShardInterface):
             raise KeyError(f"column {column} not found in shard {self._modal_path()}")
         data = col[j]
         try:
-            if isinstance(col, LazyBinaryArray):
+            # string columns (incl. __key__) are LazyBinaryArrays too but yield plain `str`s
+            if isinstance(data, LazyBuffer):
                 data._optimal_read_size = 2 * 1024 * 1024
                 return decode_sample(column, data)
         except Exception as e:

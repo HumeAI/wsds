@@ -6,7 +6,7 @@ from typing import TYPE_CHECKING, Optional, Tuple
 from urllib.parse import urlparse
 
 from .pupyarrow.file_reader import S3FileReader
-from .pupyarrow.pupyarrow import FeatherFile, LazyBinaryArray
+from .pupyarrow.pupyarrow import FeatherFile, LazyBuffer
 from .utils import WSShardMissingError
 from .ws_decode import decode_sample
 from .ws_shard import WSShardInterface
@@ -166,7 +166,8 @@ class WSS3Shard(WSShardInterface):
             raise KeyError(f"column {column} not found in shard {self._s3_path()}")
         data = col[j]
         try:
-            if isinstance(col, LazyBinaryArray):
+            # string columns (incl. __key__) are LazyBinaryArrays too but yield plain `str`s
+            if isinstance(data, LazyBuffer):
                 data._optimal_read_size = 2 * 1024 * 1024
                 return decode_sample(column, data)
         except Exception as e:
