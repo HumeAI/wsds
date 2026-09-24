@@ -339,7 +339,7 @@ class WSS3Shard(WSShardInterface):
 
         return [b.num_rows for b in _get_io_loop().run(_fetch())]
 
-    def get_sample(self, column: str, offset: int) -> typing.Any:
+    def get_sample(self, column: str, offset: int, raw: bool = False) -> typing.Any:
         if self._batch is None or offset < self._start or offset >= self._end:
             self._batch = self._locate_batch(offset)
 
@@ -353,6 +353,8 @@ class WSS3Shard(WSShardInterface):
         data = col[j]
         if data is None or isinstance(col, LazyStringArray):
             # nulls and string columns already materialize to Python values
+            return data
+        if raw:
             return data
         try:
             if isinstance(col, LazyBinaryArray):

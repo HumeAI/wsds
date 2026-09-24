@@ -26,6 +26,8 @@ class WSAudioEpisode:
     src: typing.Any
     _decoder: typing.Any = None
     _sample_rate: int | None = None
+    _seek_index: typing.Any = None      # ws_seek_index.SeekIndex or None
+
     def __repr__(self):
         return f"WSAudioEpisode(src={type(self.src)}, sample_rate={self._sample_rate})"
 
@@ -42,6 +44,55 @@ class WSAudioEpisode:
 
     to_bytes = unwrap
 
+    def set_seek_index(self, index):
+        """Attach a precomputed SeekIndex (see wsds.ws_seek_index) so seeks skip the
+        expensive on-open work: `build_packet_index` for mp3/mp2/mp1 (which reads the WHOLE
+        episode -- the dominant deep-seek cost on a long podcast), the Ogg/Vorbis demuxer
+        bisection, and matroska-vorbis's read-from-start fallback (via the index's measured
+        pts_offset).
+
+        Usually there is no need to call this: WSSample.get_audio auto-attaches the dataset's
+        `<audio-col>.wsds_seek_index` column when present. Applied on the next decoder
+        (re)creation. An index whose indexing-time probe FAILED (SeekIndex.usable is False)
+        is kept for range planning but never fed to the decoder: the episode then reads from
+        the start, exactly as with no index."""
+        self._seek_index = index
+        if self._decoder is not None:
+            self._apply_seek_index()
+
+    def _apply_seek_index(self):
+        index, d = self._seek_index, self._decoder
+        if index is None or d is None or len(index) == 0 or not index.usable:
+            return
+        # Formats without a native seek table (ogg/vorbis, mp3/mp2/mp1) -> seed the demuxer's
+        # AVIndexEntry list (humecodec>=0.8) so timestamp seeks bracket the target via a
+        # known-correct entry instead of the demuxer's interpolating bisection (ogg) / CBR
+        # byte<->time estimate (mp3, badly wrong on VBR). For mp3 this also skips the on-open
+        # build_packet_index scan that reads the whole blob. Seeding is INCREMENTAL:
+        # set_seed_index just stores the index, and a small window of points near each
+        # requested seek target is added on demand (AudioDecoder._seed_around), so per-seek
+        # cost is O(window) regardless of episode length.
+        #
+        # mp4/mov (aac/alac) are SKIPPED: the moov already carries a full sample table, so
+        # seeding is redundant AND each av_add_index_entry is an O(n) sorted insert against
+        # its millions of native entries (a 36 h aac took 41 s for 16k points). Native mp4
+        # seeking is already fast; the index still serves range planning for mp4.
+        # Matroska/webm carry cues: seeding them lands seeks 130-880 ms LATE (measured), so
+        # they are never seeded either; a measured pts_offset is all vorbis-in-matroska needs.
+        codec = getattr(getattr(d, "metadata", None), "codec", "") or ""
+        if getattr(d, "_in_matroska", False):
+            # matroska/webm, ANY codec: never seed (cross-checked on webm/opus: a seeded seek
+            # landed 880 ms late). The only thing the index contributes is the measured pts
+            # offset for undeclared vorbis priming.
+            if getattr(d, "_matroska_vorbis", False) and index.pts_offset is not None and hasattr(d, "set_pts_offset"):
+                d.set_pts_offset(index.pts_offset)
+        elif codec in ("mp3", "mp2", "mp1"):
+            if hasattr(d, "set_seed_index"):
+                d.set_seed_index(index)
+        elif (codec in ("vorbis", "opus") and hasattr(d, "set_seed_index")
+              and not getattr(d, "_seek_unreliable", False)):
+            d.set_seed_index(index)                       # ogg: no container index, seeding replaces bisection
+
     def get_decoder(self, sample_rate=None):
         """Lazily creates/caches decoder via audio_codec.create_decoder()."""
         requested_sr = sample_rate or (self._decoder and self._decoder.metadata.sample_rate)
@@ -49,6 +100,7 @@ class WSAudioEpisode:
             self.src.seek(0)
             self._decoder = create_decoder(self.src, sample_rate=sample_rate)
             self._sample_rate = sample_rate or self._decoder.metadata.sample_rate
+            self._apply_seek_index()
         return self._decoder, self._sample_rate
 
     @property

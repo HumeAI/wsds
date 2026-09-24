@@ -24,7 +24,29 @@ class WSSample:
     _reference_key: list = field(default_factory=list, repr=False, compare=False)
 
     def get_audio(self, audio_columns=None):
-        return _get_audio(self, audio_columns)
+        audio = _get_audio(self, audio_columns)
+        # First-class seek index: when the dataset carries a sibling `<audio-col>.wsds_seek_index`
+        # column, attach it so every consumer gets fast, accurate seeks without extra plumbing.
+        # The attach is zero-copy views + a few scalars once per episode open.
+        for index_field in self.dataset.fields:
+            if index_field.endswith(".wsds_seek_index"):
+                ep = getattr(audio, "episode", audio)   # WSAudioSegment wraps the episode
+                if hasattr(ep, "set_seek_index"):
+                    index = self.get_seek_index(index_field)
+                    if index is not None:
+                        ep.set_seek_index(index)
+                break
+        return audio
+
+    def get_seek_index(self, field="audio.wsds_seek_index"):
+        """This sample's audio SeekIndex (see wsds.ws_seek_index), or None when the column is
+        absent, empty, or not in the canonical schema."""
+        from .ws_seek_index import SeekIndex
+
+        try:
+            return SeekIndex.from_struct(self.get_raw(field))
+        except Exception:
+            return None
 
     def keys(self):
         return self.dataset.fields.keys() | (self.overrides.keys() if self.overrides else set())
@@ -89,6 +111,15 @@ class WSSample:
             return self.overrides[field]
         self._verify_key_for_field(field)
         return self.dataset.get_sample(self.shard_ref, field, self.offset)
+
+    def get_raw(self, field):
+        """The RAW pyarrow scalar for `field`, skipping the as_py()/decode conversion that
+        `__getitem__` applies. For trusted internal consumers that want zero-copy
+        numeric/struct access (e.g. `.values.to_numpy()`) instead of Python objects."""
+        if field in self.overrides:
+            return self.overrides[field]
+        self._verify_key_for_field(field)
+        return self.dataset.get_sample(self.shard_ref, field, self.offset, raw=True)
 
     def __setitem__(self, field, value):
         self.overrides[field] = value

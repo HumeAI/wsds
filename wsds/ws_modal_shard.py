@@ -78,7 +78,7 @@ class WSModalShard(WSShardInterface):
     def _shard_name(self) -> str:
         return self._modal_path()
 
-    def get_sample(self, column: str, offset: int) -> typing.Any:
+    def get_sample(self, column: str, offset: int, raw: bool = False) -> typing.Any:
         if self._batch is None or offset < self._start or offset >= self._end:
             self._batch = self._locate_batch(offset)
 
@@ -90,6 +90,8 @@ class WSModalShard(WSShardInterface):
         except KeyError:
             raise KeyError(f"column {column} not found in shard {self._modal_path()}")
         data = col[j]
+        if raw:
+            return data
         try:
             if isinstance(col, LazyBinaryArray):
                 data._optimal_read_size = 2 * 1024 * 1024
