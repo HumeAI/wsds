@@ -333,6 +333,9 @@ def _validate_shard_chunk(args):
     return [item for sub in results for item in sub]
 
 
+_VALIDATED_MAX = int(os.environ.get("WSDS_VALIDATED_MAX", "256"))
+
+
 def validate_shards(
     dataset: "WSDataset",
     shards: list[tuple[str, str]],
@@ -355,6 +358,11 @@ def validate_shards(
 
     cache_key = tuple(sorted(actual_column_dirs))
     cache: set = dataset._validated_shards.setdefault(cache_key, set())
+    # One entry per shard ref ever touched: unbounded over a long run (a loader visits ~1k
+    # shards/h, ~250 B each). Validation only has to be remembered while a shard is being read
+    # and it only saves an ARROW1 magic check, so forgetting the cold end costs one re-check.
+    if len(cache) > _VALIDATED_MAX:
+        cache.clear()
     pending = [s for s in shards if s not in cache]
     if not pending:
         return [(s, True) for s in shards]
