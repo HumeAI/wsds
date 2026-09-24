@@ -1,5 +1,6 @@
 import doctest
 import json
+import os
 import tempfile
 import unittest
 from pathlib import Path
@@ -7,6 +8,162 @@ from pathlib import Path
 import wsds
 from wsds import audio_codec, ws_audio, ws_dataset, ws_shard, ws_sink
 from wsds.ws_sample import WSSample  # noqa: F401
+
+
+class _FakeObject:
+    """An in-memory 'remote object' standing in for S3: counts range reads."""
+
+    def __init__(self, data):
+        self.data = data
+        self.reads = []          # (offset, length)
+
+    def reader(self):
+        from wsds.pupyarrow.file_reader import FileReader
+
+        obj = self
+
+        class _R(FileReader):
+            def _raw_read(self, offset, length):
+                obj.reads.append((offset, length))
+                return obj.data[offset : offset + length]
+
+            def _raw_read_end(self, n):
+                obj.reads.append((len(obj.data) - n, n))
+                return obj.data[-n:]
+
+        return _R()
+
+
+class BlockCacheTest(unittest.TestCase):
+    """CachedFileReader over a fake backend: what is fetched, what is served locally."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.root = self._tmp.name
+        import numpy as np
+        rng = np.random.default_rng(0)
+        self.blob = rng.integers(0, 256, 5 * 128 * 1024 + 12345, dtype=np.uint8).tobytes()   # 5.09 blocks
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def _reader(self, obj, name="p/audio/x.wsds"):
+        from wsds.pupyarrow.file_reader import CachedFileReader
+
+        return CachedFileReader(obj.reader, lambda: len(obj.data), self.root, name)
+
+    def test_cold_read_fetches_one_coalesced_range_then_serves_locally(self):
+        from wsds.pupyarrow.block_cache import SLOT, drain_writes
+
+        obj = _FakeObject(self.blob)
+        r = self._reader(obj)
+        got = r.read(SLOT + 100, 2 * SLOT)                # spans blocks 1..3 -> ONE fetch of 3 blocks
+        self.assertEqual(got, self.blob[SLOT + 100 : SLOT + 100 + 2 * SLOT])
+        self.assertEqual(r.fetches, 1)
+        self.assertEqual(obj.reads, [(SLOT, 3 * SLOT)])
+        drain_writes()
+        r2 = self._reader(obj)                            # a new reader (another worker/process)
+        self.assertEqual(r2.read(SLOT + 100, 2 * SLOT), got)
+        self.assertEqual(r2.fetches, 0)                   # served from the mirror
+        self.assertEqual(len(obj.reads), 1)
+        self.assertEqual(r2.read(0, 10), self.blob[:10])  # block 0 is still a miss
+        self.assertEqual(r2.fetches, 1)
+        r.close()
+        r2.close()
+
+    def test_read_end_and_size_from_footer(self):
+        from wsds.pupyarrow.block_cache import drain_writes
+
+        obj = _FakeObject(self.blob)
+        r = self._reader(obj)
+        self.assertEqual(r.read_end(-6, 6), self.blob[-6:])
+        drain_writes()
+        sizes = []
+        r2 = self._reader(_FakeObject(self.blob))
+        r2._size_fn_impl = lambda: sizes.append(1) or len(self.blob)
+        self.assertEqual(r2.read_end(-6, 6), self.blob[-6:])
+        self.assertEqual(sizes, [])                       # size came from the mirror footer, no HEAD
+        self.assertEqual(r2.fetches, 0)
+        r.close()
+        r2.close()
+
+    def test_inner_reader_is_never_built_when_mirrored(self):
+        from wsds.pupyarrow.block_cache import SLOT, drain_writes
+
+        obj = _FakeObject(self.blob)
+        r = self._reader(obj)
+        r.read(0, SLOT)
+        drain_writes()
+        r.close()
+        built = []
+        from wsds.pupyarrow.file_reader import CachedFileReader
+        r2 = CachedFileReader(lambda: built.append(1) or obj.reader(), lambda: len(obj.data), self.root, "p/audio/x.wsds")
+        self.assertEqual(r2.read(10, 100), self.blob[10:110])
+        self.assertEqual(built, [])
+        r2.close()
+
+    def test_mirror_layout_and_eviction_scan(self):
+        from wsds.cache_evict import scan_cache
+        from wsds.pupyarrow.block_cache import EXT, SLOT, drain_writes
+
+        obj = _FakeObject(self.blob)
+        r = self._reader(obj, name="delivery/x_batch_0/source/audio/shard_1.wsds")
+        r.read(2 * SLOT, 10)
+        drain_writes()
+        path = os.path.join(self.root, "delivery/x_batch_0/source/audio/shard_1.wsds" + EXT)
+        self.assertTrue(os.path.exists(path))
+        [(name, p, present)] = scan_cache(self.root)
+        self.assertEqual((name, present), ("delivery/x_batch_0/source/audio/shard_1.wsds", {2}))
+        r.close()
+
+    def test_async_reads_await_misses(self):
+        """The async path (what FeatherFile.async_record_batch / a gathered batch scan uses):
+        misses are awaited on the inner reader's async impl, never parked on a thread; hits
+        never build the inner reader at all."""
+        import asyncio
+
+        from wsds.pupyarrow.block_cache import SLOT, drain_writes
+        from wsds.pupyarrow.file_reader import CachedFileReader, FileReader
+
+        obj = _FakeObject(self.blob)
+        calls = []
+
+        class _AsyncInner(FileReader):
+            async def _async_read_impl(self, offset, length):
+                calls.append((offset, length))
+                await asyncio.sleep(0)
+                return obj.data[offset : offset + length]
+
+            def _raw_read(self, offset, length):          # must not be used by the async path
+                raise AssertionError("sync read on the async path")
+
+        built = []
+        r = CachedFileReader(lambda: built.append(1) or _AsyncInner(), lambda: len(obj.data), self.root, "p/audio/y.wsds")
+
+        async def scan():                                   # many concurrent misses, like a batch scan
+            return await asyncio.gather(*(r.async_read(k * SLOT, 100) for k in range(5)))
+
+        got = asyncio.run(scan())
+        self.assertEqual(got, [self.blob[k * SLOT : k * SLOT + 100] for k in range(5)])
+        self.assertEqual(len(calls), 5)
+        self.assertEqual(built, [1])
+        drain_writes()
+        r2 = CachedFileReader(lambda: built.append(1) or _AsyncInner(), lambda: len(obj.data), self.root, "p/audio/y.wsds")
+        self.assertEqual(asyncio.run(r2.async_read(2 * SLOT + 7, 50)), self.blob[2 * SLOT + 7 : 2 * SLOT + 57])
+        self.assertEqual(built, [1])                        # a hit: inner never built
+        self.assertEqual(r2.fetches, 0)
+        r.close()
+        r2.close()
+
+    def test_cached_s3_reader_compat_surface(self):
+        from wsds.pupyarrow.file_reader import CachedS3FileReader, mirror_name
+
+        self.assertEqual(mirror_name("b", "/d/x.wsds"), "d/x.wsds")
+        self.assertEqual(mirror_name("b", "d/x.wsds", flat=False), "b/d/x.wsds")
+        r = CachedS3FileReader(object(), "bucket", "d/x.wsds", self.root, name="p/audio/x.wsds")
+        self.assertEqual((r._bucket, r._key, r._name, r.block_cache.root), ("bucket", "d/x.wsds", "p/audio/x.wsds", self.root))
+        self.assertIsNone(r._inner)                        # no S3 reader until a miss
+
 
 
 def _write_shard(path, keys, **columns):

@@ -225,7 +225,13 @@ class FileReader:
         return await asyncio.get_event_loop().run_in_executor(None, self._raw_read, offset, length)
 
     def close(self):
-        pass
+        """Release the read caches. The forward cache holds max(request, BLOCK_SIZE) bytes and the
+        tail cache the same again, so a closed reader that some caller still references must not
+        keep them alive (a training loader raises BLOCK_SIZE to 512 KB: 1 MB per reader)."""
+        self._fwd_data = b""
+        self._tail_data = b""
+        self._fwd_start = 0
+        self._cache.clear()
 
 
 class LocalFileReader(FileReader):
@@ -233,7 +239,8 @@ class LocalFileReader(FileReader):
 
     def __init__(self, path: str | Path):
         super().__init__()
-        self._fd = os.open(str(path), os.O_RDONLY)
+        self.path = str(path)
+        self._fd = os.open(self.path, os.O_RDONLY)
 
     def _raw_read(self, offset: int, length: int) -> bytes:
         return os.pread(self._fd, length, offset)
@@ -243,7 +250,10 @@ class LocalFileReader(FileReader):
         return os.pread(self._fd, n, max(size - n, 0))
 
     def close(self):
-        os.close(self._fd)
+        super().close()
+        if self._fd is not None:
+            os.close(self._fd)
+            self._fd = None
 
 
 # Shared aiohttp sessions for presigned reads, one per event loop (a session
@@ -412,6 +422,192 @@ class S3FileReader(FileReader):
         return _get_io_loop().run(self._async_read_end(n))
 
 
+def mirror_name(bucket: str, key: str, flat: bool = True) -> str:
+    """Cache-mirror name (without the .sparse extension) for an S3 object. The mirror keeps
+    the object's key path, so shards that share a basename across deliveries/batches
+    (common: `shard_<id>_<lang>_<n>_audio` restarts per delivery) never share a mirror, and
+    the cache tree reads like the bucket: <root>/<delivery>/<lang>_batch_N/source/audio/<shard>.wsds.sparse.
+    Non-flat additionally prefixes the bucket (one tree serving several buckets)."""
+    key = key.lstrip("/")
+    return key if flat else f"{bucket}/{key}"
+
+
+class CachedFileReader(FileReader):
+    """Read-through block cache in front of ANY FileReader (block_cache.BlockCache).
+
+    Bytes are served from a local sparse mirror `<cache_root>/<name>.sparse` when present;
+    a miss fetches ONE coalesced range from the inner reader (a run of missing 128 KiB
+    blocks -> one ranged GET), returns it, and persists the blocks in the background so
+    the next reader of the same object -- in this process, another worker, or another
+    node -- finds them on disk. The inner reader is built lazily by `inner_factory`, so an
+    object whose working set is already mirrored never opens a connection at all.
+
+    `size_fn` gives the object's length (a HEAD request for S3); it is consulted only
+    when the mirror does not exist yet -- afterwards the mirror's footer has it.
+
+    Sizing/eviction is out of band: the cache root is bounded by `wsds.cache_evict`
+    (LRU over the per-worker access logs written to `logdir`, if given)."""
+
+    _RETRY_TRIES = 4
+    _RETRY_BACKOFF = (0.5, 2.0, 6.0)
+
+    def __init__(self, inner_factory, size_fn, cache_root: str, name: str, logdir: str | None = None):
+        super().__init__()
+        from .block_cache import get_block_cache
+
+        self._inner_factory = inner_factory
+        self._inner = None
+        self._size_fn_impl = size_fn
+        self._name = name
+        self.block_cache = get_block_cache(cache_root, logdir=logdir)
+        self._size = None
+        self._mirror = None  # this reader OWNS the mirror fd; it closes when the reader is dropped
+        self.fetches = 0     # backend range requests actually issued (misses after coalescing)
+        self.fetch_bytes = 0
+
+    @property
+    def inner(self) -> FileReader:
+        if self._inner is None:
+            self._inner = self._inner_factory()
+        return self._inner
+
+    def _mirror_handle(self):
+        """Open this reader's mirror once, on first use, and keep it for the reader's lifetime."""
+        m = self._mirror
+        if m is None:
+            m = self._mirror = self.block_cache.open_mirror(self._name, self._size_fn)
+        return m
+
+    def _size_fn(self) -> int:
+        return int(self._size_fn_impl())
+
+    def _fetch_range(self, start: int, nbytes: int) -> bytes:
+        """One backend range read, with retries. Object stores drop streams mid-body now and
+        then (IncompleteRead, connection resets); without a retry one such drop killed a
+        DataLoader worker. After the last attempt the error is re-raised as OSError so
+        per-sample guards can skip the item."""
+        last = None
+        for i in range(self._RETRY_TRIES):
+            try:
+                data = self.inner._raw_read(start, nbytes)
+                self.fetches += 1
+                self.fetch_bytes += len(data)
+                return data
+            except Exception as e:  # botocore/aiohttp streaming + socket errors
+                last = e
+                name = type(e).__name__
+                if not any(k in name for k in ("Streaming", "IncompleteRead", "Connection", "Protocol",
+                                                 "Timeout", "EndpointConnection", "ReadTimeout", "SSLError",
+                                                 "ServerDisconnected", "Payload")):
+                    raise
+                if i < self._RETRY_TRIES - 1:
+                    time.sleep(self._RETRY_BACKOFF[i])
+        raise OSError(f"range fetch failed after {self._RETRY_TRIES} tries ({self._name} "
+                      f"[{start}, {start + nbytes})): {type(last).__name__}: {str(last)[:120]}")
+
+    def _get_size(self) -> int:
+        if self._size is None:
+            self._size = self.block_cache.object_size(self._mirror_handle())
+        return self._size
+
+    def _raw_read(self, offset: int, length: int) -> bytes:
+        return self.block_cache.read_range(self._mirror_handle(), offset, length, self._fetch_range)
+
+    def _raw_read_end(self, n: int) -> bytes:
+        size = self._get_size()
+        start = max(0, size - n)
+        return self.block_cache.read_range(self._mirror_handle(), start, size - start, self._fetch_range)
+
+    # -- async path (FeatherFile.async_record_batch, LazyBuffer.async_*): misses are awaited ----
+    async def _async_fetch_range(self, start: int, nbytes: int) -> bytes:
+        last = None
+        for i in range(self._RETRY_TRIES):
+            try:
+                data = await self.inner._async_read_impl(start, nbytes)
+                self.fetches += 1
+                self.fetch_bytes += len(data)
+                return data
+            except Exception as e:
+                last = e
+                name = type(e).__name__
+                if not any(k in name for k in ("Streaming", "IncompleteRead", "Connection", "Protocol",
+                                                 "Timeout", "EndpointConnection", "ReadTimeout", "SSLError",
+                                                 "ServerDisconnected", "Payload")):
+                    raise
+                if i < self._RETRY_TRIES - 1:
+                    await asyncio.sleep(self._RETRY_BACKOFF[i])
+        raise OSError(f"range fetch failed after {self._RETRY_TRIES} tries ({self._name} "
+                      f"[{start}, {start + nbytes})): {type(last).__name__}: {str(last)[:120]}")
+
+    async def _async_read_impl(self, offset: int, length: int) -> bytes:
+        loop = asyncio.get_running_loop()
+        # One-off, blocking setup (the object-size HEAD when creating a mirror; the client build
+        # when opening the inner reader) goes through _IOLoop.run and so cannot run ON the loop:
+        # do it on a worker thread, once, while the loop keeps serving. The inner reader is only
+        # built when this read actually misses.
+        if self._mirror is None:
+            await loop.run_in_executor(None, self._mirror_handle)
+        if self._inner is None and not self.block_cache.covers(self._mirror, offset, length):
+            await loop.run_in_executor(None, lambda: self.inner)
+        return await self.block_cache.async_read_range(self._mirror, offset, length, self._async_fetch_range)
+
+    def close(self):
+        """Drop the read caches (base), this reader's mirror handle (its fd closes with it) and
+        the inner reader, if one was ever opened."""
+        super().close()
+        self._mirror = None
+        self._size = None
+        inner, self._inner = self._inner, None
+        if inner is not None:
+            try:
+                inner.close()
+            except Exception:
+                pass
+
+
+class CachedS3FileReader(CachedFileReader):
+    """S3FileReader behind the block-sparse cache: `CachedS3FileReader(client, bucket, key,
+    cache_root)`. The object size comes from one HEAD request the first time a mirror is
+    created; the S3 reader itself is only built on the first miss.
+
+    `name` is the mirror path relative to `cache_root` (default `mirror_name(bucket, key, flat)`);
+    WSS3Shard passes the dataset's own column layout, <partition>/<subdir>/<shard>.wsds, so the
+    mirror sits next to the partition's other column shards (and next to a full local copy)."""
+
+    def __init__(self, client, bucket: str, key: str, cache_root: str, logdir: str | None = None,
+                 flat: bool = True, *, name: str | None = None, presigned: bool | None = None):
+        self._client = client
+        self._bucket = bucket
+        self._key = key
+        super().__init__(
+            lambda: S3FileReader(self.client, bucket, key, presigned=presigned),
+            self._head_size,
+            cache_root,
+            name if name is not None else mirror_name(bucket, key, flat),
+            logdir=logdir,
+        )
+
+    @property
+    def client(self):
+        """The real S3 client. A lazy handle (ws_s3_shard._LazyS3Client) is resolved HERE, on the
+        caller's thread: resolving it builds the client through the IO loop, which must not
+        happen from inside a coroutine already running on that loop."""
+        mat = getattr(self._client, "_materialise", None)
+        if mat is not None:
+            self._client = mat()
+        return self._client
+
+    def _head_size(self) -> int:
+        client = self.client
+
+        async def _head():
+            res = client.head_object(Bucket=self._bucket, Key=self._key)
+            res = await res if inspect.isawaitable(res) else res   # aiobotocore or boto3 client
+            return int(res["ContentLength"])
+
+        return _get_io_loop().run(_head())
+
+
 class _IOLoop:
     """A persistent event loop running on a dedicated daemon thread.
 
@@ -426,6 +622,11 @@ class _IOLoop:
 
     def run(self, coro):
         """Submit *coro* to the background loop and block until it completes."""
+        if threading.current_thread() is self._thread:
+            # Blocking on a future that can only complete on THIS thread would hang forever
+            # (e.g. building an S3 client from inside a read coroutine). Fail loudly instead.
+            coro.close()
+            raise RuntimeError("_IOLoop.run() called from the IO loop thread: await the coroutine instead")
         future = asyncio.run_coroutine_threadsafe(coro, self._loop)
         return future.result()
 

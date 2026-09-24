@@ -20,6 +20,13 @@ class WSShardInterface:
     shard_ref: (str, str)
     """Used by WSDataset to invalidate cached shards."""
 
+    def close(self):
+        """Release whatever this shard owns (reader, fds, decoder). Default: nothing.
+
+        WSDataset.close() and shard eviction call close() on every cached shard, so a shard
+        class must never lack it; a pure proxy (WSSourceLink, WSSourceAudioShard) inherits the
+        no-op, a shard that owns a reader (WSShard, WSS3Shard) overrides it."""
+
     @classmethod
     def get_columns(cls, link: dict, dataset: "WSDataset") -> dict[str, str] | None:
         """Return columns this link provides: {column_name: column_name}.

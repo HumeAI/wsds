@@ -6,7 +6,7 @@ import typing
 from typing import TYPE_CHECKING, Optional, Tuple
 from urllib.parse import urlparse
 
-from .pupyarrow.file_reader import S3FileReader
+from .pupyarrow.file_reader import CachedS3FileReader, LocalFileReader, S3FileReader
 from .pupyarrow.pupyarrow import FeatherFile, LazyBinaryArray, LazyStringArray
 from .utils import WSShardMissingError
 from .ws_decode import decode_sample
@@ -115,31 +115,157 @@ def build_link_key(prefix: str, partition: str, subdir: str, shard: str) -> str:
     return key
 
 
+class _LazyS3Client:
+    """Stands in for an S3 client; materialises the real one (create_s3_client, shared per
+    process and endpoint/credentials) on first use.
+
+    Attribute access is the trigger, so `client.get_object(...)`, `client.exceptions.ClientError`
+    and friends all work unchanged, while a shard whose bytes are all local -- a full .wsds copy
+    or a fully populated cache mirror -- never builds one. Resolve it on a normal thread: building
+    the client goes through the IO loop, so touching the handle from a coroutine on that loop
+    deadlocks (CachedS3FileReader.client and the tier-3 path below do this). Building a client is the dominant cost
+    of opening a cached shard otherwise (SSL context + connection pool, seconds the first time in
+    a process, milliseconds after) and every client retained by a reader is ~0.3 MB.
+    """
+    __slots__ = ("_link", "_client")
+
+    def __init__(self, link=None):
+        self._link = dict(link or {})
+        self._client = None
+
+    def _materialise(self):
+        if self._client is None:
+            self._client, _ = create_s3_client(self._link)
+        return self._client
+
+    def __getattr__(self, name):                  # only for names not in __slots__
+        return getattr(self._materialise(), name)
+
+    def __reduce__(self):                         # picklable: rebuild the handle, not the client
+        return (_LazyS3Client, (self._link,))
+
+
 class WSS3Shard(WSShardInterface):
     """A shard reader that loads data from S3 via aiobotocore range requests.
 
     Uses pupyarrow's FeatherFile with an S3FileReader so that only the
     IPC footer and the specific batch(es) needed are fetched, rather than
-    downloading the entire shard file."""
+    downloading the entire shard file.
 
-    def __init__(self, dataset: "WSDataset", bucket: str, key: str, shard_ref: Optional[Tuple[str, str]]=None, s3_client=None, presigned: Optional[bool]=None):
+    Three tiers, decided per shard at open (see _resolve_cache):
+      1. a FULL local .wsds at the shard's own column path under the dataset root is always
+         preferred (free and always correct);
+      2. with `"cache": true` in the .wsds-link, a block-sparse mirror next to it
+         (<path>.sparse) serves cached blocks locally and fills misses from S3;
+      3. otherwise plain S3 range requests.
+    """
+
+    def __init__(self, dataset: "WSDataset", bucket: str, key: str, shard_ref: Optional[Tuple[str, str]]=None,
+                 s3_client=None, presigned: Optional[bool]=None, cache: Optional[dict]=None):
         self.dataset = dataset
         self.shard_ref = shard_ref
         self.bucket = bucket
         self.key = key
+        # Read-through cache config (see _resolve_cache). from_link resolves it from the
+        # .wsds-link `cache` field.
+        self._cache = cache if cache is not None else self._resolve_cache({}, dataset)
 
-        if s3_client is None:
-            s3_client, _ = create_s3_client()
-
-        self._reader = S3FileReader(s3_client, bucket, key, presigned=presigned)
-        try:
+        self._local_path = self._find_local_shard(dataset, key, self._cache.get("subdir", "audio"), shard_ref)
+        if self._local_path is not None:
+            self._reader = LocalFileReader(self._local_path)          # tier 1: full local shard
             self._feather = FeatherFile(self._reader)
-        except s3_client.exceptions.ClientError as err:
-            raise WSShardMissingError.from_s3(s3_client, key, bucket, err)
+        else:
+            # WSDS_SKIP_S3=1: refuse ALL S3 access with a ValueError (a training pipeline's
+            # per-sample skip handles it) -- when set we would rather error out than incur S3
+            # latency for shards with no local copy.
+            if os.environ.get("WSDS_SKIP_S3"):
+                raise ValueError(f"S3 access disabled (WSDS_SKIP_S3): s3://{bucket}/{key}")
+            if s3_client is None:
+                s3_client = _LazyS3Client()          # built only if a byte actually misses
+            root = self._cache.get("root")
+            if root:
+                # tier 2: mirror = the shard's own column path, <partition>/<subdir>/<shard>.wsds.sparse
+                self._reader = CachedS3FileReader(s3_client, bucket, key, root, logdir=self._cache.get("logdir"),
+                                                  name=self._shard_relpath(key, self._cache.get("subdir", "audio"), shard_ref),
+                                                  presigned=presigned)
+            else:
+                # tier 3: cold S3. S3FileReader uses the client inside coroutines on the IO loop,
+                # where a lazy handle cannot be resolved (see _LazyS3Client): resolve it now.
+                if isinstance(s3_client, _LazyS3Client):
+                    s3_client = s3_client._materialise()
+                self._reader = S3FileReader(s3_client, bucket, key, presigned=presigned)
+            try:
+                self._feather = FeatherFile(self._reader)
+            except s3_client.exceptions.ClientError as err:
+                raise WSShardMissingError.from_s3(s3_client, key, bucket, err)
         self.batch_size = int(self._feather.schema.custom_metadata["batch_size"])
 
         # cache
         self._batch = None
+
+    @staticmethod
+    def _resolve_cache(link, dataset):
+        """Effective read-through cache config. Declarative and OPINIONATED:
+        `"cache": true` in the .wsds-link is the only switch, everything else follows
+        the dataset's normal column layout (symlink pieces elsewhere if the bytes must
+        live on another volume):
+
+          - the audio column of a shard lives where every other column of that shard
+            lives: <dataset_root>/<partition>/<subdir>/<shard>.wsds (`subdir` is the
+            column dir the .wsds-link names, default "audio"; partition is "" for
+            unpartitioned datasets, giving the plain <dataset_root>/audio/<shard>.wsds);
+          - tier 1: a FULL local shard at that path is ALWAYS preferred, cache on or off;
+          - tier 2: the block-sparse mirror is that same path + ".sparse", i.e. it sits
+            next to the partition's metadata shards. Extensions differ, so eviction
+            (globs *.sparse) and tier-1 (looks at .wsds) never confuse the two, and
+            shard names that repeat across partitions never collide;
+          - access logs live at <dataset_root>/<subdir>/.access (the eviction
+            service consumes them; point it at the dataset base to see all partitions).
+        """
+        subdir = link.get("subdir") or "audio"
+        if not link.get("cache"):
+            return {"subdir": subdir}                    # block cache off; tier 1 still applies
+        droot = WSS3Shard._dataset_root(dataset)
+        if not droot:
+            return {"subdir": subdir}
+        return {"subdir": subdir, "root": droot, "logdir": os.path.join(droot, subdir, ".access")}
+
+    @staticmethod
+    def _dataset_root(dataset):
+        root = getattr(dataset, "dataset_root", None)
+        return str(root) if root else None
+
+    @staticmethod
+    def _shard_relpath(key, subdir="audio", shard_ref=None):
+        """The shard's audio column path relative to the dataset root:
+        <partition>/<subdir>/<shard>.wsds (partition may climb with `..`, as index dirs
+        such as indices/source reference ../../<delivery>/<batch>/source)."""
+        partition, shard = shard_ref if shard_ref else ("", os.path.basename(key)[:-5])
+        return os.path.normpath(os.path.join(partition or "", subdir, f"{shard}.wsds"))
+
+    @staticmethod
+    def _find_local_shard(dataset, key, subdir="audio", shard_ref=None):
+        """Resolve a full local .wsds shard for this S3 key, or None: the shard's own
+        column path <dataset_root>/<partition>/<subdir>/<shard>.wsds (see _resolve_cache)."""
+        root = WSS3Shard._dataset_root(dataset)
+        if not root:
+            return None
+        cand = os.path.join(root, WSS3Shard._shard_relpath(key, subdir, shard_ref))
+        return cand if os.path.exists(cand) else None
+
+    def close(self):
+        """Release this shard's reader: its read buffers, its sparse-mirror fd and the S3
+        reader if one was opened. Without it, evicting a shard from the open-shard cache
+        frees nothing (measured: +58 MB per 1000 crops of retained read buffers)."""
+        r = getattr(self, "_reader", None)
+        self._reader = None
+        self._feather = None
+        self._batch = None
+        if r is not None:
+            try:
+                r.close()
+            except Exception:
+                pass
 
     @classmethod
     def from_s3_url(cls, dataset: "WSDataset", url: str, shard_ref: Optional[Tuple[str, str]]=None, s3_client=None):
@@ -164,8 +290,9 @@ class WSS3Shard(WSShardInterface):
         """Create an S3 shard from a link spec."""
         partition, shard = shard_ref
         key = build_link_key(link.get("prefix", ""), partition, link.get("subdir", ""), shard)
-        s3_client, _ = create_s3_client(link)
-        return cls(dataset, link["bucket"], key, shard_ref=shard_ref, s3_client=s3_client, presigned=link.get("presigned"))
+        s3_client = _LazyS3Client(link)   # a local or fully mirrored shard never builds a client
+        return cls(dataset, link["bucket"], key, shard_ref=shard_ref, s3_client=s3_client,
+                   presigned=link.get("presigned"), cache=cls._resolve_cache(link, dataset))
 
     @classmethod
     def _discover_columns_from_s3(cls, link):
