@@ -9,7 +9,7 @@ import pyarrow as pa
 from .pupyarrow.file_reader import FileReader, LocalFileReader
 from .utils import WSShardMissingError
 from .ws_audio import WSAudioEpisode, WSAudioSegment
-from .ws_decode import decode_sample, decode_arr
+from .ws_decode import decode_arr, decode_sample
 from .ws_sample import WSSample
 
 if TYPE_CHECKING:

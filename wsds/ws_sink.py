@@ -91,8 +91,9 @@ class WSBatchedSink:
         """Build a RecordBatch from the buffered rows. ".arr" columns are written
         as native pyarrow list<fixed_size_list<T,K>>/list<T> (variable-length
         arrays); everything else keeps the existing from_pylist inference."""
-        import pyarrow
         import numpy as np
+        import pyarrow
+
         from .ws_decode import arr_column_type
 
         names = list(b[0].keys()) if b else []
