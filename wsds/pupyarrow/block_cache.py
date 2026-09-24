@@ -29,6 +29,8 @@ import threading
 import time
 from queue import Empty, Queue
 
+from .file_reader import FileReader
+
 SLOT = 128 * 1024
 FOOTER = struct.Struct("<8sQ")  # magic, object_size
 MAGIC = b"WKSPRS1\x00"
@@ -356,6 +358,41 @@ def drain_writes(timeout=10.0):
     while not _PERSIST_Q.empty() and time.time() - t0 < timeout:
         time.sleep(0.005)
     time.sleep(_BATCH_S * 2 + 0.02)  # let the in-flight batch finish its fsync
+
+
+class MirrorFileReader(FileReader):
+    """A read-only FileReader over a block-cache mirror WITHOUT a backend: serves the blocks
+    that are present and raises OSError for any that are not. For offline tools that work on
+    what the cache already holds (e.g. building a seek index from mirrored shards)."""
+
+    def __init__(self, path):
+        super().__init__()
+        self.path = str(path)
+        self._fd = os.open(self.path, os.O_RDONLY)
+        self.size, self.nblocks, self.bm_off = read_layout(self._fd)
+
+    def present(self, offset, n):
+        if n <= 0:
+            return True
+        lo, hi = offset // SLOT, (offset + n - 1) // SLOT
+        if hi >= self.nblocks:
+            return False
+        return all(os.pread(self._fd, hi - lo + 1, self.bm_off + lo))
+
+    def _raw_read(self, offset, length):
+        length = max(0, min(length, self.size - offset))
+        if not self.present(offset, length):
+            raise OSError(f"mirror {self.path}: bytes [{offset}, {offset + length}) are not cached")
+        return os.pread(self._fd, length, offset)
+
+    def _raw_read_end(self, n):
+        return self._raw_read(max(0, self.size - n), n)
+
+    def close(self):
+        super().close()
+        if self._fd is not None:
+            os.close(self._fd)
+            self._fd = None
 
 
 # module-level singleton per cache root (counters + access log only; no thread)
