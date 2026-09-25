@@ -1,6 +1,8 @@
 fastprogress
 fire
 flatbuffers
+# >=0.7.1 corrects Vorbis post-seek pts; >=0.8 adds add_seek_points (seek-index seeding)
+humecodec>=0.8
 numpy
 polars>=1.36.1
 pyarrow>=20

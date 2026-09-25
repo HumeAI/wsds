@@ -386,6 +386,194 @@ class OpenShardCacheTest(unittest.TestCase):
         self.assertEqual(ds["k0"]["payload"], "P0")                  # ...and is re-opened on demand
 
 
+def _index_struct(**fields):
+    """A one-row pyarrow struct scalar in the seek-index schema (missing fields = older index)."""
+    import pyarrow as pa
+
+    types = {"audio_offset": pa.uint64(), "audio_length": pa.uint64(), "file_header": pa.binary(),
+             "file_footer": pa.binary(), "moov_offset": pa.uint64(), "moov_size": pa.uint32(),
+             "seek_pts": pa.list_(pa.uint32()), "seek_pos": pa.list_(pa.uint64()), "pts_offset": pa.uint32(),
+             "flags": pa.uint32(), "edit_media_time": pa.uint32(), "header_bytes": pa.uint32(),
+             "footer_bytes": pa.uint32()}
+    t = pa.struct([(k, types[k]) for k in fields])
+    return pa.array([fields], type=t)[0]
+
+
+class SeekIndexTest(unittest.TestCase):
+    def test_canonical_schema_and_gate(self):
+        from wsds.ws_seek_index import FLAG_PROBE_DONE, FLAG_PROBE_FAILED, SeekIndex
+
+        base = dict(audio_offset=1000, audio_length=500_000, file_header=b"", file_footer=b"", moov_offset=1032,
+                    moov_size=4000, seek_pts=[0, 10_000, 20_000, 30_000], seek_pos=[1100, 101_100, 201_100, 301_100],
+                    pts_offset=25, flags=FLAG_PROBE_DONE, edit_media_time=1024, header_bytes=5032, footer_bytes=0)
+        idx = SeekIndex.from_struct(_index_struct(**base))
+        self.assertEqual(len(idx), 4)
+        self.assertEqual((idx.audio_offset, idx.audio_length, idx.moov_offset, idx.moov_size), (1000, 500_000, 1032, 4000))
+        self.assertEqual((idx.header_bytes, idx.edit_media_time), (5032, 1024))
+        self.assertAlmostEqual(idx.pts_offset, 0.0025)
+        self.assertEqual(idx.pos_at(1), 100_100)                    # blob-relative
+        self.assertEqual(idx.pts_at(2), 2.0)
+        self.assertEqual(idx.search(1.5), 2)                        # first point PAST 1.5 s
+        self.assertTrue(idx.probed and idx.usable)
+        bad = SeekIndex.from_struct(_index_struct(**{**base, "flags": FLAG_PROBE_DONE | FLAG_PROBE_FAILED}))
+        self.assertTrue(bad.probed)
+        self.assertFalse(bad.usable)                                # the accuracy gate
+
+    def test_older_schema_defaults_and_empty(self):
+        from wsds.ws_seek_index import SeekIndex
+
+        old = _index_struct(audio_offset=10, audio_length=99, file_header=b"x" * 8192, file_footer=b"",
+                            moov_offset=0, moov_size=0, seek_pts=[0, 10_000], seek_pos=[10, 60])
+        idx = SeekIndex.from_struct(old)
+        self.assertEqual((idx.flags, idx.header_bytes, idx.footer_bytes, idx.pts_offset), (0, 0, 0, None))
+        self.assertTrue(idx.usable)
+        self.assertIsNone(SeekIndex.from_struct(_index_struct(audio_offset=0, audio_length=0, moov_offset=0,
+                                                              moov_size=0, seek_pts=[], seek_pos=[])))
+        moov_only = SeekIndex.from_struct(_index_struct(audio_offset=0, audio_length=10, moov_offset=4,
+                                                        moov_size=6, seek_pts=[], seek_pos=[]))
+        self.assertEqual(len(moov_only), 0)                         # mp4 row with only the moov pointer
+
+    def test_plan_ranges(self):
+        from wsds.ws_seek_index import SeekIndex
+
+        one_s = 10_000
+        idx = SeekIndex.from_struct(_index_struct(
+            audio_offset=1000, audio_length=10_000_000, moov_offset=1000 + 9_000_000, moov_size=50_000,
+            seek_pts=[k * one_s for k in range(100)], seek_pos=[1000 + k * 100_000 for k in range(100)],
+            header_bytes=4096, footer_bytes=0, flags=0, edit_media_time=0))
+        plan = idx.plan_ranges(50.0, 55.0, margin_s=2.0, probe_bytes=1 << 19, pad_bytes=3 << 17)
+        self.assertEqual(plan[0], (0, 4096 + (1 << 19)))                       # header + open probe
+        self.assertIn((9_000_000, 9_050_000), plan)                             # non-faststart moov
+        a, b = [r for r in plan if r[0] not in (0, 9_000_000)][0]
+        self.assertEqual(a, 48 * 100_000)                                       # last point at/before t0 - margin
+        self.assertEqual(b, 57 * 100_000 + (3 << 17))                           # point after t1 + margin, padded
+        self.assertEqual(plan, sorted(plan))
+
+
+class SeekAccuracyTest(unittest.TestCase):
+    """Seeking by index returns the same audio as decoding from the start (bit-identity up to the
+    codec's own frame alignment), for the containers we serve; a PROBE_FAILED index is refused."""
+
+    SR, DUR = 16000, 40.0
+
+    @classmethod
+    def setUpClass(cls):
+        import numpy as np
+        import torch
+
+        from wsds.audio_codec import encode_audio
+
+        t = np.arange(int(cls.SR * cls.DUR)) / cls.SR
+        # a chirp plus a slow envelope: every window is distinct, so a misaligned seek shows up
+        sig = 0.5 * np.sin(2 * np.pi * (200 + 30 * t) * t) * (0.6 + 0.4 * np.sin(2 * np.pi * 0.1 * t))
+        x = torch.tensor(sig, dtype=torch.float32)[None]
+        x.sample_rate = cls.SR
+        cls.encoded = {}
+        for fmt in ("mp3", "ogg", "mp4", "webm"):
+            try:
+                cls.encoded[fmt] = encode_audio(x, format=fmt)
+            except Exception:                    # encoder not available in this build
+                pass
+
+    def _episode(self, fmt):
+        import io
+
+        from wsds.ws_audio import WSAudioEpisode
+
+        return WSAudioEpisode(io.BytesIO(self.encoded[fmt]))
+
+    def _index_of(self, fmt):
+        """Build a SeekIndex the way an indexer does, from humecodec's packet scan."""
+        import io
+
+        import numpy as np
+        from humecodec import MediaDecoder
+
+        from wsds.ws_seek_index import PTS_UNIT, SeekIndex
+
+        dec = MediaDecoder(io.BytesIO(self.encoded[fmt]))
+        entries = dec.build_packet_index(dec.default_audio_stream, 32 * 1024)
+        return SeekIndex(np.asarray([e.pos for e in entries], dtype=np.uint64),
+                         np.asarray([max(0, round(e.pts_seconds / PTS_UNIT)) for e in entries], dtype=np.uint32),
+                         audio_offset=0)
+
+    @staticmethod
+    def _lag(ref, test, sr):
+        """Lag (samples) of `test` relative to `ref` via cross-correlation of the overlap."""
+        import numpy as np
+
+        n = min(len(ref), len(test))
+        r, t = ref[:n] - ref[:n].mean(), test[:n] - test[:n].mean()
+        c = np.fft.irfft(np.fft.rfft(r, 2 * n) * np.conj(np.fft.rfft(t, 2 * n)))
+        k = int(np.argmax(c))
+        return k if k <= n else k - 2 * n
+
+    def _check(self, fmt, with_index, t0=21.3, t1=24.1, tol_samples=1):
+        import numpy as np
+
+        ep = self._episode(fmt)
+        full = ep.read_segment(0, None)                     # ground truth: whole file from the start
+        sr = int(full.sample_rate)                          # the codec's rate (opus decodes at 48 kHz)
+        ref = full.numpy()[0]
+        ep2 = self._episode(fmt)
+        if with_index:
+            ep2.set_seek_index(self._index_of(fmt))
+        seg = ep2.read_segment(t0, t1).numpy()[0]           # a deep seek
+        self.assertEqual(len(seg), round((t1 - t0) * sr))
+        want = ref[round(t0 * sr):round(t1 * sr)]
+        lag = self._lag(want, seg, sr)
+        self.assertLessEqual(abs(lag), tol_samples, f"{fmt} index={with_index}: seek landed {lag} samples off")
+        if tol_samples <= 1:
+            self.assertLess(float(np.abs(want - seg).max()), 0.05, f"{fmt} index={with_index}: content differs")
+        return lag, seg
+
+    def test_mp3(self):
+        if "mp3" not in self.encoded:
+            self.skipTest("no mp3 encoder")
+        self._check("mp3", with_index=False)
+        self._check("mp3", with_index=True)
+
+    def test_ogg_opus(self):
+        if "ogg" not in self.encoded:
+            self.skipTest("no ogg encoder")
+        self._check("ogg", with_index=False)
+        self._check("ogg", with_index=True)
+
+    def test_mp4_aac(self):
+        if "mp4" not in self.encoded:
+            self.skipTest("no mp4 encoder")
+        self._check("mp4", with_index=False)
+        self._check("mp4", with_index=True)
+
+    def test_webm_opus(self):
+        """matroska carries cues: the index must NOT seed the demuxer (cross-checked on real
+        webm/opus: a seeded seek landed 880 ms late), so with-index must equal without.
+        (humecodec-MUXED webm/opus seeks a constant 21 ms early on `main` too -- an artefact of
+        the synthetic file; real webm episodes seek to <1 ms -- hence the loose absolute bound.)"""
+        if "webm" not in self.encoded:
+            self.skipTest("no webm encoder")
+        import numpy as np
+
+        lag0, seg0 = self._check("webm", with_index=False, tol_samples=1200)
+        lag1, seg1 = self._check("webm", with_index=True, tol_samples=1200)
+        self.assertEqual(lag0, lag1)
+        self.assertTrue(np.array_equal(seg0, seg1))
+
+    def test_failed_probe_is_not_seeded(self):
+        if "mp3" not in self.encoded:
+            self.skipTest("no mp3 encoder")
+        from dataclasses import replace
+
+        from wsds.ws_seek_index import FLAG_PROBE_DONE, FLAG_PROBE_FAILED
+
+        ep = self._episode("mp3")
+        ep.set_seek_index(replace(self._index_of("mp3"), flags=FLAG_PROBE_DONE | FLAG_PROBE_FAILED))
+        ep.read_segment(21.3, 24.1)
+        dec, _ = ep.get_decoder()
+        self.assertIsNotNone(dec)
+        self.assertFalse(getattr(dec, "_seed_index", None) is not None and dec._seed_index.flags & FLAG_PROBE_FAILED)
+
+
 def load_tests(loader, tests, ignore):
     tests.addTests(doctest.DocTestSuite(wsds))
     tests.addTests(doctest.DocTestSuite(ws_dataset))

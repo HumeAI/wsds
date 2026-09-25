@@ -36,7 +36,9 @@ class WSShardInterface:
         """
         return None
 
-    def get_sample(self, column: str, offset: int) -> typing.Any:
+    def get_sample(self, column: str, offset: int, raw: bool = False) -> typing.Any:
+        """`raw=True` returns the pyarrow scalar as stored, skipping decode/as_py (zero-copy
+        access for trusted consumers, see WSSample.get_raw); proxies may ignore it."""
         raise NotImplementedError
 
     #
@@ -149,7 +151,7 @@ class WSShard(WSShardInterface):
             reader = pa.RecordBatchFileReader(source)
             return [reader.get_batch(i).num_rows for i in range(reader.num_record_batches)]
 
-    def get_sample(self, column: str, offset: int) -> typing.Any:
+    def get_sample(self, column: str, offset: int, raw: bool = False) -> typing.Any:
         if self._data is None or offset < self._start or offset >= self._end:
             self._data = self._locate_batch(offset)
 
@@ -161,6 +163,8 @@ class WSShard(WSShardInterface):
         data = self._data[column][j]
         if not data.is_valid:
             return None # Return None for any null pyarrow scalars
+        if raw:
+            return data
         col_type = self._data.schema.field(column).type
         try:
             if pa.types.is_binary(col_type) or pa.types.is_large_binary(col_type):
@@ -214,7 +218,7 @@ class WSSourceAudioShard(WSShardInterface):
     def get_timestamps(self, segment_offset):
         return self._source_sample[self.vad_column][segment_offset]
 
-    def get_sample(self, _column, offset):
+    def get_sample(self, _column, offset, raw: bool = False):
         file_name, segment_offset = self.derived_dataset.parse_key(
             WSSample(self.derived_dataset, self.shard_ref, offset)["__key__"]
         )
@@ -240,8 +244,8 @@ class WSYoutubeVideoShard(WSSourceAudioShard):
         self.re_pattern = re.compile(link["youtube_id_regexp"])
         return self
 
-    def get_sample(self, _column, offset):
-        sample = super().get_sample(_column, offset)
+    def get_sample(self, _column, offset, raw: bool = False):
+        sample = super().get_sample(_column, offset, raw=raw)
         match = self.re_pattern.search(self._source_file_name)
         if not match:
             raise ValueError(
@@ -289,7 +293,7 @@ class WSSourceLink(WSShardInterface):
         key_prefix = link.get("key_prefix", "source.")
         return cls(shard_ref, source_dataset, dataset, key_prefix)
 
-    def get_sample(self, column: str, offset: int):
+    def get_sample(self, column: str, offset: int, raw: bool = False):
         # Parse the derived dataset's key to get the source file name
         derived_key = WSSample(self.derived_dataset, self.shard_ref, offset)["__key__"]
         file_name, _segment_offset = self.derived_dataset.parse_key(derived_key)
@@ -343,14 +347,14 @@ class WSKeyedColumnShard(WSShardInterface):
     def from_link(cls, link, dataset, shard_ref):
         return cls(shard_ref, dataset.get_linked_dataset(link["dataset_dir"]), dataset)
 
-    def get_sample(self, column, offset):
+    def get_sample(self, column, offset, raw: bool = False):
         key = WSSample(self.derived_dataset, self.shard_ref, offset)["__key__"]
         if column == "__key__":
             return key
         sample = self.linked_dataset[key]
         if sample is None:
             raise WSShardMissingError(f"key {key!r} not found in linked dataset {self.linked_dataset.dataset_root}")
-        return sample[column]
+        return sample.get_raw(column) if raw else sample[column]
 
 
 @dataclass
