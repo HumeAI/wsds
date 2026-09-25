@@ -10,6 +10,7 @@ s3 = ["boto3", "aiobotocore"]
 
 [project.scripts]
 wsds = "wsds.__main__:main"
+wsds-cache = "wsds.cachectl:main"
 
 [tool.hatch.metadata]
 allow-direct-references = true
