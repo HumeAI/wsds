@@ -300,6 +300,52 @@ class WSSourceLink(WSShardInterface):
         return self._source_sample[source_field]
 
 
+@dataclass(slots=True)
+class WSKeyedColumnShard(WSShardInterface):
+    """A proxy shard that serves columns by looking the sample's `__key__` up in ANOTHER
+    dataset (an index lookup) instead of by shard name + offset.
+
+    Use case: derived datasets that are filtered and/or resharded views of a catalog of
+    original deliveries. Their shards hold a subset of the catalog's rows, so shard names
+    and offsets do not line up, but the keys do. Heavy columns (e.g. `audio`) then live in
+    one place only. Configure with a `<name>.wsds-link` in the dataset root (or inside a
+    partition folder, see `WSDataset._partition_link`):
+
+        {"dataset_dir": "../catalog/source",
+         "loader": ["wsds.ws_shard", "WSKeyedColumnShard"],
+         "columns": ["audio", "audio_type"]}
+
+    `dataset_dir` is relative to the folder holding the link file. `columns` defaults to the
+    single column named by the legacy `column` field, or "audio".
+    Keys are looked up as-is (segmented datasets should link through their `source`, which
+    holds episode keys). A key missing from the linked dataset raises WSShardMissingError."""
+
+    shard_ref: (str, str)
+    linked_dataset: "WSDataset"  # noqa: F821
+    derived_dataset: "WSDataset"  # noqa: F821
+
+    @staticmethod
+    def _columns(link):
+        return list(link.get("columns") or [link.get("column", "audio")])
+
+    @classmethod
+    def get_columns(cls, link, dataset):
+        return {col: col for col in cls._columns(link)}
+
+    @classmethod
+    def from_link(cls, link, dataset, shard_ref):
+        return cls(shard_ref, dataset.get_linked_dataset(link["dataset_dir"]), dataset)
+
+    def get_sample(self, column, offset):
+        key = WSSample(self.derived_dataset, self.shard_ref, offset)["__key__"]
+        if column == "__key__":
+            return key
+        sample = self.linked_dataset[key]
+        if sample is None:
+            raise WSShardMissingError(f"key {key!r} not found in linked dataset {self.linked_dataset.dataset_root}")
+        return sample[column]
+
+
 @dataclass
 class WSYouTubeVideo:
     id: str

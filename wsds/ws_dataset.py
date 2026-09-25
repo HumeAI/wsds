@@ -108,6 +108,7 @@ class WSDataset:
 
         self._open_shards = {}
         self._linked_datasets = {}
+        self._partition_links = {}
         # column-dirs tuple -> set of shard refs that already passed validate_shards
         self._validated_shards: dict[tuple[str, ...], set] = {}
 
@@ -592,6 +593,26 @@ class WSDataset:
         self.computed_columns[column_dir] = link
         self.fields[name] = [(column_dir, name)]
 
+    def _partition_link(self, column_dir, shard_ref):
+        """A `<column>.wsds-link` placed INSIDE a partition folder overrides the dataset-root
+        link for the shards of that partition. Lets each partition of a derived dataset
+        name where its own column comes from (e.g. the matching partition of a catalog of
+        original deliveries) without a dataset-wide merged index. `dataset_dir` in the spec
+        is relative to the partition folder and is resolved here."""
+        partition = shard_ref[0] if shard_ref else ""
+        if not partition or not column_dir.endswith(".wsds-link"):
+            return None
+        key = (partition, column_dir)
+        if key not in self._partition_links:
+            path = self.dataset_root / partition / column_dir
+            spec = None
+            if path.exists():
+                spec = json.loads(path.read_text())
+                if "dataset_dir" in spec:
+                    spec["dataset_dir"] = str((path.parent / spec["dataset_dir"]).resolve())
+            self._partition_links[key] = spec
+        return self._partition_links[key]
+
     def get_linked_dataset(self, relative_path):
         linked_root = self.dataset_root / relative_path
         if linked_root not in self._linked_datasets:
@@ -611,7 +632,8 @@ class WSDataset:
             return shard
 
         if column_dir in self.computed_columns:
-            shard = self.get_linked_shard(self.computed_columns[column_dir], shard_ref)
+            spec = self._partition_link(column_dir, shard_ref) or self.computed_columns[column_dir]
+            shard = self.get_linked_shard(spec, shard_ref)
         else:
             shard = WSShard(self, shard_path, shard_ref=shard_ref)
 
