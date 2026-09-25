@@ -166,12 +166,16 @@ class BlockCacheTest(unittest.TestCase):
 
 
 
-def _write_shard(path, keys, **columns):
-    """Write one tiny .wsds shard: __key__ + load_duration (needed by the indexer) + columns(key)."""
+def _write_shard(path, keys, _duration=True, **columns):
+    """Write one tiny .wsds shard: __key__ + load_duration (needed by the indexer; give it in ONE
+    column dir only, a column present in two dirs is exposed as <dir>.<col>) + columns(key)."""
     path.parent.mkdir(parents=True, exist_ok=True)
     with ws_sink.WSSink(str(path)) as sink:
         for k in keys:
-            sink.write({"__key__": k, "load_duration": 1.0, **{c: f(k) for c, f in columns.items()}})
+            row = {"__key__": k, **{c: f(k) for c, f in columns.items()}}
+            if _duration:
+                row["load_duration"] = 1.0
+            sink.write(row)
 
 
 def _index(index_dir, partitions=("",)):
@@ -251,6 +255,135 @@ class KeyedColumnShardTest(unittest.TestCase):
         ds = wsds.WSDataset(index_dir)
         self.assertEqual({ds[k]["payload"] for k in ("k0", "k3")}, {"A-k0", "A-k3"})
         self.assertEqual({ds[k]["payload"] for k in ("k5", "k2")}, {"B-k5", "B-k2"})
+
+
+class OpenShardCacheTest(unittest.TestCase):
+    """The process-global open-shard LRU: bound, pins, negative cache, per-dataset close."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self._tmp.name)
+        self._env = {k: os.environ.get(k) for k in ("WSDS_OPEN_SHARDS", "WSDS_LINKED_DATASETS")}
+        self._saved_cache = ws_dataset._OPEN_SHARDS
+
+    def tearDown(self):
+        ws_dataset._OPEN_SHARDS = self._saved_cache
+        for k, v in self._env.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
+        self._tmp.cleanup()
+
+    def _cache(self, cap):
+        os.environ["WSDS_OPEN_SHARDS"] = str(cap)
+        ws_dataset._OPEN_SHARDS = None
+        return ws_dataset.open_shard_cache()
+
+    def _dataset(self, name="ds", n_shards=6, dirs=("meta", "more")):
+        root = self.root / name
+        for i in range(n_shards):
+            for n, d in enumerate(dirs):
+                _write_shard(root / d / f"d{i}.wsds", [f"{name}-k{i}-{j}" for j in range(3)], _duration=(n == 0),
+                             **{f"{d}_v": lambda k: k})
+        _index(root)
+        return wsds.WSDataset(root)
+
+    @staticmethod
+    def _at(ds, shard, field):
+        """Read `field` of the first row of shard d<shard> (by shard ref, not by index order)."""
+        return WSSample(ds, ("", f"d{shard}"), 0)[field]
+
+    def test_eviction_closes_handles(self):
+        cache = self._cache(3)
+        ds = self._dataset(dirs=("meta",))
+        first = ds.get_shard("meta", ("", "d0"))
+        self.assertIsNotNone(first.reader)
+        for i in range(6):
+            self._at(ds, i, "meta_v")
+        st = cache.stats()
+        self.assertLessEqual(st["open"], 3)
+        self.assertGreaterEqual(st["evictions"], 3)
+        self.assertIsNone(first.reader)                    # evicted handle was CLOSED, not just dropped
+        self.assertIsNone(ds._open_shards.get(ds.get_shard_path("meta", ("", "d0"))))
+
+    def test_shard_visit_pins_then_releases(self):
+        cache = self._cache(2)
+        ds = self._dataset()
+        p0 = [ds.get_shard_path(d, ("", "d0")) for d in ("meta", "more")]
+        with ds.shard_visit(("", "d0")):
+            self._at(ds, 0, "meta_v")
+            self._at(ds, 0, "more_v")
+            self.assertEqual(cache.n_pinned(), 2)
+            for i in range(1, 6):                          # churn far past the cap
+                self._at(ds, i, "meta_v")
+            self.assertTrue(all(ds._open_shards.get(p) is not None for p in p0))   # pinned: never evicted
+            held = [ds._open_shards.get(p) for p in p0]
+        self.assertEqual(cache.n_pinned(), 0)
+        self.assertTrue(all(ds._open_shards.get(p) is None for p in p0))          # released on exit...
+        self.assertTrue(all(h.reader is None for h in held))                       # ...and closed
+        self._at(ds, 0, "meta_v")                                                  # re-opens fine
+
+    def test_visit_is_reentrant(self):
+        self._cache(4)
+        ds = self._dataset(n_shards=1)
+        p = ds.get_shard_path("meta", ("", "d0"))
+        with ds.shard_visit(("", "d0")):
+            with ds.shard_visit(("", "d0")):
+                self._at(ds, 0, "meta_v")
+            self.assertIsNotNone(ds._open_shards.get(p))   # inner exit must not close the outer's handles
+        self.assertIsNone(ds._open_shards.get(p))
+
+    def test_missing_shard_is_negative_cached(self):
+        self._cache(8)
+        root = self.root / "neg"
+        _write_shard(root / "meta" / "d0.wsds", ["a", "b"], meta_v=lambda k: k)
+        _write_shard(root / "meta" / "d1.wsds", ["c", "d"], meta_v=lambda k: k)
+        _write_shard(root / "extra" / "d0.wsds", ["a", "b"], _duration=False, extra_v=lambda k: k)   # d1 has no `extra`
+        _index(root)
+        ds = wsds.WSDataset(root)
+        self.assertEqual(ds["a"]["extra_v"], "a")
+        with self.assertRaises(wsds.utils.WSShardMissingError):
+            ds["c"]["extra_v"]
+        entry = ds._open_shards.get(ds.get_shard_path("extra", ("", "d1")))
+        self.assertIsInstance(entry, ws_dataset._MissingShard)
+        with self.assertRaises(wsds.utils.WSShardMissingError):
+            ds["d"]["extra_v"]
+        self.assertIs(ds._open_shards.get(ds.get_shard_path("extra", ("", "d1"))), entry)   # no retry/re-open
+
+    def test_close_drops_only_own_shards(self):
+        cache = self._cache(16)
+        a, b = self._dataset("a", n_shards=2), self._dataset("b", n_shards=2)
+        self._at(a, 0, "meta_v")
+        self._at(b, 0, "meta_v")
+        pa_, pb = a.get_shard_path("meta", ("", "d0")), b.get_shard_path("meta", ("", "d0"))
+        a.close()
+        self.assertIsNone(cache.get(pa_))
+        self.assertIsNotNone(cache.get(pb))
+        b.close()
+        self.assertIsNone(cache.get(pb))
+
+    def test_linked_datasets_are_bounded(self):
+        self._cache(32)
+        os.environ["WSDS_LINKED_DATASETS"] = "2"
+        cats = []
+        for i in range(3):
+            cat = self.root / f"cat{i}"
+            _write_shard(cat / "blob" / "c.wsds", [f"k{i}"], payload=lambda k, i=i: f"P{i}")
+            _index(cat)
+            cats.append(cat)
+        derived = self.root / "derived"
+        for i in range(3):
+            _write_shard(derived / f"p{i}" / "meta" / "d.wsds", [f"k{i}"], note=lambda k: k)
+            _link(derived / f"p{i}" / "blob.wsds-link", f"../../cat{i}", columns=["payload"])
+        index_dir = derived / "index"
+        index_dir.mkdir()
+        _link(index_dir / "blob.wsds-link", "../../cat0", columns=["payload"])
+        _index(index_dir, partitions=("../p0", "../p1", "../p2"))
+        ds = wsds.WSDataset(index_dir)
+        self.assertEqual([ds[f"k{i}"]["payload"] for i in range(3)], ["P0", "P1", "P2"])
+        self.assertEqual(len(ds._linked_datasets), 2)                # the oldest catalog was evicted
+        self.assertEqual(ds["k0"]["payload"], "P0")                  # ...and is re-opened on demand
 
 
 def load_tests(loader, tests, ignore):

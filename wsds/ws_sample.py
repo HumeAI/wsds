@@ -1,3 +1,4 @@
+import os
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
@@ -6,6 +7,10 @@ from .ws_decode import get_audio as _get_audio
 
 if TYPE_CHECKING:
     from .ws_dataset import WSDataset
+
+# WSDS_SKIP_KEY_VERIFY=1 disables the per-sample cross-column-dir __key__ check (one extra
+# column read per column dir per sample). For pipelines that validated keys up front.
+_SKIP_KEY_VERIFY = bool(os.environ.get("WSDS_SKIP_KEY_VERIFY"))
 
 
 @dataclass(frozen=True)
@@ -32,6 +37,8 @@ class WSSample:
 
     def _verify_key_for_field(self, field: str):
         """Verify __key__ in this field's column_dir matches the reference key."""
+        if _SKIP_KEY_VERIFY:
+            return
         value = self.dataset.fields.get(field)
         if value is None:
             return
@@ -40,8 +47,12 @@ class WSSample:
         if column_dir in self._verified_column_dirs:
             return
 
-        # Skip computed columns (they don't have their own __key__)
-        if column_dir in self.dataset.computed_columns:
+        # Skip derived/computed columns (they don't have their own __key__): the audio of a
+        # segmented dataset is computed from its source. Linked shards (.wsds-link, e.g. the
+        # S3 audio column of a source dataset) DO carry __key__ and are verified like any
+        # other column dir: a linked audio shard whose row order differs from the metadata
+        # shards next to it would otherwise return the wrong episode's audio silently.
+        if column_dir in self.dataset.computed_columns and not column_dir.endswith(".wsds-link"):
             self._verified_column_dirs.add(column_dir)
             return
 
@@ -50,6 +61,13 @@ class WSSample:
             key = self.dataset.get_shard(column_dir, self.shard_ref).get_sample("__key__", self.offset)
         except (WSShardMissingError, KeyError):
             # Can't verify if shard or key is missing
+            self._verified_column_dirs.add(column_dir)
+            return
+
+        if not isinstance(key, (str, bytes)):
+            # A computed/virtual shard (e.g. the segmented-dataset audio column, which is
+            # materialised from the source's linked audio) answers get_sample("__key__") with the
+            # VALUE object (WSAudioSegment) rather than a key: nothing to verify against.
             self._verified_column_dirs.add(column_dir)
             return
 
