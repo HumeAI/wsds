@@ -574,6 +574,54 @@ class SeekAccuracyTest(unittest.TestCase):
         self.assertFalse(getattr(dec, "_seed_index", None) is not None and dec._seed_index.flags & FLAG_PROBE_FAILED)
 
 
+class SeekIndexBuildTest(SeekAccuracyTest):
+    """The builder: index a real shard of the synthetic mp3/ogg/mp4 blobs, then WSDataset must
+    attach the column automatically and seek correctly through it."""
+
+    def test_build_and_use(self):
+        import pyarrow.ipc as ipc
+
+        from wsds.ws_seek_index_build import FLAG_PROBE_DONE, index_shard
+
+        fmts = [f for f in ("mp3", "ogg", "mp4") if f in self.encoded]
+        if not fmts:
+            self.skipTest("no encoders")
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "ds"
+            (root / "audio").mkdir(parents=True)
+            with ws_sink.WSSink(str(root / "audio" / "s0.wsds"), compression=None) as sink:
+                for f in fmts:
+                    sink.write({"__key__": f"ep-{f}", "audio": self.encoded[f], "audio_type": f, "load_duration": self.DUR})
+            out = root / "audio.wsds_seek_index" / "s0.wsds"
+            st = index_shard(str(root / "audio" / "s0.wsds"), str(out), probe_share=1,   # probe every row
+                            min_blob_bytes=0, resolution=16 * 1024)                    # 40 s clips are tiny
+            self.assertEqual((st["rows"], st["indexed"], st["failed"]), (len(fmts), len(fmts), 0))
+            self.assertEqual(st.get("probe_failed", 0), 0)
+            t = ipc.open_file(str(out)).read_all()
+            self.assertEqual(t["__key__"].to_pylist(), [f"ep-{f}" for f in fmts])
+            for f, row in zip(fmts, t["audio.wsds_seek_index"].to_pylist()):
+                self.assertGreater(row["audio_length"], 0)
+                self.assertGreater(len(row["seek_pos"]), 1, f)
+                self.assertTrue(row["flags"] & FLAG_PROBE_DONE, f)
+                self.assertEqual(row["moov_size"] > 0, f == "mp4", f)
+                self.assertGreater(row["header_bytes"], 0, f)
+            _index(root)
+            ds = wsds.WSDataset(root)
+            self.assertIn("audio.wsds_seek_index", ds.fields)
+            for f in fmts:
+                smp = ds[f"ep-{f}"]
+                ep = smp.get_audio()
+                self.assertIsNotNone(ep._seek_index)                      # attached automatically
+                full = self._episode(f).read_segment(0, None)
+                sr = int(full.sample_rate)
+                seg = ep.read_segment(21.3, 24.1).numpy()[0]
+                want = full.numpy()[0][round(21.3 * sr):round(24.1 * sr)]
+                self.assertLessEqual(abs(self._lag(want, seg, sr)), 1, f)
+
+    # the inherited accuracy tests are not re-run here
+    test_mp3 = test_ogg_opus = test_mp4_aac = test_failed_probe_is_not_seeded = None
+
+
 def load_tests(loader, tests, ignore):
     tests.addTests(doctest.DocTestSuite(wsds))
     tests.addTests(doctest.DocTestSuite(ws_dataset))

@@ -2,16 +2,11 @@ import functools
 import json
 import os
 import sys
-import tarfile
 from collections import defaultdict
 from pathlib import Path
 
-import numpy as np
 import polars as pl
 import pyarrow as pa
-import webdataset as wds
-
-from . import WSSample, WSSink
 
 commands = {}
 
@@ -336,7 +331,7 @@ class validate:
                             .item()
                         ):
                             tqdm.write(f"Shard {shard} in {column_dir} has keys that don't match the index.")
-                    except pl.exceptions.ShapeError as err:
+                    except pl.exceptions.ShapeError:
                         tqdm.write(
                             f"Shard {shard} in {column_dir} has {pl.scan_ipc(shard_fname).select(pl.len()).collect().item()} keys while we expect {len(expected_keys)}."
                         )
@@ -458,6 +453,51 @@ def init(
                             }
                         )
                     )
+
+
+@command
+def build_seek_index(
+    dataset: Path,
+    audio_col: str = "audio",
+    num_workers: int = 16,
+    probe_share: int = 10,
+    force: bool = False,
+    shards: str | None = None,
+):
+    """Build the `<audio_col>.wsds_seek_index` column for every shard of a dataset, next to the
+    audio column (<partition>/<audio_col>.wsds_seek_index/<shard>.wsds). Audio is read from a
+    full local shard, a block-cache mirror, or the linked S3 shard -- mp4 by its moov (a few
+    ranged reads), everything else by one packet scan; 1 row in `probe_share` is verified by a
+    decode probe (see wsds.ws_seek_index_build). `shards`: comma-separated shard names to limit to."""
+    import multiprocessing
+
+    from fastprogress import progress_bar
+
+    from . import WSDataset
+    from .ws_seek_index_build import _index_one
+
+    dataset = Path(dataset)
+    ds = WSDataset(dataset)
+    refs = ds.get_shard_list(ignore_index=True)
+    if shards:
+        want = set(shards.split(","))
+        refs = [r for r in refs if r[1] in want]
+    jobs = [(str(dataset), p, s, audio_col, probe_share, force) for p, s in refs]
+    agg = defaultdict(int)
+    errs = []
+    with multiprocessing.Pool(num_workers) as pool:
+        for r in progress_bar(pool.imap_unordered(_index_one, jobs), total=len(jobs)):
+            status = r["status"].split(" ")[0]
+            agg[status] += 1
+            if status == "ok":
+                for k in ("rows", "indexed", "empty", "failed", "mp4", "scan", "probed", "probe_failed", "tiny"):
+                    agg[k] += r.get(k, 0)
+                agg["worst_lag_ms"] = max(agg["worst_lag_ms"], 1000 * r.get("worst_lag", 0.0))
+            else:
+                errs.append(r)
+    print(dict(agg))
+    for e in [e for e in errs if e["status"] != "exists"][:10]:
+        print(e["shard"], e["status"])
 
 
 @command
