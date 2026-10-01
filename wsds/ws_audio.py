@@ -62,7 +62,15 @@ class WSAudioEpisode:
 
     def _apply_seek_index(self):
         index, d = self._seek_index, self._decoder
-        if index is None or d is None or len(index) == 0 or not index.usable:
+        if index is None or d is None or not index.usable:
+            return
+        if getattr(index, "sample_clock", None) is not None and hasattr(d, "set_sample_clock"):
+            # mp4 whose stts lies: this is the one case where the moov is NOT enough, because the
+            # moov is what lies. Reads go by packet (see ws_seek_index.SampleClock) and no pts
+            # seeding applies.
+            d.set_sample_clock(index.sample_clock)
+            return
+        if len(index) == 0:
             return
         # Formats without a native seek table (ogg/vorbis, mp3/mp2/mp1) -> seed the demuxer's
         # AVIndexEntry list (humecodec>=0.8) so timestamp seeks bracket the target via a

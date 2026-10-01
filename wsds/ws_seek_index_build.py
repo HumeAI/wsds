@@ -29,7 +29,8 @@ import zlib
 
 import numpy as np
 
-from .ws_seek_index import FLAG_EDIT_SHIFT, FLAG_IRREGULAR, FLAG_PROBE_DONE, FLAG_PROBE_FAILED, FLAG_ROLL
+from .ws_seek_index import (FLAG_EDIT_SHIFT, FLAG_IRREGULAR, FLAG_PROBE_DONE, FLAG_PROBE_FAILED,
+                            FLAG_ROLL, FLAG_SAMPLE_CLOCK_OK, FLAG_STTS_MISMATCH, SampleClock)
 
 SLOT = 128 * 1024          # seek-point spacing = the block cache's addressing unit
 HEADER_BYTES = 8192        # header-extent fallback when the open cannot be traced
@@ -41,10 +42,15 @@ MOOV_TYPES = ("m4a", "mp4", "m4b", "mov", "aac")
 COLUMN = "audio.wsds_seek_index"
 BATCH_SIZE = 64
 
+EMPTY_SAMPLE_CLOCK = {
+    "stts_count": [], "stts_delta": [], "media_timescale": 0,
+    "frame_samples": 0, "first_frame_samples": 0, "first_packet": 0,
+}
 EMPTY_INDEX = {
     "audio_offset": 0, "audio_length": 0, "moov_offset": 0, "moov_size": 0,
     "seek_pts": [], "seek_pos": [], "pts_offset": 0,
     "flags": 0, "edit_media_time": 0, "header_bytes": 0, "footer_bytes": 0,
+    **EMPTY_SAMPLE_CLOCK,
 }
 
 
@@ -63,6 +69,13 @@ def index_type():
         ("edit_media_time", pa.uint32()),
         ("header_bytes", pa.uint32()),
         ("footer_bytes", pa.uint32()),
+        # sample-clock map, written only when FLAG_STTS_MISMATCH (see ws_seek_index.SampleClock)
+        ("stts_count", pa.list_(pa.uint32())),
+        ("stts_delta", pa.list_(pa.uint32())),
+        ("media_timescale", pa.uint32()),
+        ("frame_samples", pa.uint32()),
+        ("first_frame_samples", pa.uint32()),
+        ("first_packet", pa.uint32()),
     ])
 
 
@@ -526,20 +539,30 @@ def build_index_for_mp4(lb, audio_offset, blob_len, resolution=SLOT):
     if roll < -1:
         flags |= FLAG_ROLL
     if mt:
-        # Edit-list priming trim. Measured on 900 corpus episodes: the RAW sample-table pts
-        # already agree with the decoder better than an edit-shifted version would (median
-        # |error| 10 ms vs 23 ms), so the pts are left alone and this is a hazard marker only;
-        # `edit_media_time` keeps the value for consumers that want it.
+        # Edit-list priming trim. The raw sample-table pts are left alone -- shifting them was
+        # measured WORSE (median |error| 23 ms vs 10 ms on 900 episodes) -- so this stays a hazard
+        # marker. Where the trim actually matters the sample clock below encodes it exactly and
+        # reads stop using pts altogether.
         flags |= FLAG_EDIT_SHIFT
     faststart = moov_rel + moov_size <= max(1 << 20, moov_size + (1 << 16))
     header_bytes = int(moov_rel + moov_size) if faststart else int(min(MP4_SNIFF_BYTES, blob_len))
-    return {
+    row = {
         "audio_offset": int(audio_offset), "audio_length": int(blob_len),
         "header_bytes": header_bytes, "footer_bytes": 0,
         "moov_offset": int(audio_offset + moov_rel), "moov_size": int(moov_size),
         "seek_pts": pts, "seek_pos": spos, "pts_offset": 0,
         "flags": int(flags), "edit_media_time": int(mt),
+        **EMPTY_SAMPLE_CLOCK,
     }
+    # Does the container's clock agree with the decoder's? Two packets' worth of decode.
+    sc, sc_flags = sample_clock_fields(moov, lb, mt)
+    row.update(sc)
+    row["flags"] |= sc_flags
+    if sc_flags & FLAG_STTS_MISMATCH:
+        # Rare (0.6-15% of mp4 rows depending on the delivery) and the check decodes most of the
+        # blob, so it runs on EVERY such row rather than the 1-in-probe_share sample.
+        row["flags"] |= verify_sample_clock(lb, row)
+    return row
 
 
 def build_index_for_blob(audio_bytes, audio_offset, resolution=SLOT):
@@ -574,7 +597,203 @@ def build_index_for_blob(audio_bytes, audio_offset, resolution=SLOT):
         "seek_pos": seek_pos,
         "pts_offset": int(round(measure_pts_offset(audio_bytes) * 10000)),   # 100us
         "flags": 0, "edit_media_time": 0,
+        **EMPTY_SAMPLE_CLOCK,              # a scanned container has no stts to disagree with
     }
+
+
+def mp4_stts_rle(moov, trak=None):
+    """The audio trak's stts run-length table -> (counts, deltas), or None."""
+    box = _trak_box(moov, b"stts", trak)
+    if box is None:
+        return None
+    n = struct.unpack(">I", moov[box[0] + 4:box[0] + 8])[0]
+    e = np.frombuffer(moov, dtype=">u4", count=2 * n, offset=box[0] + 8).astype(np.int64).reshape(-1, 2)
+    return e[:, 0], e[:, 1]
+
+
+def mp4_frame_probe(src):
+    """What a packet actually becomes, from the decoder itself:
+    (first_frame_samples, frame_samples, first_pts_seconds, sample_rate), or None.
+
+    The first output frame is short when the decoder applies a priming trim, and `frame_samples`
+    is 2048 rather than 1024 for SBR -- neither is visible in the stts."""
+    import humecodec
+
+    src.seek(0)
+    dec = humecodec.MediaDecoder(src=src, buffer_size=256 * 1024)
+    info = dec.get_src_stream_info(dec.default_audio_stream)
+    dec.add_audio_stream(frames_per_chunk=-1)
+    out = []
+    while len(out) < 3:
+        if dec.fill_buffer() == 1:
+            break
+        (c,) = dec.pop_chunks()
+        if c is not None:
+            out.append((float(c.pts), int(c.shape[0])))
+    if not out:
+        return None
+    return out[0][1], (out[1][1] if len(out) > 1 else out[0][1]), out[0][0], int(info.sample_rate)
+
+
+def sample_clock_fields(moov, src, media_time=0):
+    """(fields, flags) for the sample-clock map. FLAG_STTS_MISMATCH iff the container clock and the
+    sample clock disagree for any packet the decoder emits -- a lying stts, an undeclared priming
+    trim, SBR behind a 1024 table, an edit list. One rule, no per-shape cases; the map is stored
+    only when it is needed."""
+    rle = mp4_stts_rle(moov)
+    if rle is None:
+        return dict(EMPTY_SAMPLE_CLOCK), 0
+    ts = mp4_media_timescale(moov)
+    try:
+        fp = mp4_frame_probe(src)
+    except Exception:
+        fp = None
+    if fp is None or not ts:
+        return dict(EMPTY_SAMPLE_CLOCK), 0
+    first, frame, first_pts, sr = fp
+    counts, deltas = rle
+    per_packet = np.repeat(deltas, counts)
+    pres = (np.concatenate([[0], np.cumsum(per_packet)]) - int(media_time)) / float(ts)
+    p0 = max(0, int(np.searchsorted(pres, first_pts + 1e-9, side="right") - 1))
+    n = len(per_packet)
+    k = np.arange(n)
+    true_s = np.where(k <= p0, 0, first + (k - p0 - 1) * frame) / float(sr)
+    mismatch = bool(np.any(np.abs(true_s[p0:] - pres[p0:n]) * sr > 0.5))
+    if not mismatch:
+        return dict(EMPTY_SAMPLE_CLOCK), 0
+    return {
+        "stts_count": counts.astype(np.int64).tolist(),
+        "stts_delta": deltas.astype(np.int64).tolist(),
+        "media_timescale": int(ts), "frame_samples": int(frame),
+        "first_frame_samples": int(first), "first_packet": int(p0),
+    }, FLAG_STTS_MISMATCH
+
+
+def _mono(c):
+    x = np.asarray(c.data if hasattr(c, "data") else c, dtype=np.float32)
+    if x.ndim == 2:
+        x = x.mean(axis=1) if x.shape[1] <= 8 else x.mean(axis=0)
+    return x
+
+
+def _fresh(src, sr):
+    """A decoder at the stream start delivering native-rate frames."""
+    import humecodec
+
+    src.seek(0)
+    dec = humecodec.MediaDecoder(src=src, buffer_size=256 * 1024)
+    dec.add_audio_stream(frames_per_chunk=sr)
+    return dec
+
+
+def crop_on_sample_clock(dec, clk, t0, t1, sr, margin=0.25):
+    """[t0, t1) read the way a consumer must on a FLAG_STTS_MISMATCH file: seek to the packet
+    holding the target by that packet's own presentation pts, read back which packet we landed on
+    from the first chunk's pts, and count samples from there. No pts is trusted for timing."""
+    dec.seek(clk.seek_target(max(0, int(round((t0 - margin) * sr)))), "key")
+    got = []
+    n = 0
+    need = int(round((t1 - t0) * sr))
+    prefix = None
+    while prefix is None or n < prefix + need:
+        if dec.fill_buffer() == 1:
+            break
+        (c,) = dec.pop_chunks()
+        if c is None:
+            continue
+        if prefix is None:
+            prefix = int(round(t0 * sr)) - clk.true_samples(clk.packet_of_pts(float(c.pts)))
+            if prefix < 0:
+                return np.zeros(0, np.float32)
+        x = _mono(c)
+        got.append(x)
+        n += len(x)
+    if not got:
+        return np.zeros(0, np.float32)
+    return np.concatenate(got)[prefix:prefix + need]
+
+
+def _from_start_windows(dec, targets, win, sr):
+    """{t: samples of [t, t+win)} for several targets in ONE pass from the stream start, keeping
+    only the chunks that can still contribute."""
+    need = int(round(win * sr))
+    pending = sorted((int(round(t * sr)), t) for t in targets)
+    out = {}
+    chunks = []
+    n = 0
+    while pending:
+        if dec.fill_buffer() == 1:
+            break
+        (c,) = dec.pop_chunks()
+        if c is None:
+            continue
+        x = _mono(c)
+        chunks.append((n, x))
+        n += len(x)
+        while pending and n >= pending[0][0] + need:
+            s0, t = pending.pop(0)
+            parts = [xx[max(0, s0 - a):max(0, s0 + need - a)]
+                     for a, xx in chunks if a + len(xx) > s0 and a < s0 + need]
+            out[t] = np.concatenate(parts)[:need] if parts else np.zeros(0, np.float32)
+        if pending:
+            lo = pending[0][0]
+            chunks = [(a, xx) for a, xx in chunks if a + len(xx) > lo]
+        else:
+            chunks = []
+    return out
+
+
+def _same_audio(ref, test, sr, tol_s=1e-3):
+    """Sample-exact agreement, robust to silence: a quiet window must match sample for sample
+    (decoder output is deterministic), a loud one by cross-correlation lag within tol_s. The
+    tolerance is 1 ms: an SBR post-flush transient moves a quiet window's peak 0.07-0.45 ms,
+    while a wrong packet is never less than a frame (23 ms)."""
+    n = min(len(ref), len(test))
+    if n < sr // 8:
+        return False
+    a, b = ref[:n], test[:n]
+    if a.std() < 1e-4 or b.std() < 1e-4:
+        return float(np.max(np.abs(a - b))) < max(4e-3, 4.0 * float(a.std()))
+    lag = lag_seconds(a, b, sr)
+    return lag == lag and abs(lag) <= tol_s
+
+
+def verify_sample_clock(src, row, fracs=(0.25, 0.5, 0.75), win=1.0):
+    """FLAG_SAMPLE_CLOCK_OK iff a packet-indexed crop reproduces the full decode from the start at
+    `fracs` of the file and just after every jump in the container clock (where a seek lands on a
+    malformed packet and the decoder may recover into silence). Otherwise FLAG_PROBE_FAILED, which
+    makes consumers read from the start."""
+    try:
+        clk = SampleClock(row["stts_count"], row["stts_delta"], row["media_timescale"],
+                          row.get("edit_media_time", 0), row["frame_samples"],
+                          row["first_frame_samples"], row["first_packet"])
+        src.seek(0)
+        import humecodec
+        probe = humecodec.MediaDecoder(src=src, buffer_size=1 << 16)
+        # stream 0 is the VIDEO stream in a video container (h264 + aac): its sample_rate is not
+        # the audio's, and every target derived from it is wrong -- the two video containers in the
+        # corpus sample verified False while reading sample-exact.
+        sr = int(probe.get_src_stream_info(probe.default_audio_stream).sample_rate)
+        dur = clk.true_samples(clk.n - 1) / sr
+        last_ok = dur - win - 0.1                      # the final packet is legitimately short
+        targets = [f * dur for f in fracs if 1.0 < f * dur < last_ok]
+        if not targets and last_ok > 1.0:
+            targets = [max(1.0, last_ok - 1.0)]
+        d = np.diff(clk.pres[:-1]) * sr
+        for k in np.flatnonzero(np.abs(d - clk.frame) > 0.5)[:8]:
+            tj = clk.true_samples(min(clk.n - 1, int(k) + 2)) / sr + 0.05
+            if 1.0 < tj < last_ok:
+                targets.append(tj)
+        targets = sorted(set(round(x, 3) for x in targets))
+        if not targets:
+            return FLAG_PROBE_DONE | FLAG_SAMPLE_CLOCK_OK      # nothing to seek into
+        refs = _from_start_windows(_fresh(src, sr), targets, win, sr)
+        for t, ref in refs.items():
+            if not _same_audio(ref, crop_on_sample_clock(_fresh(src, sr), clk, t, t + win, sr), sr):
+                return FLAG_PROBE_DONE | FLAG_PROBE_FAILED
+        return FLAG_PROBE_DONE | FLAG_SAMPLE_CLOCK_OK
+    except Exception:
+        return FLAG_PROBE_DONE | FLAG_PROBE_FAILED
 
 
 def index_row(lb, key, audio_type=None, probe_share=PROBE_SHARE, stats=None, min_blob_bytes=SLOT, resolution=SLOT):

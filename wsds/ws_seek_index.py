@@ -14,6 +14,13 @@ same shard names and row order). Canonical schema:
                                    (matroska/webm undeclared vorbis priming; 0 elsewhere)
     flags            uint32        seek hazards + probe verdict, see FLAG_*
     edit_media_time  uint32        mp4 edit-list media_time (encoder-delay trim), media timescale
+    stts_count       list<uint32>  mp4 sample-clock map, only when FLAG_STTS_MISMATCH: the audio
+    stts_delta       list<uint32>    trak's stts run-length table...
+    media_timescale  uint32          ...its timescale...
+    frame_samples    uint32          ...the samples the decoder emits per packet (2048 with SBR)...
+    first_frame_samples uint32       ...how many the FIRST output frame carries (a priming trim
+                                      makes it short)...
+    first_packet     uint32          ...and which packet that first output came from.
     header_bytes     uint32        what a decoder open touches from the blob start (0 = unknown)
     footer_bytes     uint32        tail a duration probe needs (ogg only; 0 = none)
 
@@ -51,6 +58,11 @@ FLAG_IRREGULAR = 1 << 1    # non-uniform frame grid (>10 distinct sample duratio
 FLAG_ROLL = 1 << 2         # roll distance < -1: a seek needs several pre-roll frames
 FLAG_PROBE_DONE = 1 << 3   # this row was verified by a decode probe
 FLAG_PROBE_FAILED = 1 << 4 # probe disagreed with the index -> consumers must decode from the start
+FLAG_STTS_MISMATCH = 1 << 5   # mp4: the stts durations are not what the decoder emits per packet, so
+                              # the container clock drifts from the sample clock -- the row carries a
+                              # SampleClock and reads must go through it (see SampleClock)
+FLAG_SAMPLE_CLOCK_OK = 1 << 6 # ...and a packet-indexed crop reproduced the full decode (verified at
+                              # build time, so a consumer does not have to trust the table blindly)
 
 
 @dataclass(frozen=True, slots=True)
@@ -67,6 +79,7 @@ class SeekIndex:
     edit_media_time: int = 0
     header_bytes: int = 0            # extents: see module docstring
     footer_bytes: int = 0
+    sample_clock: "SampleClock | None" = None   # set iff FLAG_STTS_MISMATCH (see SampleClock)
 
     @classmethod
     def from_struct(cls, struct_scalar) -> "SeekIndex | None":
@@ -101,6 +114,7 @@ class SeekIndex:
             int(_opt("edit_media_time", 0)),
             int(_opt("header_bytes", 0)),
             int(_opt("footer_bytes", 0)),
+            _sample_clock(struct_scalar, _opt),
         )
 
     # ---- the gate ----
@@ -113,6 +127,12 @@ class SeekIndex:
         """May a decoder seek by this index? False when the indexing-time probe found the
         index misaligned with the audio (FLAG_PROBE_FAILED): then read from the start."""
         return not (self.flags & FLAG_PROBE_FAILED)
+
+    @property
+    def pts_lies(self) -> bool:
+        """This file's container timestamps do not match the audio (FLAG_STTS_MISMATCH): a pts
+        seek lands wrong and `sample_clock` is the only correct way in."""
+        return bool(self.flags & FLAG_STTS_MISMATCH)
 
     def __len__(self) -> int:
         return len(self.seek_pos)
@@ -177,3 +197,98 @@ def _merge(ranges, gap=65536):
 
 __all__ = ["SeekIndex", "PTS_UNIT", "FLAG_EDIT_SHIFT", "FLAG_IRREGULAR", "FLAG_ROLL",
            "FLAG_PROBE_DONE", "FLAG_PROBE_FAILED"]
+
+
+def _sample_clock(struct_scalar, _opt):
+    """A SampleClock from the row's stts map, or None when the row has no map (the common case)
+    or predates the fields."""
+    try:
+        counts = struct_scalar["stts_count"].values
+    except KeyError:
+        return None
+    if len(counts) == 0:
+        return None
+    return SampleClock(
+        counts.to_numpy(zero_copy_only=False),
+        struct_scalar["stts_delta"].values.to_numpy(zero_copy_only=False),
+        int(_opt("media_timescale", 0)), int(_opt("edit_media_time", 0)),
+        int(_opt("frame_samples", 0)), int(_opt("first_frame_samples", 0)),
+        int(_opt("first_packet", 0)),
+    )
+
+
+class SampleClock:
+    """An mp4 whose CONTAINER clock disagrees with its SAMPLE clock, and the map between them.
+
+    ffmpeg stamps each packet's pts from the `stts` table; the AAC decoder emits a fixed frame
+    per packet regardless (1024 samples, 2048 with SBR). Where the two disagree, every pts-based
+    seek -- ffmpeg's native mp4 seek and a seek_pts index built from the same table alike --
+    returns audio displaced from a full decode by the cumulative difference. Measured in the
+    corpus: a mid-file packet of 361 ticks in a 1024 grid (-15 ms from there on), SBR behind a
+    1024-ish table (-67 -> -113 ms, stepping at each bad packet), byte sizes written as durations
+    (-4 to -21 ms, changing every second), an undeclared 2112-sample priming trim (a constant
+    -47.9 ms). 0.6-0.8% of mp4 episodes on most datasets, 15.5% on a podcast-heavy one.
+
+    So reads do not seek by time at all: they seek to a PACKET (by that packet's own presentation
+    pts), read back which packet they landed on from the first chunk's pts, and count samples from
+    that packet's first sample. Packet k:
+
+        presentation pts = (cumsum(stts)[k] - edit_media_time) / media_timescale
+        first sample     = 0 for k <= first_packet,
+                           else first_frame_samples + (k - first_packet - 1) * frame_samples
+
+    A 44.1 kHz file whose stts says 1024 per packet but whose decoder trims 2112 samples of
+    priming (first output frame 960 samples, from packet 2): true time runs 2112 samples behind
+    the container clock, so a pts seek to 10 s returns audio from 10.048 s.
+
+    >>> c = SampleClock(counts=[5000], deltas=[1024], timescale=44100, media_time=0,
+    ...                 frame=1024, first=960, p0=2)
+    >>> c.true_samples(2), c.true_samples(3), c.true_samples(4)
+    (0, 960, 1984)
+    >>> k = c.packet_of_sample(441000)           # sample 441000 = 10.000 s on the sample clock
+    >>> k, c.true_samples(k) <= 441000 < c.true_samples(k + 1)
+    (432, True)
+    >>> round(c.pres[k] * 44100) - c.true_samples(k)    # its container pts is 2112 samples late
+    2112
+    >>> round(c.seek_target(441000), 4)          # so we seek to the PACKET's own pts
+    10.031
+    >>> c.packet_of_pts(c.pres[432] + 1e-6)      # and read the landing packet back from chunk0.pts
+    432
+
+    An stts that lies mid-file: one packet of 361 ticks in a 1024 grid steps the container clock
+    663 samples early for everything after it.
+
+    >>> c = SampleClock(counts=[100, 1, 100], deltas=[1024, 361, 1024], timescale=44100,
+    ...                 media_time=0, frame=1024, first=1024, p0=0)
+    >>> round((c.true_samples(150) / 44100 - c.pres[150]) * 44100)
+    663
+    """
+
+    __slots__ = ("pres", "n", "frame", "first", "p0")
+
+    def __init__(self, counts, deltas, timescale, media_time, frame, first, p0):
+        d = np.repeat(np.asarray(deltas, np.int64), np.asarray(counts, np.int64))
+        self.pres = (np.concatenate([[0], np.cumsum(d)]) - int(media_time)) / float(timescale)
+        self.n = len(d)
+        self.frame = int(frame)
+        self.first = int(first)
+        self.p0 = int(p0)
+
+    def true_samples(self, k: int) -> int:
+        """First sample of packet k on the full-decode timeline."""
+        return 0 if k <= self.p0 else self.first + (k - self.p0 - 1) * self.frame
+
+    def packet_of_sample(self, s: int) -> int:
+        return self.p0 if s < self.first else min(self.n - 1, self.p0 + 1 + (s - self.first) // self.frame)
+
+    def packet_of_pts(self, pts: float) -> int:
+        """Which packet a post-seek chunk came from, by its pts."""
+        return max(0, int(np.searchsorted(self.pres, pts + 1e-9, side="right") - 1))
+
+    def seek_target(self, s: int) -> float:
+        """Presentation pts to hand the demuxer so a BACKWARD seek lands on the packet holding
+        sample s."""
+        return max(0.0, float(self.pres[self.packet_of_sample(s)]))
+
+    def __repr__(self) -> str:
+        return f"SampleClock({self.n} packets, frame={self.frame}, first={self.first}, p0={self.p0})"
