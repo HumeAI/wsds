@@ -145,6 +145,9 @@ class _LazyS3Client:
         return (_LazyS3Client, (self._link,))
 
 
+CACHE_POLICY = "cache-policy.json"      # wsds.cachectl writes it; its presence enables access logs
+
+
 class WSS3Shard(WSShardInterface):
     """A shard reader that loads data from S3 via aiobotocore range requests.
 
@@ -219,8 +222,12 @@ class WSS3Shard(WSShardInterface):
             next to the partition's metadata shards. Extensions differ, so eviction
             (globs *.sparse) and tier-1 (looks at .wsds) never confuse the two, and
             shard names that repeat across partitions never collide;
-          - access logs live at <dataset_root>/<subdir>/.access (the eviction
-            service consumes them; point it at the dataset base to see all partitions).
+          - access logs live at <dataset_root>/<subdir>/.access, but ONLY when the dataset
+            has opted into eviction with a <dataset_root>/cache-policy.json (see
+            wsds.cachectl). They exist solely to feed the LRU evictor, and logging for an
+            evictor that is not registered is pure cost: unconditional logging left 37.8M
+            files and 77 GB of .access snapshots across four datasets by 2026-10-01, none
+            of which anything had ever read.
         """
         subdir = link.get("subdir") or "audio"
         if not link.get("cache"):
@@ -228,7 +235,10 @@ class WSS3Shard(WSShardInterface):
         droot = WSS3Shard._dataset_root(dataset)
         if not droot:
             return {"subdir": subdir}
-        return {"subdir": subdir, "root": droot, "logdir": os.path.join(droot, subdir, ".access")}
+        cfg = {"subdir": subdir, "root": droot}
+        if os.path.exists(os.path.join(droot, CACHE_POLICY)):     # opted into eviction
+            cfg["logdir"] = os.path.join(droot, subdir, ".access")
+        return cfg
 
     @staticmethod
     def _dataset_root(dataset):

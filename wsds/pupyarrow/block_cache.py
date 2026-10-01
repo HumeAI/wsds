@@ -412,10 +412,35 @@ def get_block_cache(root, logdir=None):
 # ------------------------------------------------------------------------------
 # Stage-3: per-worker access logging (off hot path) + eviction/compaction helpers.
 # ------------------------------------------------------------------------------
+ACCESS_EXT = ".arrows"           # append-only Arrow IPC stream, one per worker per cache root
+ACCESS_PREFIX = "access-"
+ACCESS_MERGED = "access-merged"  # compacted snapshots (Feather), never appended to
+_ACCESS_SCHEMA = None
+
+
+def access_schema():
+    """The access-log schema. Built on first use: pyarrow is imported lazily in this module."""
+    global _ACCESS_SCHEMA
+    if _ACCESS_SCHEMA is None:
+        import pyarrow as pa
+
+        _ACCESS_SCHEMA = pa.schema([("object", pa.string()), ("block", pa.int32()),
+                                    ("last_ts", pa.float64()), ("count", pa.int32())])
+    return _ACCESS_SCHEMA
+
+
 class AccessLogger:
-    """Per-worker in-memory access aggregation -> atomic Feather snapshots.
-    (object, block) -> [last_ts, count]; flushed by count/time. No shared state or
-    inter-worker locking; snapshots are temp+rename so the evictor globs complete files."""
+    """Per-worker in-memory access aggregation -> batches APPENDED to one file per worker.
+
+    (object, block) -> [last_ts, count], flushed by count/time. Each flush appends ONE record
+    batch to `<logdir>/access-<worker>.arrows`, and the file is held under an exclusive flock for
+    as long as this worker lives, so a compactor can tell a live log from a finished one
+    (`access_log_files`) and never merges away records still being written.
+
+    A new file per flush is what this replaces: at the 30 s interval that is ~120 files per worker
+    per hour per cache root, and the four datasets had accumulated 37.8M files / 77 GB of them by
+    2026-10-01. Same data, 1/120th the inodes.
+    """
 
     def __init__(self, logdir, worker_id=None, flush_every=50000, flush_secs=30.0):
         self.logdir = logdir
@@ -428,6 +453,9 @@ class AccessLogger:
         self._seq = 0
         self._last_flush = time.time()
         self._n_since = 0
+        self._fh = None                  # holds the flock for this worker's lifetime
+        self._writer = None              # pa.ipc.RecordBatchStreamWriter over _fh
+        self.path = os.path.join(logdir, f"{ACCESS_PREFIX}{self.worker}{ACCESS_EXT}")
 
     def record(self, name, blk):
         now = time.time()
@@ -443,6 +471,30 @@ class AccessLogger:
         if due:
             self.flush()
 
+    def _open(self):
+        """Open this worker's log and take the flock. A name collision (pid reuse after a crash,
+        or two processes resolving to the same worker id) is resolved by suffixing -- never by
+        writing into a file another process holds."""
+        import fcntl
+
+        import pyarrow as pa
+
+        path = self.path
+        for attempt in range(8):
+            fh = open(path, "ab")
+            try:
+                fcntl.flock(fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except OSError:
+                fh.close()
+                path = os.path.join(self.logdir, f"{ACCESS_PREFIX}{self.worker}.{attempt}{ACCESS_EXT}")
+                continue
+            self.path, self._fh = path, fh
+            # A fresh IPC stream per process: a file reopened after a crash just holds two
+            # concatenated streams, which read_access_file walks.
+            self._writer = pa.ipc.new_stream(fh, access_schema())
+            return True
+        return False
+
     def flush(self):
         with self._lock:
             if not self._agg:
@@ -451,10 +503,8 @@ class AccessLogger:
             self._agg = {}
             self._n_since = 0
             self._last_flush = time.time()
-            seq = self._seq
             self._seq += 1
         import pyarrow as pa
-        import pyarrow.feather as feather
 
         objs, blks, ts, cnt = [], [], [], []
         for (name, blk), (last_ts, count) in snap.items():
@@ -462,19 +512,103 @@ class AccessLogger:
             blks.append(blk)
             ts.append(last_ts)
             cnt.append(count)
-        tbl = pa.table(
-            {"object": objs, "block": pa.array(blks, pa.int32()), "last_ts": ts, "count": pa.array(cnt, pa.int32())}
-        )
-        final = os.path.join(self.logdir, f"access-{self.worker}-{seq:06d}.feather")
-        tmp = final + ".tmp"
-        feather.write_feather(tbl, tmp)
-        os.rename(tmp, final)
+        tbl = pa.table({"object": objs, "block": pa.array(blks, pa.int32()),
+                        "last_ts": ts, "count": pa.array(cnt, pa.int32())}, schema=access_schema())
+        with self._lock:
+            if self._writer is None and not self._open():
+                return                       # cannot own a log file: drop it, never block a read
+            try:
+                self._writer.write_batch(tbl.to_batches()[0] if tbl.num_rows else None)
+                self._fh.flush()             # visible to a compactor without an fsync
+            except Exception:
+                pass
 
     def close(self):
         try:
             self.flush()
         except Exception:
             pass
+        with self._lock:
+            w, fh = self._writer, self._fh
+            self._writer = self._fh = None
+        for c in (w, fh):                     # EOS marker, then release the flock
+            try:
+                if c is not None:
+                    c.close()
+            except Exception:
+                pass
+
+
+def read_access_file(path):
+    """Tables in one access log, tolerating a truncated tail (a worker killed mid-batch) and
+    several concatenated streams (a log reopened by a later process). A Feather snapshot -- the
+    compactor's output, or a pre-2026-10 per-flush file -- reads as a single table."""
+    import pyarrow as pa
+    import pyarrow.feather as feather
+
+    if path.endswith(".feather"):
+        try:
+            return [feather.read_table(path)]
+        except Exception:
+            return []
+    out = []
+    try:
+        fh = open(path, "rb")
+    except OSError:
+        return []
+    with fh:
+        while True:
+            pos = fh.tell()
+            try:
+                reader = pa.ipc.open_stream(fh)
+            except Exception:
+                break                                  # no further stream (or a torn header)
+            batches = []
+            try:
+                for b in reader:
+                    batches.append(b)
+            except Exception:
+                pass                                   # truncated tail: keep the whole batches
+            if batches:
+                out.append(pa.Table.from_batches(batches))
+            if fh.tell() <= pos:
+                break
+    return out
+
+
+def access_log_files(logdir, include_active=False):
+    """-> (files, n_active). A log whose flock is held is being appended to RIGHT NOW: it is
+    skipped unless asked for, so a caller that consumes what it merged cannot unlink records a
+    worker still owns."""
+    import fcntl
+
+    try:
+        names = sorted(e.name for e in os.scandir(logdir)
+                       if e.is_file() and e.name.startswith(ACCESS_PREFIX)
+                       and (e.name.endswith(ACCESS_EXT) or e.name.endswith(".feather")))
+    except FileNotFoundError:
+        return [], 0
+    files, active = [], 0
+    for n in names:
+        p = os.path.join(logdir, n)
+        if n.endswith(".feather"):
+            files.append(p)                            # snapshots are never held open
+            continue
+        try:
+            fd = os.open(p, os.O_RDONLY)
+        except OSError:
+            continue
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError:
+            active += 1
+            if include_active:
+                files.append(p)
+            continue
+        finally:
+            os.close(fd)                               # closing releases the probe lock
+        files.append(p)
+    return files, active
 
 
 def _default_worker_id():
