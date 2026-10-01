@@ -60,6 +60,10 @@ class AudioDecoder:
         self._seed_index = None                 # ws_seek_index.SeekIndex or None
         self._seed_added = None
         self._seed_window = 4
+        # mp4 whose container clock lies (ws_seek_index.SampleClock, from the offline index):
+        # seek by PACKET and count samples from it instead of trusting any pts. See
+        # _read_on_sample_clock and SampleClock's docstring.
+        self._sample_clock = None
 
     def _ensure_seed_index(self):
         """Make sure a seed index exists for formats that need one (mp3/mp2/mp1).
@@ -90,6 +94,12 @@ class AudioDecoder:
         chunk = True
         while chunk is not None:
             (chunk,) = self.reader.pop_chunks()
+
+        # An mp4 whose stts disagrees with what the decoder emits: the ONLY faithful read is on
+        # the sample clock, and it needs none of the pts machinery below (seek_adj included -- the
+        # clock already encodes the priming that compensation exists for).
+        if self._sample_clock is not None:
+            return self._read_on_sample_clock(tstart, tend, margin)
 
         # For short seeks and unreliable codecs, read from the start.
         # This avoids seek accuracy issues for tstart < 5s (tiny cost), codec
@@ -220,6 +230,60 @@ class AudioDecoder:
         (<1ms), so the read-from-start fallback is no longer needed. Measured
         once at indexing time and delivered via WSAudioEpisode.set_seek_index."""
         self._pts_offset_samples = round(float(offset_seconds) * self.metadata.sample_rate)
+
+    def set_sample_clock(self, clock):
+        """Attach a ws_seek_index.SampleClock. Applied by WSAudioEpisode._apply_seek_index when
+        the index row carries one (FLAG_STTS_MISMATCH); reads then go through the clock."""
+        self._sample_clock = clock
+
+    def _read_on_sample_clock(self, tstart, tend, margin):
+        """[tstart, tend) with sample n at n/sr, the timeline a full decode from the start
+        produces. Seek to the packet holding the target by that packet's own presentation pts,
+        read back which packet we actually landed on from the first chunk's pts, and count samples
+        from that packet's first sample. No pts is trusted for anything but naming a packet."""
+        import torch
+
+        clk = self._sample_clock
+        sr = self.metadata.sample_rate            # the reader may resample: do the arithmetic at
+        out_sr = self.sample_rate                 # the native rate and convert at the end
+        s0 = round(tstart * sr)
+        s1 = None if tend is None else round(tend * sr)
+        self.reader.seek(clk.seek_target(max(0, s0 - round(margin * sr))), "key")
+        chunks = []
+        landed = None
+        have = 0
+        eof = False
+        empty_pops = 0
+        while True:
+            if not eof and self.reader.fill_buffer() == 1:
+                eof = True
+            (chunk,) = self.reader.pop_chunks()
+            if chunk is None:
+                if eof:
+                    break
+                empty_pops += 1
+                if empty_pops > 65536:
+                    raise ValueError(f"decoder made no progress after {empty_pops} empty pops "
+                                     f"(codec={self.metadata.codec}); wedged stream?")
+                continue
+            empty_pops = 0
+            if landed is None:
+                landed = clk.true_samples(clk.packet_of_pts(chunk.pts))      # native samples
+                if landed > s0:
+                    raise ValueError(f"sample-clock seek landed at {landed} > target {s0} "
+                                     f"(codec={self.metadata.codec})")
+            chunks.append(chunk)
+            have += chunk.shape[0]
+            if s1 is not None and landed + have * sr / out_sr >= s1 + margin * sr:
+                break
+        if not chunks:
+            raise ValueError(f"decoder produced no samples for range [{tstart:.3f}, {tend}] "
+                             f"(codec={self.metadata.codec}, sample-clock path)")
+        samples = torch.cat([getattr(c, "_elem", c) for c in chunks])
+        prefix = round((s0 - landed) * out_sr / sr)
+        if s1 is None:
+            return samples[prefix:].mT
+        return samples[prefix:prefix + round(tend * out_sr) - round(tstart * out_sr)].mT
 
     def set_seed_index(self, index):
         """Store a SeekIndex (see wsds.ws_seek_index) for ON-DEMAND demuxer
