@@ -23,24 +23,27 @@ import os
 
 import pyarrow.feather as feather
 
-from wsds.pupyarrow.block_cache import EXT, SLOT, compact, present_blocks, read_layout
+from wsds.pupyarrow.block_cache import (EXT, SLOT, access_log_files, compact, present_blocks,
+                                        read_access_file, read_layout)
 
 
-def merge_logs(logdir):
-    """-> ({object: {block: last_ts}}, [logfiles])   (most-recent access wins)"""
+def merge_logs(logdir, include_active=False):
+    """-> ({object: {block: last_ts}}, [logfiles])   (most-recent access wins)
+
+    Reads both shapes: the append-only per-worker streams (`access-<worker>.arrows`, one record
+    batch per flush) and Feather snapshots. A log a worker still holds under flock is SKIPPED, so
+    `evict_one(consume_logs=True)` cannot unlink records still being written; those accesses are
+    simply not in this pass."""
     merged = {}
-    files = sorted(glob.glob(os.path.join(logdir, "access-*.feather")))
+    files, _active = access_log_files(logdir, include_active=include_active)
     for f in files:
-        try:
-            t = feather.read_table(f)
-        except Exception:
-            continue
-        for o, b, ts in zip(
-            t.column("object").to_pylist(), t.column("block").to_pylist(), t.column("last_ts").to_pylist()
-        ):
-            d = merged.setdefault(o, {})
-            if ts > d.get(b, -1):
-                d[b] = ts
+        for t in read_access_file(f):
+            for o, b, ts in zip(
+                t.column("object").to_pylist(), t.column("block").to_pylist(), t.column("last_ts").to_pylist()
+            ):
+                d = merged.setdefault(o, {})
+                if ts > d.get(b, -1):
+                    d[b] = ts
     return merged, files
 
 
