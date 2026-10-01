@@ -17,12 +17,11 @@ import numpy as np
 class AudioDecoder:
     """Unified audio decoder that works with humecodec or torchaudio backends."""
 
-    def __init__(self, reader, metadata, sample_rate, codec_delay=0, in_matroska=False):
+    def __init__(self, reader, metadata, sample_rate, in_matroska=False):
         self.reader = reader
         self.metadata = metadata
         self.sample_rate = sample_rate
         self.debug = False
-        self.codec_delay = codec_delay
         self.init_skip_samples = getattr(metadata, 'start_skip_samples', 0) or 0
         # wmav2/wmapro: flush produces unreliable output (wrong skip_samples,
         # wrong frame sizes) — always read from the start and trim.
@@ -186,7 +185,7 @@ class AudioDecoder:
             total_samples = sum(c.shape[0] for c in chunks)
             print(f"    [decode] codec={self.metadata.codec} sr={self.sample_rate} "
                   f"tstart_orig={tstart - seek_adj:.4f} tstart_adj={tstart:.4f} "
-                  f"seek_adj={seek_adj:.6f} (init_skip={self.init_skip_samples} codec_delay={self.codec_delay}) "
+                  f"seek_adj={seek_adj:.6f} (init_skip={self.init_skip_samples}) "
                   f"chunk0.pts={chunks[0].pts:.6f} chunk0_pts_used={chunk0_pts:.6f} "
                   f"n_chunks={len(chunks)} total_samples={total_samples} prefix={prefix}", flush=True)
 
@@ -419,15 +418,7 @@ def create_decoder(src, sample_rate=None):
         decoder_option={"threads": "4", "thread_type": "frame"},
     )
 
-    # Get codec_delay from the decoder (available after add_audio_stream opens the codec)
-    codec_delay = 0
-    try:
-        out_info = reader.get_out_stream_info(0)
-        codec_delay = getattr(out_info, 'codec_delay', 0) or 0
-    except Exception:
-        pass
-
-    return AudioDecoder(reader, metadata, sample_rate, codec_delay=codec_delay, in_matroska=in_matroska)
+    return AudioDecoder(reader, metadata, sample_rate, in_matroska=in_matroska)
 
 
 
