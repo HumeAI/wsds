@@ -113,51 +113,91 @@ def find_moov(buf):
     return 0, 0
 
 
-def mp4_media_timescale(moov):
-    """Media timescale of the first audio track (mdhd), or 0."""
+def audio_trak(moov):
+    """Byte range (start, end) of the moov's first AUDIO trak, or None.
+
+    Every per-track box has to be read inside this range. `moov.find(b"<box>")` finds the first
+    such box in the whole moov, which in a video container (h264 + aac) belongs to the VIDEO
+    track: the audio edit list was read as the video track's media_time 0 instead of 2048,
+    putting every seek two frames (46.44 ms) off.
+
+    >>> ts, mt = 44100, 2048                    # a video container: video trak first, audio second
+    >>> def box(typ, payload): return struct.pack(">I", len(payload) + 8) + typ + payload
+    >>> def mdhd(ts): return box(b"mdhd", b"\\0" * 12 + struct.pack(">I", ts) + b"\\0" * 8)
+    >>> def elst(mt): return box(b"edts", box(b"elst", struct.pack(">IIIi", 0, 1, 1000, mt)))
+    >>> def trak(kind, ts, mt):
+    ...     hdlr = box(b"hdlr", b"\\0" * 8 + kind)
+    ...     return box(b"trak", elst(mt) + box(b"mdia", mdhd(ts) + hdlr))
+    >>> moov = trak(b"vide", 90000, 0) + trak(b"soun", ts, mt)
+    >>> mp4_edit_media_time(moov)               # the AUDIO track's trim, not the video track's 0
+    2048
+    >>> mp4_media_timescale(moov)
+    44100
+    """
     for t, hl, a, b in _boxes(moov, 0, len(moov)):
         if t != b"trak":
             continue
-        ts = None
-        handler = None
         for t2, _, a2, b2 in _boxes(moov, a, b):
             if t2 != b"mdia":
                 continue
             for t3, _, a3, b3 in _boxes(moov, a2, b2):
-                if t3 == b"mdhd":
-                    v = moov[a3]
-                    ts = struct.unpack(">I", moov[a3 + (20 if v == 1 else 12):a3 + (24 if v == 1 else 16)])[0]
-                elif t3 == b"hdlr":
-                    handler = moov[a3 + 8:a3 + 12]
-        if handler == b"soun" and ts:
-            return int(ts)
-    return 0
+                if t3 == b"hdlr" and moov[a3 + 8:a3 + 12] == b"soun":
+                    return (a, b)
+    return None
+
+
+def _trak_box(moov, typ, trak=None):
+    """(start, end) of box `typ` anywhere inside the audio trak, searched depth-first."""
+    rng = trak or audio_trak(moov)
+    if rng is None:
+        return None
+    stack = [rng]
+    while stack:
+        a, b = stack.pop()
+        for t, _, a2, b2 in _boxes(moov, a, b):
+            if t == typ:
+                return (a2, b2)
+            if t in (b"mdia", b"minf", b"stbl", b"edts"):
+                stack.append((a2, b2))
+    return None
+
+
+def mp4_media_timescale(moov):
+    """Media timescale of the first audio track (mdhd), or 0."""
+    box = _trak_box(moov, b"mdhd")
+    if box is None:
+        return 0
+    a = box[0]
+    v = moov[a]
+    return int(struct.unpack(">I", moov[a + (20 if v == 1 else 12):a + (24 if v == 1 else 16)])[0])
 
 
 def mp4_edit_media_time(moov):
-    """media_time of the first edit-list entry (media timescale units), 0 if none/empty.
+    """media_time of the AUDIO track's first edit-list entry (media timescale units), 0 if none.
     A non-zero value is the encoder-delay trim: presentation pts = media pts - media_time/timescale."""
-    i = moov.find(b"elst")
-    if i < 0:
+    box = _trak_box(moov, b"elst")
+    if box is None:
         return 0
     try:
-        ver = moov[i + 4]
-        cnt = struct.unpack(">I", moov[i + 8:i + 12])[0]
+        a = box[0]
+        ver = moov[a]
+        cnt = struct.unpack(">I", moov[a + 4:a + 8])[0]
         if cnt < 1:
             return 0
-        mt = struct.unpack(">Qq", moov[i + 12:i + 28])[1] if ver == 1 else struct.unpack(">Ii", moov[i + 12:i + 20])[1]
+        mt = (struct.unpack(">Qq", moov[a + 8:a + 24])[1] if ver == 1
+              else struct.unpack(">Ii", moov[a + 8:a + 16])[1])
         return max(0, int(mt))
     except Exception:
         return 0
 
 
 def mp4_roll_distance(moov):
-    """`roll` sample-group distance (-1 for ordinary AAC), 0 if absent."""
-    j = moov.find(b"sgpd")
-    if j < 0 or moov[j + 8:j + 12] != b"roll":
+    """The AUDIO track's `roll` sample-group distance (-1 for ordinary AAC), 0 if absent."""
+    box = _trak_box(moov, b"sgpd")
+    if box is None or moov[box[0] + 4:box[0] + 8] != b"roll":
         return 0
     try:
-        return int(struct.unpack(">h", moov[j + 20:j + 22])[0])
+        return int(struct.unpack(">h", moov[box[0] + 16:box[0] + 18])[0])
     except Exception:
         return 0
 
