@@ -53,8 +53,14 @@ PTS_UNIT = 1e-4   # seek_pts / pts_offset are stored as uint32 counts of 100us
 # container type. A row whose probe FAILED is content-misaligned by more than 10 ms when
 # seeking, so consumers must not seek by it: `usable` is False and WSAudioEpisode then
 # decodes such an episode from the start, exactly as if no index existed.
-FLAG_EDIT_SHIFT = 1 << 0   # edit list media_time != 0 -> seek_pts shifted to presentation time
-FLAG_IRREGULAR = 1 << 1    # non-uniform frame grid (>10 distinct sample durations)
+# Structural markers. Neither decides whether a seek is trustworthy any more -- FLAG_STTS_MISMATCH
+# detects the condition both were proxies for, and the sample clock corrects it:
+FLAG_EDIT_SHIFT = 1 << 0   # mp4 edit list media_time != 0 (an encoder-delay trim exists). Where
+                           # the trim actually moves the audio, STTS_MISMATCH fires too and the
+                           # clock encodes it exactly; `edit_media_time` keeps the raw value.
+FLAG_IRREGULAR = 1 << 1    # non-uniform frame grid (>10 distinct sample durations). A WEAK proxy:
+                           # it caught 1 of 3 lying stts tables in a sample, and fires on 9,697
+                           # jazh episodes (0.5%) that read sample-exact. Informational only.
 FLAG_ROLL = 1 << 2         # roll distance < -1: a seek needs several pre-roll frames
 FLAG_PROBE_DONE = 1 << 3   # this row was verified by a decode probe
 FLAG_PROBE_FAILED = 1 << 4 # probe disagreed with the index -> consumers must decode from the start
@@ -129,6 +135,12 @@ class SeekIndex:
         return not (self.flags & FLAG_PROBE_FAILED)
 
     @property
+    def irregular_grid(self) -> bool:
+        """Informational: the frame grid is not uniform. NOT a trust signal -- use `pts_lies`
+        (the condition) and `usable` (the verdict)."""
+        return bool(self.flags & FLAG_IRREGULAR)
+
+    @property
     def pts_lies(self) -> bool:
         """This file's container timestamps do not match the audio (FLAG_STTS_MISMATCH): a pts
         seek lands wrong and `sample_clock` is the only correct way in."""
@@ -195,8 +207,8 @@ def _merge(ranges, gap=65536):
     return [(a, b) for a, b in out]
 
 
-__all__ = ["SeekIndex", "PTS_UNIT", "FLAG_EDIT_SHIFT", "FLAG_IRREGULAR", "FLAG_ROLL",
-           "FLAG_PROBE_DONE", "FLAG_PROBE_FAILED"]
+__all__ = ["SeekIndex", "SampleClock", "PTS_UNIT", "FLAG_EDIT_SHIFT", "FLAG_IRREGULAR", "FLAG_ROLL",
+           "FLAG_PROBE_DONE", "FLAG_PROBE_FAILED", "FLAG_STTS_MISMATCH", "FLAG_SAMPLE_CLOCK_OK"]
 
 
 def _sample_clock(struct_scalar, _opt):
