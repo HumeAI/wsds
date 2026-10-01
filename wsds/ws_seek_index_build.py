@@ -216,7 +216,11 @@ def mp4_roll_distance(moov):
 
 
 def grid_flags(times):
-    """FLAG_IRREGULAR when the frame grid is not uniform (edited/concatenated files)."""
+    """FLAG_IRREGULAR when the frame grid is not uniform (edited/concatenated files).
+
+    Informational only: a non-uniform grid does not by itself make a seek wrong, and a uniform one
+    does not make it right (a 1024-everywhere stts still lies when the decoder trims priming).
+    sample_clock_fields decides the real question by comparing the two clocks packet by packet."""
     if times is None or len(times) < 3:
         return 0
     d = np.diff(times)
