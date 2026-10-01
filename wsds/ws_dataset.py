@@ -286,6 +286,65 @@ class WSDataset:
         )
 
     #
+    # Filters on disk
+    #
+    FILTER_DIR = "filters"
+
+    def filter_path(self, filter_name: str) -> Path:
+        """Where a named filter is stored: `<dataset_root>/filters/<name>.wsfilter`."""
+        from .ws_filter import SUFFIX
+
+        return self.dataset_root / self.FILTER_DIR / f"{filter_name}{SUFFIX}"
+
+    def available_filters(self) -> list[str]:
+        """Names of the filters stored alongside this dataset."""
+        from .ws_filter import SUFFIX
+
+        d = self.dataset_root / self.FILTER_DIR
+        return sorted(p.name[: -len(SUFFIX)] for p in d.glob(f"*{SUFFIX}")) if d.is_dir() else []
+
+    def save_filter(self, filter_name: str, mask=None, path=None, codec: str = "zstd", level: int = 1):
+        """Store a filter next to the dataset, as a compressed bitmap.
+
+        `mask` is one boolean per sample in dataset index order; omit it to save a filter already
+        enabled with `enable_filter`. Recomputing a filter means scanning a column, so it is worth
+        keeping: 281M samples cost 9.4 MB here against 35 MB as a raw bitmap.
+
+        >>> ds.save_filter("has_text", mask)                   # doctest: +SKIP
+        >>> ds.load_filter("has_text")                         # doctest: +SKIP
+        """
+        import numpy as np
+
+        from .ws_filter import save_filter
+
+        if mask is None:
+            if not self._filter_dfs or filter_name not in self._filter_dfs:
+                raise KeyError(f"No filter {filter_name!r} enabled, and no mask given")
+            mask = self._filter_dfs[filter_name].to_series().to_numpy()
+        mask = np.asarray(mask, dtype=bool)
+        if self.index is not None and mask.size != self.index.n_samples:
+            raise ValueError(
+                f"filter has {mask.size:,} entries but the dataset has {self.index.n_samples:,} samples"
+            )
+        return save_filter(path or self.filter_path(filter_name), mask, name=filter_name,
+                           codec=codec, level=level)
+
+    def load_filter(self, filter_name: str, path=None, enable: bool = True):
+        """Read a stored filter and enable it (so it shows up as `sample[filter_name]`).
+
+        Returns the boolean array, which is also what you want for iterating only the samples that
+        pass: `idx = np.flatnonzero(ds.load_filter("has_text"))`."""
+        import polars as pl
+
+        from .ws_filter import load_filter
+
+        n = self.index.n_samples if self.index is not None else None
+        name, mask = load_filter(path or self.filter_path(filter_name), n_samples=n)
+        if enable:
+            self.enable_filter(filter_name, pl.DataFrame({filter_name: mask}))
+        return mask
+
+    #
     # Accessing samples randomly and sequentially
     #
     def random_sample(self):
