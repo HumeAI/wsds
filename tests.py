@@ -6,7 +6,7 @@ import unittest
 from pathlib import Path
 
 import wsds
-from wsds import audio_codec, ws_audio, ws_dataset, ws_shard, ws_sink
+from wsds import audio_codec, ws_audio, ws_dataset, ws_filter, ws_shard, ws_sink
 from wsds.ws_sample import WSSample  # noqa: F401
 
 
@@ -625,6 +625,7 @@ class SeekIndexBuildTest(SeekAccuracyTest):
 def load_tests(loader, tests, ignore):
     tests.addTests(doctest.DocTestSuite(wsds))
     tests.addTests(doctest.DocTestSuite(ws_dataset))
+    tests.addTests(doctest.DocTestSuite(ws_filter, optionflags=doctest.ELLIPSIS))
     tests.addTests(doctest.DocTestSuite(ws_shard))
     tests.addTests(doctest.DocTestSuite(ws_sink))
     tests.addTests(doctest.DocTestSuite(ws_audio))
