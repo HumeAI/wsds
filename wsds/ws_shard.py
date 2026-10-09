@@ -296,6 +296,12 @@ class WSSourceLink(WSShardInterface):
     def get_sample(self, column: str, offset: int, raw: bool = False):
         # Parse the derived dataset's key to get the source file name
         derived_key = WSSample(self.derived_dataset, self.shard_ref, offset)["__key__"]
+        if column == "__key__":
+            # Key verification (WSSample._verify_key_for_field) asks every column dir for its
+            # __key__ and compares them. Answering with the SOURCE key here made every read of a
+            # source-linked field on a segmented dataset fail with a bogus "Key mismatch":
+            # the source has the episode key, its segments have '<episode>_<n>'.
+            return derived_key
         file_name, _segment_offset = self.derived_dataset.parse_key(derived_key)
 
         if self._source_file_name != file_name:
