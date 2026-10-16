@@ -1,11 +1,10 @@
 import contextlib
 import importlib
-import itertools
 import json
 import os
 import random
 import sys
-from collections import OrderedDict, defaultdict
+from collections import defaultdict
 from pathlib import Path
 
 import polars as pl
@@ -24,123 +23,6 @@ from .ws_sample import WSSample
 from .ws_shard import WSShard
 
 
-class _OpenShardCache:
-    """Process-global LRU of open shard handles, keyed by absolute shard path.
-
-    One OrderedDict per WSDataset is no bound at all for a dataset whose partitions link
-    elsewhere: a derived dataset over hundreds of catalog partitions (local20-500k: 646 linked
-    datasets) gets 646 x the cap, and each handle retains its reader's forward + tail read
-    buffers plus, for a WSShard, the current RecordBatch. Keyed by path there is one LRU for the
-    whole process and the hot set is what it should be -- concurrent readers x column dirs --
-    however many datasets the reads are spread over.
-
-    Entries remember their owning dataset so WSDataset.close() drops just its own.
-
-    PINS make the bound structural instead of tuned. A reader that walks one shard for many
-    consecutive samples needs its handles for exactly that visit: see WSDataset.shard_visit,
-    which pins what it opens and releases on exit. A pinned entry is never evicted, and
-    releasing a visit CLOSES its handles immediately, so memory comes back when a loader lane
-    rotates rather than when something else needs the slot. `cap` (WSDS_OPEN_SHARDS, default
-    32) then only bounds the unpinned remainder.
-    """
-
-    def __init__(self, cap):
-        self._d = OrderedDict()          # path -> [shard, owner_id, pin]
-        self.cap = max(2, cap)
-        self.evictions = 0
-        self.pin_overflow = 0            # evictions skipped because every candidate was pinned
-
-    def __len__(self):
-        return len(self._d)
-
-    def n_pinned(self):
-        return sum(1 for e in self._d.values() if e[2] is not None)
-
-    def get(self, path, default=None):
-        e = self._d.get(path)
-        return default if e is None else e[0]
-
-    def claim(self, path, owner_id, pin=None):
-        """A cache HIT by `owner_id`: LRU-touch the entry, make this dataset its owner (so its
-        close() drops what it last used, even if another dataset opened it) and, when the caller
-        is inside a shard_visit, pin it -- a visit must own every handle it reads through, not
-        just the ones it opened itself. Returns the shard, or None if absent."""
-        e = self._d.get(path)
-        if e is None:
-            return None
-        self._d.move_to_end(path)
-        e[1] = owner_id
-        if pin is not None and e[2] is None:
-            e[2] = pin
-        return e[0]
-
-    def touch(self, path):
-        if path in self._d:
-            self._d.move_to_end(path)
-
-    def put(self, path, shard, owner_id, pin=None):
-        e = self._d.get(path)
-        if e is not None and pin is None:
-            pin = e[2]                   # re-opening inside a visit keeps that visit's pin
-        self._d[path] = [shard, owner_id, pin]
-        self._d.move_to_end(path)
-        self._evict(keep=path)
-
-    def _evict(self, keep=None):
-        while len(self._d) > self.cap:
-            # never the entry being handed out right now (`keep`): when everything else is
-            # pinned it would be the only candidate, and closing it before the caller reads it
-            # is a crash, not an eviction.
-            victim = next((p for p, e in self._d.items() if e[2] is None and p != keep), None)
-            if victim is None:           # everything is pinned: exceeding cap beats closing a
-                self.pin_overflow += 1   # handle its reader is using. Means cap < lanes x dirs.
-                return
-            shard = self._d.pop(victim)[0]
-            self.evictions += 1
-            _close_shard(shard)
-
-    def pin(self, path, token):
-        e = self._d.get(path)
-        if e is not None:
-            e[2] = token
-
-    def release_pin(self, token):
-        """End a visit: close and drop the handles it pinned (see shard_visit)."""
-        for path in [p for p, e in self._d.items() if e[2] == token]:
-            shard = self._d.pop(path)[0]
-            _close_shard(shard)
-
-    def pop_owner(self, owner_id):
-        """Close and drop every shard opened by this dataset (its close()/eviction)."""
-        for path in [p for p, e in self._d.items() if e[1] == owner_id]:
-            shard = self._d.pop(path)[0]
-            _close_shard(shard)
-
-    def stats(self):
-        return dict(open=len(self._d), pinned=self.n_pinned(), cap=self.cap,
-                    evictions=self.evictions, pin_overflow=self.pin_overflow)
-
-
-def _close_shard(victim):
-    try:
-        victim.close()
-    except Exception:
-        pass
-
-
-_OPEN_SHARDS = None
-_OWNER_SEQ = itertools.count()      # owner tokens, not id(): a cached _MissingShard / WSS3Shard
-                                    # does not keep its dataset alive, so ids get reused
-
-
-def open_shard_cache():
-    """The process-global open-shard LRU (created on first use so the env is read late)."""
-    global _OPEN_SHARDS
-    if _OPEN_SHARDS is None:
-        _OPEN_SHARDS = _OpenShardCache(int(os.environ.get("WSDS_OPEN_SHARDS", "32")))
-    return _OPEN_SHARDS
-
-
 class _MissingShard:
     """Negative-cache entry for `get_shard`: this shard_ref is known-absent in
     this column dir. Mirrors the `.shard_ref` attribute the cache check uses."""
@@ -151,7 +33,7 @@ class _MissingShard:
         self.shard_ref = shard_ref
         self.fname = fname
 
-    def close(self):                 # so the open-shard LRU / dataset.close() can call it uniformly
+    def close(self):                 # so the shard cache can close entries uniformly
         pass
 
 
@@ -239,20 +121,17 @@ class WSDataset:
 
         self._filter_dfs = None  # mapping of "filter name" -> polars dataframe representing the filter
 
-        # Open-shard cache: a PROCESS-GLOBAL LRU keyed by absolute shard path (see
-        # _OpenShardCache). Keyed by path so concurrent reads of several shards in one column
-        # dir coexist; global so a dataset that links out to hundreds of catalog datasets cannot
-        # multiply the bound. Size it >= active readers x column_dirs via WSDS_OPEN_SHARDS.
-        self._open_shards = open_shard_cache()
-        self._cache_owner = next(_OWNER_SEQ)
-        self._active_visits = {}         # shard_ref -> live visit count (see shard_visit)
+        # Open shards: ONE per column dir (not per partition/column dir), replaced -- and closed --
+        # when a different shard_ref is opened there. That bounds a dataset's handles by its column
+        # dir count however many partitions or shards it has. Linked datasets are bounded the same
+        # way through their proxy shards: replacing (closing) a proxy closes the shards it opened
+        # in its linked dataset, so only the linked datasets currently in use hold handles
+        # (local20-500k links its partitions to 646 catalog datasets, see WSShardInterface.close).
+        # Nothing here is shared between datasets: one WSDataset per thread is thread-safe.
+        self._open_shards = {}  # column_dir -> shard
         # Linked datasets (one per catalog dir a partition link points at): ~5 KB and one sqlite
-        # fd each, ~30 ms to construct, so keeping them all is the right trade for hundreds of
-        # them and this LRU is only a safety valve (WSDS_LINKED_DATASETS) for a catalog with
-        # orders of magnitude more partitions. Evicting one closes its sqlite index and drops
-        # its shards from the global LRU.
-        self._linked_datasets = OrderedDict()
-        self._max_linked = max(2, int(os.environ.get("WSDS_LINKED_DATASETS", "1024")))
+        # fd each, ~30 ms to construct, so keeping them all is the right trade.
+        self._linked_datasets = {}
         self._partition_links = {}
         # column-dirs tuple -> set of shard refs that already passed validate_shards
         self._validated_shards: dict[tuple[str, ...], set] = {}
@@ -261,7 +140,7 @@ class WSDataset:
 
     def close(self):
         """Close all cached shard file handles and linked datasets."""
-        self._open_shards.pop_owner(self._cache_owner)
+        self.close_shards()
         for ds in self._linked_datasets.values():
             ds.close()
         self._linked_datasets.clear()
@@ -372,36 +251,39 @@ class WSDataset:
 
     @contextlib.contextmanager
     def shard_visit(self, shard_ref):
-        """Own this shard's open handles for the duration of the block, then release them.
+        """Close this shard's open handles when the block exits.
 
-        A reader that walks one shard for many consecutive samples (`sequential_from`) hits the
-        same handles over and over, then never comes back. Inside this block every shard opened
-        for `shard_ref` is PINNED: never evicted however much else the process opens, and closed
-        on exit instead of lingering until some later open needs the slot. The resident handle
-        count is then readers x column dirs by construction.
+        A reader that walks one shard for many consecutive samples (`sequential_from`) and then
+        never comes back can free the handles right away instead of when the next shard is opened
+        in the same dir:
 
             with ds.shard_visit(sref):
                 for sample in ds.sequential_from(WSSample(ds, sref, off)):
                     ...
 
-        Re-entrant across concurrent readers: two visits to the same shard_ref refcount, and the
-        handles are released when the last one exits. Outside a visit nothing changes -- handles
-        are cached and evicted LRU exactly as before.
+        Purely a memory hint: a handle closed here is re-opened on the next access.
         """
-        key = (self._cache_owner, shard_ref)
-        self._active_visits[shard_ref] = self._active_visits.get(shard_ref, 0) + 1
         try:
             yield self
         finally:
-            n = self._active_visits.get(shard_ref, 0) - 1
-            if n > 0:
-                self._active_visits[shard_ref] = n
-            else:
-                self._active_visits.pop(shard_ref, None)
-                self._open_shards.release_pin(key)
+            for column_dir in [d for d, s in self._open_shards.items() if s.shard_ref == shard_ref]:
+                self._open_shards.pop(column_dir).close()
 
-    def _visit_token(self, shard_ref):
-        return (self._cache_owner, shard_ref) if shard_ref in self._active_visits else None
+    def close_shards(self):
+        """Close every open shard handle (and, through proxy shards, the linked datasets' handles)."""
+        shards, self._open_shards = self._open_shards, {}
+        for shard in shards.values():
+            shard.close()
+
+    def _cached_shard(self, column_dir, shard_ref):
+        shard = self._open_shards.get(column_dir)
+        return shard if shard is not None and shard.shard_ref == shard_ref else None
+
+    def _cache_shard(self, column_dir, shard):
+        old = self._open_shards.get(column_dir)
+        self._open_shards[column_dir] = shard
+        if old is not None and old is not shard:
+            old.close()
 
     def _shard_n_samples(self, shard_ref: (str, str)) -> int:
         if not self.index:
@@ -791,27 +673,18 @@ class WSDataset:
 
     def get_linked_dataset(self, relative_path):
         linked_root = self.dataset_root / relative_path
-        ds = self._linked_datasets.get(linked_root)
-        if ds is None:
-            ds = self._linked_datasets[linked_root] = WSDataset(linked_root)
-            while len(self._linked_datasets) > self._max_linked:
-                _root, victim = self._linked_datasets.popitem(last=False)   # least-recently-used
-                try:
-                    victim.close()          # closes its sqlite index + drops its shards from the
-                except Exception:           # global LRU; a hot shard is re-opened on next touch
-                    pass
-        else:
-            self._linked_datasets.move_to_end(linked_root)
-        return ds
+        if linked_root not in self._linked_datasets:
+            self._linked_datasets[linked_root] = WSDataset(linked_root)
+        return self._linked_datasets[linked_root]
 
     def get_linked_shard(self, link, shard_ref):
         loader_class = self._get_loader_class(link)
         return loader_class.from_link(link, self, shard_ref)
 
     def get_shard(self, column_dir, shard_ref):
-        shard_path = self.get_shard_path(column_dir, shard_ref)   # unique per shard_ref+column_dir
+        shard_path = self.get_shard_path(column_dir, shard_ref)
 
-        shard = self._open_shards.claim(shard_path, self._cache_owner, self._visit_token(shard_ref))
+        shard = self._cached_shard(column_dir, shard_ref)
         if shard is not None:
             if isinstance(shard, _MissingShard):
                 raise WSShardMissingError(shard.fname)
@@ -829,11 +702,10 @@ class WSDataset:
                 # `__key__` living in every dir, incl. *.in-progress ones)
                 # retries the open -- an ENOENT path-resolution RPC per access
                 # on network filesystems.
-                self._open_shards.put(shard_path, _MissingShard(shard_ref, shard_path),
-                                      self._cache_owner, self._visit_token(shard_ref))
+                self._cache_shard(column_dir, _MissingShard(shard_ref, shard_path))
                 raise
 
-        self._open_shards.put(shard_path, shard, self._cache_owner, self._visit_token(shard_ref))
+        self._cache_shard(column_dir, shard)
         return shard
 
     def get_sample(self, shard_ref, field, offset):
@@ -846,10 +718,8 @@ class WSDataset:
             # *.in-progress dirs sort to the front -- walking it in order opens
             # an extra column dir per shard visit for no reason.
             for column_dir, column in alternatives:
-                path = self.get_shard_path(column_dir, shard_ref)
-                shard = self._open_shards.get(path)
+                shard = self._cached_shard(column_dir, shard_ref)
                 if shard is not None and not isinstance(shard, _MissingShard):
-                    self._open_shards.claim(path, self._cache_owner, self._visit_token(shard_ref))
                     try:
                         return shard.get_sample(column, offset)
                     except (WSShardMissingError, KeyError):
