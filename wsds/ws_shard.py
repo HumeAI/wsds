@@ -23,9 +23,16 @@ class WSShardInterface:
     def close(self):
         """Release whatever this shard owns (reader, fds, decoder). Default: nothing.
 
-        WSDataset.close() and shard eviction call close() on every cached shard, so a shard
-        class must never lack it; a pure proxy (WSSourceLink, WSSourceAudioShard) inherits the
-        no-op, a shard that owns a reader (WSShard, WSS3Shard) overrides it."""
+        WSDataset.close() and shard replacement call close() on every cached shard, so a shard
+        class must never lack it; a shard that owns a reader (WSShard, WSS3Shard) overrides it.
+        A proxy shard owns the handles it opened in its LINKED dataset and closes them (see
+        _close_linked): WSDataset keeps one shard per column dir and closes the one it replaces,
+        so a dataset whose partitions link to 646 catalog datasets holds handles only in the one
+        its current proxy points at."""
+
+    @staticmethod
+    def _close_linked(linked_dataset):
+        linked_dataset.close_shards()
 
     @classmethod
     def get_columns(cls, link: dict, dataset: "WSDataset") -> dict[str, str] | None:
@@ -206,6 +213,9 @@ class WSSourceAudioShard(WSShardInterface):
     _source_sample: WSSample = None
     _source_reader: WSAudioEpisode = None
 
+    def close(self):
+        self._close_linked(self.source_dataset)
+
     @classmethod
     def from_link(cls, link, dataset, shard_ref):
         source_dataset = dataset.get_linked_dataset(link["dataset_dir"])
@@ -270,6 +280,9 @@ class WSSourceLink(WSShardInterface):
     _source_file_name: str = None
     _source_sample: WSSample = None
 
+    def close(self):
+        self._close_linked(self.source_dataset)
+
     @classmethod
     def get_columns(cls, link, dataset):
         """Return all source dataset fields with the configured prefix."""
@@ -330,6 +343,9 @@ class WSKeyedColumnShard(WSShardInterface):
     shard_ref: (str, str)
     linked_dataset: "WSDataset"  # noqa: F821
     derived_dataset: "WSDataset"  # noqa: F821
+
+    def close(self):
+        self._close_linked(self.linked_dataset)
 
     @staticmethod
     def _columns(link):
