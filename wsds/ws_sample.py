@@ -85,7 +85,25 @@ class WSSample:
         return self[field] if field in self else default
 
     def __contains__(self, field):
-        return field in self.overrides or field in self.dataset.fields.keys()
+        if field in self.overrides:
+            return True
+        entries = self.dataset.fields.get(field)
+        if not entries:
+            return False
+        # A field whose column shard does not exist for this sample's shard (a column that only some
+        # partitions have, or one that is still being filled) is absent, not an error: `k in sample`
+        # is False and `sample.get(k)` returns the default. Direct `sample[k]` still raises.
+        for column_dir, _ in entries if isinstance(entries, list) else [entries]:
+            if column_dir in self.dataset.computed_columns:
+                return True
+            try:
+                self.dataset.get_shard(column_dir, self.shard_ref)
+                return True
+            except WSShardMissingError:
+                continue
+            except Exception:
+                return True
+        return False
 
     def __repr_field__(self, field, repr=repr):
         try:
