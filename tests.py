@@ -6,7 +6,7 @@ import unittest
 from pathlib import Path
 
 import wsds
-from wsds import audio_codec, ws_audio, ws_dataset, ws_filter, ws_shard, ws_sink
+from wsds import audio_codec, shardcache, ws_audio, ws_dataset, ws_filter, ws_shard, ws_sink
 from wsds.ws_sample import WSSample  # noqa: F401
 
 
@@ -622,6 +622,247 @@ class SeekIndexBuildTest(SeekAccuracyTest):
     test_mp3 = test_ogg_opus = test_mp4_aac = test_failed_probe_is_not_seeded = None
 
 
+class _FakeCacheNode:
+    """A stand-in for shardcache-server (research-infra): serves the mirrors under `root` with the
+    same replies -- 206 when every block of the range is present, 409 when not, 404 without a mirror."""
+
+    def __init__(self, root):
+        import http.server
+        import threading
+
+        from wsds.shardcache import EXT, SLOT, read_layout
+
+        node = self
+        self.root, self.requests = root, []
+
+        class Handler(http.server.BaseHTTPRequestHandler):
+            protocol_version = "HTTP/1.1"
+
+            def log_message(self, *a):
+                pass
+
+            def _reply(self, status, body=b"", headers=()):
+                self.send_response(status)
+                for k, v in headers:
+                    self.send_header(k, v)
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+            def do_GET(self):
+                node.requests.append((self.path, self.headers.get("Range")))
+                path = os.path.join(node.root, self.path.lstrip("/") + EXT)
+                if not os.path.isfile(path):
+                    return self._reply(404)
+                fd = os.open(path, os.O_RDONLY)
+                try:
+                    size, _nblocks, bitmap = read_layout(fd)
+                    first, last = self.headers["Range"][6:].split("-")
+                    start, end = (max(0, size - int(last)), size - 1) if first == "" else (int(first), min(int(last), size - 1))
+                    missing = [b for b in range(start // SLOT, end // SLOT + 1) if not bitmap[b]]
+                    if missing:
+                        return self._reply(409, headers=[("X-Shardcache-Missing", ",".join(map(str, missing)))])
+                    self._reply(206, os.pread(fd, end - start + 1, start), [("Content-Range", f"bytes {start}-{end}/{size}")])
+                finally:
+                    os.close(fd)
+
+        self.httpd = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        self.port = self.httpd.server_address[1]
+        threading.Thread(target=self.httpd.serve_forever, daemon=True).start()
+
+    def stop(self):
+        self.httpd.shutdown()
+        self.httpd.server_close()
+
+
+class ShardCacheTest(unittest.TestCase):
+    """Mirrors copied from the shared filesystem to a node drive and read back over HTTP."""
+
+    NAME = "ds/part/audio/x.wsds"
+
+    def setUp(self):
+        import numpy as np
+
+        from wsds import shardcache
+
+        self._tmp = tempfile.TemporaryDirectory()
+        self.base = os.path.join(self._tmp.name, "shared")      # the shared filesystem
+        self.drive = os.path.join(self._tmp.name, "node-a")     # node-a's cache drive
+        os.makedirs(self.base)
+        os.makedirs(self.drive)
+        self.blob = np.random.default_rng(0).integers(0, 256, 5 * 128 * 1024 + 12345, dtype=np.uint8).tobytes()
+        self.obj = _FakeObject(self.blob)
+        self.node = _FakeCacheNode(self.drive)
+        self.ring = self._ring()
+        shardcache._down.clear()
+
+    def tearDown(self):
+        self.node.stop()
+        self._tmp.cleanup()
+
+    def _ring(self, **node_extra):
+        from wsds.shardcache import Ring
+
+        return Ring({"base": self.base, "port": self.node.port,
+                     "nodes": [{"host": "node-a", "addr": "127.0.0.1", **node_extra}]})
+
+    def _shared(self):
+        """The reader used before the shard cache: a mirror on the shared filesystem over 'S3'."""
+        from wsds.pupyarrow.file_reader import CachedFileReader
+
+        return CachedFileReader(self.obj.reader, lambda: len(self.blob), self.base, self.NAME)
+
+    def _warm(self, *blocks):
+        """Cache some blocks in the shared mirror, as a training job would have."""
+        from wsds.pupyarrow.block_cache import SLOT, drain_writes
+
+        r = self._shared()
+        for b in blocks:
+            r.read(b * SLOT, 10)
+        drain_writes()
+        r.close()
+        self.obj.reads.clear()
+
+    def _populate(self, ring=None, **kw):
+        from wsds.shardcache import populate, scan
+
+        return populate(ring or self.ring, scan([self.base]), "node-a", self.drive, log=lambda *a: None, **kw)
+
+    def _reader(self, built=None):
+        from wsds.shardcache import ShardCacheReader
+
+        def fallback():
+            if built is not None:
+                built.append(1)
+            return self._shared()
+
+        return ShardCacheReader(self.ring, self.NAME, fallback)
+
+    def test_cached_blocks_come_from_the_node_and_the_rest_falls_back(self):
+        from wsds.pupyarrow.block_cache import SLOT
+
+        self._warm(0, 1, 5)                                   # block 5 is the short last block
+        tot = self._populate()
+        self.assertEqual((tot["mine"], tot["blocks"], tot["failed"]), (1, 3, 0))
+        built = []
+        r = self._reader(built)
+        self.assertEqual(r.read(SLOT - 50, 100), self.blob[SLOT - 50 : SLOT + 50])   # spans blocks 0..1
+        self.assertEqual(r.read_end(-6, 6), self.blob[-6:])
+        self.assertEqual((built, self.obj.reads), ([], []))   # no fallback reader, no 'S3' read
+        self.assertEqual(r.read(3 * SLOT, 10), self.blob[3 * SLOT : 3 * SLOT + 10])  # not cached anywhere
+        self.assertEqual(built, [1])
+        self.assertEqual(len(self.obj.reads), 1)
+        self.assertEqual((r.node_reads, r.fallback_reads), (2, 1))
+        r.close()
+
+    def test_rerunning_populate_tops_the_node_copy_up(self):
+        from wsds.pupyarrow.block_cache import SLOT, drain_writes
+
+        self._warm(0)
+        self._populate()
+        r = self._reader()
+        r.read(2 * SLOT, 10)                                  # a miss: fetched by the shared mirror, persisted there
+        drain_writes()
+        r.close()
+        tot = self._populate()
+        self.assertEqual((tot["copied"], tot["blocks"]), (1, 1))   # only the new block travels
+        built = []
+        r = self._reader(built)
+        self.assertEqual(r.read(2 * SLOT + 5, 20), self.blob[2 * SLOT + 5 : 2 * SLOT + 25])
+        self.assertEqual(built, [])
+        self.assertEqual(self._populate()["blocks"], 0)       # nothing left to do
+        r.close()
+
+    def test_a_dead_node_costs_one_attempt_then_reads_fall_back(self):
+        from wsds import shardcache
+        from wsds.pupyarrow.block_cache import SLOT
+
+        self._warm(0)
+        self._populate()
+        self.node.stop()
+        r = self._reader()
+        self.assertEqual(r.read(0, 10), self.blob[:10])
+        self.assertIn(("127.0.0.1", self.ring.port), shardcache._down)   # left alone for DOWN_SECONDS
+        errors = shardcache.STATS["errors"]
+        self.assertEqual(r.read(SLOT, 10), self.blob[SLOT : SLOT + 10])
+        self.assertEqual(shardcache.STATS["errors"], errors)  # the second read did not try the node
+        r.close()
+        self.node = _FakeCacheNode(self.drive)                # for tearDown
+
+    def test_consume_deletes_the_source_only_where_the_ring_allows(self):
+        from wsds.shardcache import EXT
+
+        src = os.path.join(self.base, self.NAME + EXT)
+        self._warm(0, 1)
+        self._populate(ring=self._ring(keep_source=True), consume=True)
+        self.assertTrue(os.path.exists(src))                  # an untrusted node keeps its shared copy
+        self.assertEqual(self._populate(consume=True)["consumed"], 1)
+        self.assertFalse(os.path.exists(src))
+        r = self._reader()
+        self.assertEqual(r.read(10, 10), self.blob[10:20])    # still served by the node
+        self.assertEqual(self.obj.reads, [])
+        r.close()
+
+    def test_mirrors_owned_by_other_nodes_are_left_alone(self):
+        from wsds.shardcache import Ring
+
+        self._warm(0)
+        ring = Ring({"base": self.base, "nodes": [{"host": "node-a"}, {"host": "node-b"}]})
+        owner = ring.nodes_for(self.NAME)[0]["host"]
+        other = "node-b" if owner == "node-a" else "node-a"
+        from wsds.shardcache import populate, scan
+
+        tot = populate(ring, scan([self.base]), other, self.drive, log=lambda *a: None)
+        self.assertEqual((tot["seen"], tot["mine"], tot["blocks"]), (1, 0, 0))
+        self.assertEqual(os.listdir(self.drive), [])
+
+    def test_a_shard_reached_through_a_symlink_has_one_name(self):
+        os.makedirs(os.path.join(self.base, "ds/part/audio"))
+        os.makedirs(os.path.join(self.base, "other"))
+        os.symlink(os.path.join(self.base, "ds/part"), os.path.join(self.base, "other/part"))
+        self.assertEqual(self.ring.name_for(os.path.join(self.base, "other/part/audio/x.wsds.sparse")), self.NAME)
+        self.assertEqual(self.ring.name_for(os.path.join(self.base, "ds/part/audio/x.wsds")), self.NAME)
+
+    def test_async_reads_use_the_node_then_the_fallback(self):
+        import asyncio
+
+        from wsds.pupyarrow.block_cache import SLOT
+
+        self._warm(0, 1)
+        self._populate()
+        built = []
+        r = self._reader(built)
+
+        async def go():
+            return await asyncio.gather(r.async_read(100, 50), r.async_read(SLOT + 1, 50), r.async_read(4 * SLOT, 50))
+
+        a, b, c = asyncio.run(go())
+        self.assertEqual((a, b), (self.blob[100:150], self.blob[SLOT + 1 : SLOT + 51]))
+        self.assertEqual(c, self.blob[4 * SLOT : 4 * SLOT + 50])
+        self.assertEqual(built, [1])                          # built once, for the uncached block only
+        r.close()
+
+    def test_wrap_is_inert_without_a_ring(self):
+        from unittest import mock
+
+        from wsds import shardcache
+
+        sentinel = object()
+        with mock.patch.dict(os.environ, {}, clear=False):
+            os.environ.pop(shardcache.ENV, None)
+            self.assertIs(shardcache.wrap(os.path.join(self.base, self.NAME), lambda: sentinel), sentinel)
+        bad = os.path.join(self._tmp.name, "missing.json")
+        with mock.patch.dict(os.environ, {shardcache.ENV: bad}):
+            self.assertIs(shardcache.wrap(os.path.join(self.base, self.NAME), lambda: sentinel), sentinel)
+        ring_path = os.path.join(self._tmp.name, "ring.json")
+        with open(ring_path, "w") as f:
+            json.dump(self.ring.cfg, f)
+        with mock.patch.dict(os.environ, {shardcache.ENV: ring_path}):
+            r = shardcache.wrap(os.path.join(self.base, self.NAME), lambda: sentinel)
+            self.assertIsInstance(r, shardcache.ShardCacheReader)
+            self.assertIs(shardcache.wrap("/somewhere/else/x.wsds", lambda: sentinel), sentinel)
+
+
 def load_tests(loader, tests, ignore):
     tests.addTests(doctest.DocTestSuite(wsds))
     tests.addTests(doctest.DocTestSuite(ws_dataset))
@@ -630,6 +871,7 @@ def load_tests(loader, tests, ignore):
     tests.addTests(doctest.DocTestSuite(ws_sink))
     tests.addTests(doctest.DocTestSuite(ws_audio))
     tests.addTests(doctest.DocTestSuite(audio_codec))
+    tests.addTests(doctest.DocTestSuite(shardcache))
     tests.addTests(doctest.DocFileSuite("README.md"))
     return tests
 

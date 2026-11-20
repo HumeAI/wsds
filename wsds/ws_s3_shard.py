@@ -6,6 +6,7 @@ import typing
 from typing import TYPE_CHECKING, Optional, Tuple
 from urllib.parse import urlparse
 
+from . import shardcache
 from .pupyarrow.file_reader import CachedS3FileReader, LocalFileReader, S3FileReader
 from .pupyarrow.pupyarrow import FeatherFile, LazyBinaryArray, LazyStringArray
 from .utils import WSShardMissingError
@@ -188,9 +189,15 @@ class WSS3Shard(WSShardInterface):
             root = self._cache.get("root")
             if root:
                 # tier 2: mirror = the shard's own column path, <partition>/<subdir>/<shard>.wsds.sparse
-                self._reader = CachedS3FileReader(s3_client, bucket, key, root, logdir=self._cache.get("logdir"),
-                                                  name=self._shard_relpath(key, self._cache.get("subdir", "audio"), shard_ref),
-                                                  presigned=presigned)
+                name = self._shard_relpath(key, self._cache.get("subdir", "audio"), shard_ref)
+                logdir = self._cache.get("logdir")
+
+                def mirror_reader():
+                    return CachedS3FileReader(s3_client, bucket, key, root, logdir=logdir, name=name, presigned=presigned)
+
+                # With $WSDS_SHARDCACHE set, the cluster's node-local copies of the mirror are
+                # asked first and this reader only sees what they cannot serve (wsds.shardcache).
+                self._reader = shardcache.wrap(os.path.join(root, name), mirror_reader)
             else:
                 # tier 3: cold S3. S3FileReader uses the client inside coroutines on the IO loop,
                 # where a lazy handle cannot be resolved (see _LazyS3Client): resolve it now.
